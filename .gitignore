@@ -1,0 +1,13 @@
+plugin/Build/
+*.3gx
+*.elf
+dict.bin
+JMdict_e*
+jitendex-yomitan.zip
+tests/test_core
+tools/config.json
+tools/imported.json
+tools/cache/
+tools/dictionaries/
+__pycache__/
+tests/test_wrap

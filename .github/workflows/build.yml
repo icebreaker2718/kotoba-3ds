@@ -1,0 +1,126 @@
+# Builds Kotoba3DS.3gx and dict.bin on GitHub's servers.
+# Every push to main also publishes both files as the "latest" release, so they can be
+# downloaded without a GitHub login.
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CTRPluginFramework + 3gxtool
+        run: bash .github/workflows/install-ctrpf.sh
+
+      - name: Build plugin
+        run: |
+          export PATH="$DEVKITPRO/tools/bin:$PATH"
+          if ! make -C plugin > build.log 2>&1; then
+            cat build.log
+            echo "::error title=plugin build::$(grep -m5 -E 'error|Error' build.log | tr '\n' ' ' | tail -c 1500)"
+            exit 1
+          fi
+          cat build.log
+
+      - name: Symbolize crash addresses
+        if: hashFiles('.github/crash-addresses.txt') != ''
+        continue-on-error: true
+        shell: bash
+        run: |
+          export PATH="$DEVKITPRO/devkitARM/bin:$PATH"
+          ELF=plugin/Kotoba3DS.elf
+          ls -la plugin/*.elf || echo "::warning::no elf"
+          arm-none-eabi-nm -C -n "$ELF" | grep -i ' [tw] ' > syms.txt
+          for a in $(grep -v '^#' .github/crash-addresses.txt); do
+            A=$((a)); best=""
+            while read -r addr typ name; do
+              v=$((16#$addr)); [ $v -le $A ] && best="$name (+$((A - v)))" || break
+            done < syms.txt
+            f=$(arm-none-eabi-addr2line -f -C -e "$ELF" "$a" | head -1)
+            echo "::notice title=$a::$best | addr2line: $f"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kotoba3DS-plugin
+          path: plugin/Kotoba3DS.3gx
+
+  dictionary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Get Jitendex + RADKFILE
+        run: |
+          pip install jamdict jamdict-data pyftpdlib pillow
+          curl -fsSL -o jitendex-yomitan.zip \
+            https://github.com/stephenmk/stephenmk.github.io/releases/latest/download/jitendex-yomitan.zip \
+            || rm -f jitendex-yomitan.zip
+
+      - name: Build dict.bin
+        run: |
+          if [ -s jitendex-yomitan.zip ]; then
+            python tools/build_dict.py --yomitan jitendex-yomitan.zip -o dict.bin
+          else
+            echo "::warning title=Jitendex::download failed, building from the bundled JMdict instead"
+            python tools/build_dict.py -o dict.bin
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kotoba3DS-dict
+          path: dict.bin
+
+      - name: Test the plugin core against it
+        run: make -C tests run DICT=../dict.bin
+
+      - name: Test the screenshot converter (compact upload)
+        run: python tests/test_bmp.py
+
+      - name: Test text-line detection (furigana removal)
+        run: python tests/test_ocrprep.py
+
+      - name: Test the plugin's network code against the OCR server
+        run: python tests/test_ocr.py dict.bin
+
+      - name: Test the Anki card script
+        run: |
+          if [ -s jitendex-yomitan.zip ]; then python tests/test_mine.py jitendex-yomitan.zip
+          else python tests/test_mine.py; fi
+
+  release:
+    # Publishes the two files as a GitHub Release (downloadable without logging in).
+    needs: [plugin, dictionary]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -la out
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest out/Kotoba3DS.3gx out/dict.bin \
+            --target "$GITHUB_SHA" --latest \
+            --title "Kotoba3DS (latest build)" \
+            --notes "Built automatically from ${GITHUB_SHA::7} on $(date -u +%Y-%m-%d).
+
+          1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\` (every game), or \`/luma/plugins/<TitleID>/Kotoba3DS.3gx\` for one game.
+          2. Copy **dict.bin** to \`/3ds/kotoba3ds/dict.bin\`.
+
+          See the README for the PC tools (OCR server, Anki cards)."
