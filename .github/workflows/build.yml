@@ -91,6 +91,9 @@ jobs:
       - name: Test the plugin's network code against the OCR server
         run: python tests/test_ocr.py dict.bin
 
+      - name: Test the audio fallbacks
+        run: python tests/test_audio.py
+
       - name: Test the Anki card script
         run: |
           if [ -s jitendex-yomitan.zip ]; then python tests/test_mine.py jitendex-yomitan.zip

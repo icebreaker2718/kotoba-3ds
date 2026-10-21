@@ -226,15 +226,27 @@ these placeholders: `{expression} {reading} {furigana} {audio} {definition_html}
 `"IsWordAndSentenceCard": "x"` to make every card a word+sentence card.
 
 ### Word audio
-`audio.sources` is tried in order for each word:
-- `"jpod101"`: JapanesePod101's word recordings, the same default source Yomitan uses. Needs
-  internet; words it doesn't have are skipped.
-- A custom URL, such as **Local Audio Server for Yomitan** (an Anki add-on with offline NHK,
-  Forvo and JPod recordings). Put it before jpod101:
-  ```json
-  "sources": [{"name": "local", "url": "http://127.0.0.1:5050/?term={term}&reading={reading}"}, "jpod101"]
-  ```
-  Any URL that returns an audio file, or Yomitan's JSON audio-source list, works.
+`audio.sources` is tried in order for each word, until one has a recording:
+
+```json
+"sources": ["local", "jpod101", "jpod101-alt", "lingualibre", "forvo"],
+"forvo_key": ""
+```
+
+| Source | What it is |
+|---|---|
+| `"local"` | **Local Audio Server for Yomitan** (an Anki add-on with offline NHK, Shinmeikai, Forvo and JPod recordings) at `http://127.0.0.1:5050`. Used when it's running; skipped quietly when it isn't. The best free way to get Forvo audio. |
+| `"jpod101"` | JapanesePod101's word recordings (Yomitan's default). Needs internet. |
+| `"jpod101-alt"` | JapanesePod101's dictionary search, which sometimes has words the first one doesn't. |
+| `"lingualibre"` | Native-speaker recordings from [Lingua Libre](https://lingualibre.org) on Wikimedia Commons. Free; fewer words. |
+| `"forvo"` | [Forvo](https://forvo.com) through its official API. Needs your own key from [api.forvo.com](https://api.forvo.com) (a paid plan) in `forvo_key`; skipped without one. |
+
+Reorder or remove entries to taste. Any other URL works too, using `{term}` and `{reading}`,
+either returning an audio file or Yomitan's JSON audio-source list:
+```json
+{"name": "my server", "url": "http://example.com/audio?term={term}&reading={reading}"}
+```
+Configs from older versions that only had `"jpod101"` get the new list automatically.
 
 ## Files on the SD card
 

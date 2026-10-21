@@ -79,11 +79,14 @@ DEFAULT_CONFIG = {
         "frequency": [],
     },
     "audio": {
-        "_comment": "Tried in order. \"jpod101\" = JapanesePod101 (needs internet). For Local Audio "
-                    "Server for Yomitan add {\"name\": \"local\", \"url\": \"http://127.0.0.1:5050/"
-                    "?term={term}&reading={reading}\"} before it.",
+        "_comment": "Tried in order until one has the word. local = Local Audio Server for Yomitan "
+                    "(skipped when it isn't running), jpod101 / jpod101-alt = JapanesePod101, "
+                    "lingualibre = native-speaker recordings on Wikimedia Commons, forvo = Forvo "
+                    "(needs forvo_key from api.forvo.com). A URL or {\"name\": ..., \"url\": ...} "
+                    "with {term} and {reading} also works.",
         "enabled": True,
-        "sources": ["jpod101"],
+        "sources": ["local", "jpod101", "jpod101-alt", "lingualibre", "forvo"],
+        "forvo_key": "",
     },
     "ocr": {
         "_comment": "engine: manga-ocr or none. crop: [left, top, right, bottom] in top-screen pixels "
@@ -130,6 +133,10 @@ def load_config(path):
         return None
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
+    # older versions only had jpod101: give unchanged configs the newer fallbacks
+    au = cfg.get("audio")
+    if isinstance(au, dict) and au.get("sources") == ["jpod101"]:
+        au["sources"] = list(DEFAULT_CONFIG["audio"]["sources"])
     # fill in keys added in newer versions
     for k, v in DEFAULT_CONFIG.items():
         if isinstance(v, dict):
@@ -345,8 +352,13 @@ class Enricher:
                              ("Frequency", self.freqs)):
             print(f"{label}: " + (", ".join(x.title for x in items) if items else "none"))
         au = self.cfg.get("audio", {})
-        print("Audio: " + (", ".join(s if isinstance(s, str) else s.get("name", s.get("url", "?"))
-                                     for s in au.get("sources", [])) if au.get("enabled") else "off"))
+        names = []
+        for s in au.get("sources", []):
+            n = s if isinstance(s, str) else s.get("name") or s.get("type") or s.get("url", "?")
+            if n == "forvo" and not (au.get("forvo_key") or (isinstance(s, dict) and s.get("key"))):
+                n = "forvo (no key, skipped)"
+            names.append(n)
+        print("Audio: " + (", ".join(names) if au.get("enabled") else "off"))
 
     def definition_html(self, expression, reading, fallback_text):
         for d in self.glossaries:
@@ -384,7 +396,8 @@ class Enricher:
         au = self.cfg.get("audio", {})
         if not au.get("enabled"):
             return None
-        return enrich.fetch_audio(au.get("sources", []), expression, reading, self.log)
+        return enrich.fetch_audio(au.get("sources", []), expression, reading, self.log,
+                                  forvo_key=au.get("forvo_key", ""))
 
 
 def pos_codes_of(definition):

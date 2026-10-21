@@ -8,6 +8,9 @@ SQLite file in tools/cache/ so later runs start instantly.
 """
 import hashlib
 import json
+import urllib.error
+import html
+import socket
 import os
 import re
 import sqlite3
@@ -313,24 +316,154 @@ def custom_audio(template, expression, reading):
     return data, _ext_for(url, ctype)
 
 
-def fetch_audio(sources, expression, reading, log=print):
-    """Tries each source in order -> (bytes, ext, source_name) or None."""
-    for src in sources:
+JPOD_ALT_URL = "https://www.japanesepod101.com/learningcenter/reference/dictionary_post"
+LOCAL_AUDIO_URL = "http://127.0.0.1:5050/?term={term}&reading={reading}"
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+FORVO_API = "https://apifree.forvo.com"
+
+
+def _good_jpod_clip(data, ctype):
+    if not data or len(data) < 1000 or "html" in (ctype or ""):
+        return False
+    return not (hashlib.md5(data).hexdigest() == JPOD_MISSING_MD5
+                or hashlib.sha256(data).hexdigest() == JPOD_MISSING_SHA256)
+
+
+def jpod_alt_audio(expression, reading, url=JPOD_ALT_URL):
+    """JapanesePod101's dictionary search page (Yomitan's "JapanesePod101 (Alternate)"): sometimes
+    has words the plain audio URL doesn't. Picks the result row whose word and reading match."""
+    body = urllib.parse.urlencode({"post": "dictionary_reference", "match_type": "exact",
+                                   "search_query": expression, "vulgar": "true"}).encode()
+    req = urllib.request.Request(url, data=body, headers=dict(_UA, **{
+        "Content-Type": "application/x-www-form-urlencoded"}))
+    with urllib.request.urlopen(req, timeout=12) as r:
+        page = r.read().decode("utf-8", "replace")
+    strip = lambda h: re.sub(r"<[^>]+>|\s+", "", html.unescape(h))
+    for row in page.split('class="dc-result-row"')[1:]:
+        src = re.search(r'<source[^>]*\ssrc="([^"]+)"', row) or re.search(r'<audio[^>]*\ssrc="([^"]+)"', row)
+        if not src:
+            continue
+        kana = re.search(r'class="dc-vocab_kana"[^>]*>(.*?)</', row, re.S)
+        word = re.search(r'class="dc-vocab"[^>]*>(.*?)</', row, re.S)
+        kana = strip(kana.group(1)) if kana else ""
+        word = strip(word.group(1)) if word else ""
+        if reading and kana and kana != reading:
+            continue
+        if word and word != expression and not (kana and expression == kana):
+            continue
+        u = urllib.parse.urljoin(url, html.unescape(src.group(1)))
+        data, ctype = _get(u)
+        if _good_jpod_clip(data, ctype):
+            return data, _ext_for(u, ctype)
+    return None
+
+
+def lingualibre_audio(expression, reading, api=COMMONS_API):
+    """Native-speaker recordings from Lingua Libre on Wikimedia Commons
+    (files named "LL-Q5287 (jpn)-<speaker>-<word>.wav")."""
+    def query(params):
+        params = dict(params, format="json")
+        data, _ = _get(api + "?" + urllib.parse.urlencode(params))
+        return json.loads(data.decode("utf-8"))
+    term = expression
+    esc = re.sub(r'([\\.^$|?*+()\[\]{}/"])', r"\\\1", term)
+    titles = []
+    # a title regex is exact; plain keywords are the fallback if regex search is unavailable
+    for search in (f'intitle:/LL-Q5287 \\(jpn\\)-[^-]+-{esc}\\.wav/', f'"LL-Q5287 (jpn)" {term}'):
         try:
-            if src == "jpod101" or (isinstance(src, dict) and src.get("type") == "jpod101"):
-                base = src.get("url", JPOD_URL) if isinstance(src, dict) else JPOD_URL
-                got = jpod_audio(expression, reading, base)
-                name = "jpod101"
-            elif isinstance(src, dict) and src.get("url"):
-                got = custom_audio(src["url"], expression, reading)
-                name = src.get("name", "custom")
+            found = query({"action": "query", "list": "search", "srnamespace": 6, "srlimit": 20,
+                           "srsearch": search})
+        except ValueError:
+            continue
+        titles = [h["title"] for h in found.get("query", {}).get("search", [])
+                  if h.get("title", "").startswith("File:LL-Q5287 (jpn)-")
+                  and h["title"].endswith(f"-{term}.wav")]
+        if titles:
+            break
+    if titles:
+        info = query({"action": "query", "prop": "imageinfo", "iiprop": "url", "titles": titles[0]})
+        for page in info.get("query", {}).get("pages", {}).values():
+            for ii in page.get("imageinfo", []):
+                if ii.get("url"):
+                    data, ctype = _get(ii["url"])
+                    if data:
+                        return data, _ext_for(ii["url"], ctype)
+    return None
+
+
+def forvo_audio(expression, reading, key, api=FORVO_API):
+    """Forvo's official API (needs your own key from api.forvo.com). Best-rated recording first."""
+    if not key:
+        return None
+    for term in dict.fromkeys(t for t in (expression, reading) if t):
+        url = (f"{api}/key/{urllib.parse.quote(key)}/format/json/action/word-pronunciations/word/"
+               f"{urllib.parse.quote(term)}/language/ja/order/rate-desc/limit/3")
+        data, _ = _get(url)
+        try:
+            items = json.loads(data.decode("utf-8")).get("items", [])
+        except ValueError:
+            raise ValueError("Forvo did not return JSON (check the API key)")
+        for it in items if isinstance(items, list) else []:
+            u = it.get("pathmp3") or it.get("pathogg")
+            if u:
+                d, ctype = _get(u)
+                if d:
+                    return d, _ext_for(u, ctype) if not it.get("pathmp3") else "mp3"
+        if term == expression and _is_kana(expression):
+            break
+    return None
+
+
+# Sources that failed to connect (e.g. Local Audio Server not running) are skipped for the rest
+# of the run instead of being retried for every word.
+_unreachable = set()
+
+
+def _source_name(src):
+    if isinstance(src, str):
+        return src
+    return src.get("name") or src.get("type") or src.get("url") or "?"
+
+
+def fetch_audio(sources, expression, reading, log=print, forvo_key=""):
+    """Tries each source in order -> (bytes, ext, source_name) or None.
+    Sources: "local" (Local Audio Server, skipped if it isn't running), "jpod101",
+    "jpod101-alt", "lingualibre", "forvo" (needs a key), a URL, or {"name":..., "url":...}."""
+    for src in sources:
+        kind = src if isinstance(src, str) else src.get("type", "")
+        url = src.get("url") if isinstance(src, dict) else None
+        name = _source_name(src)
+        if name in _unreachable:
+            continue
+        try:
+            if kind == "jpod101":
+                got = jpod_audio(expression, reading, url or JPOD_URL)
+            elif kind in ("jpod101-alt", "jpod101-alternate"):
+                got = jpod_alt_audio(expression, reading, url or JPOD_ALT_URL)
+            elif kind in ("lingualibre", "lingua-libre"):
+                got = lingualibre_audio(expression, reading, url or COMMONS_API)
+            elif kind == "forvo":
+                key = (src.get("key") if isinstance(src, dict) else "") or forvo_key
+                if not key:
+                    continue
+                got = forvo_audio(expression, reading, key, url or FORVO_API)
+            elif kind in ("local", "local-audio-server"):
+                try:
+                    got = custom_audio(url or LOCAL_AUDIO_URL, expression, reading)
+                except urllib.error.HTTPError:
+                    raise
+                except (urllib.error.URLError, ConnectionError, socket.timeout):
+                    _unreachable.add(name)  # not running: quietly skip it from now on
+                    continue
+            elif url:
+                got = custom_audio(url, expression, reading)
             elif isinstance(src, str) and src.startswith(("http://", "https://")):
                 got = custom_audio(src, expression, reading)
-                name = "custom"
             else:
+                log(f"    unknown audio source {name!r}")
                 continue
         except (OSError, ValueError) as e:
-            log(f"    audio source {src if isinstance(src, str) else src.get('name', src.get('url'))}: {e}")
+            log(f"    audio source {name}: {e}")
             continue
         if got:
             return got[0], got[1], name
