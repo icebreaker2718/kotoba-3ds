@@ -3,6 +3,7 @@
 //   test_lens --https host port roots.pem   one POST to a local TLS server (see test_https.py)
 //   test_lens --live shot.bmp [dict.bin]    the real Google Lens (needs internet)
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -11,6 +12,7 @@
 #include "core/dict.hpp"
 #include "core/https.hpp"
 #include "core/lens.hpp"
+#include "core/local_ocr.hpp"
 #include "core/net.hpp"
 #include "core/search.hpp"
 
@@ -50,6 +52,22 @@ int main(int argc, char **argv) {
                             body, status, err, atoi(argv[3]), pem.c_str());
         printf("ok=%d status=%d body=[%s] error=[%s]\n", ok, status, body.c_str(), err.c_str());
         return ok ? 0 : 2;
+    }
+    if (argc >= 4 && !strcmp(argv[1], "--local")) {  // --local model.vocr shot.bmp: on-device OCR
+        FileReader mf(argv[2]), bmp(argv[3]);
+        LocalOcr ocr;
+        std::string e;
+        if (!ocr.load(mf, e)) { printf("MODEL FAILED: %s\n", e.c_str()); return 3; }
+        unsigned w = 0, h = 0;
+        uint8_t *grey = topScreenGrey(bmp, w, h, e);
+        if (!grey) { printf("BMP FAILED: %s\n", e.c_str()); return 3; }
+        std::vector<LensLine> lines;
+        bool ok = ocr.read(grey, w, h, lines, e);
+        free(grey);
+        if (!ok) { printf("OCR FAILED: %s\n", e.c_str()); return 3; }
+        for (auto &l : lines) printf("LINE: %s\n", l.text.c_str());
+        for (auto &p : lensParagraphs(lines)) printf("PARAGRAPH: %s\n", p.c_str());
+        return 0;
     }
     if (argc >= 3 && !strcmp(argv[1], "--live")) {
         FileReader bmp(argv[2]);

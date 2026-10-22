@@ -13,20 +13,21 @@ TARGET		:= 	Kotoba3DS
 PLGINFO 	:= 	Kotoba3DS.plgInfo
 
 BUILD		:= 	Build
-INCLUDES	:= 	Includes
-SOURCES 	:= 	Sources Sources/core
+INCLUDES	:= 	Includes Includes/vocr
+SOURCES 	:= 	Sources Sources/core Sources/vocr
 
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
 ARCH		:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS		:=	$(ARCH) -Os -mword-relocations \
+COMMON		:=	$(ARCH) -mword-relocations \
 				-fomit-frame-pointer -ffunction-sections -fno-strict-aliasing
 
-CFLAGS		+=	$(INCLUDE) -D__3DS__
+# C = the OCR runtime (Sources/vocr): built for speed. C++ = the plugin: built for size.
+CFLAGS		:=	$(COMMON) -O2 -std=gnu99 -ffp-contract=off $(INCLUDE) -D__3DS__
 
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
+CXXFLAGS	:= $(COMMON) -Os $(INCLUDE) -D__3DS__ -fno-rtti -fno-exceptions -std=gnu++17
 
 ASFLAGS		:=	$(ARCH)
 LDFLAGS		:= -T $(TOPDIR)/3gx.ld $(ARCH) -Os -Wl,--gc-sections,--strip-discarded,--strip-debug

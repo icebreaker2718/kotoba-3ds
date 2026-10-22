@@ -15,3 +15,5 @@ tests/test_lens
 tests/test_net
 tests/bmp_tool
 tests/test_wrap
+tests/libvocr.a
+tests/vocr_*.o

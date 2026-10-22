@@ -85,14 +85,38 @@ jobs:
           name: Kotoba3DS-dict
           path: dict.bin
 
-      - name: Install mbedTLS + a Japanese font (for the HTTPS / Google Lens tests)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libmbedtls-dev fonts-noto-cjk
+      - name: Install mbedTLS + Japanese fonts (for the HTTPS / Lens / on-device OCR tests)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libmbedtls-dev fonts-noto-cjk fonts-misaki
+
+      - name: Get the on-device OCR model (VOCR5 Normal, from bee-san/vita-vn-ocr)
+        run: |
+          mkdir -p ocrpkg/3ds/kotoba3ds/ocr
+          base=https://github.com/bee-san/vita-vn-ocr/releases/download/v0.3.0
+          for f in VOCR5_N_w8.vocr MODEL_CARD_VOCR5_N.md ATTRIBUTION.md; do
+            curl -fsSL --retry 3 -o ocrpkg/3ds/kotoba3ds/ocr/$f $base/$f
+          done
+          test "$(stat -c %s ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr)" = 1185632
+          cat > ocrpkg/3ds/kotoba3ds/ocr/README.txt <<'EOF'
+          On-device OCR model for Kotoba3DS: VOCR5 Normal from https://github.com/bee-san/vita-vn-ocr
+          (release v0.3.0), unchanged. The code is GPL-3.0-or-later; the weights are for
+          NON-COMMERCIAL use only (see ATTRIBUTION.md and MODEL_CARD_VOCR5_N.md).
+          Copy the "3ds" folder to the root of the SD card: the model goes to /3ds/kotoba3ds/ocr/.
+          EOF
+          (cd ocrpkg && zip -qr ../Kotoba3DS-ocr-model.zip 3ds)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kotoba3DS-ocr-model
+          path: Kotoba3DS-ocr-model.zip
 
       - name: Test the plugin core against it
         run: make -C tests run DICT=../dict.bin
 
       - name: Test the HTTPS client (local TLS server)
         run: python tests/test_https.py
+
+      - name: Test on-device OCR on rendered 3DS screens
+        run: python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr
 
       - name: Google Lens live test (real request; a failure here is a warning)
         continue-on-error: true
@@ -134,12 +158,13 @@ jobs:
         run: |
           ls -la out
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest out/Kotoba3DS.3gx out/dict.bin \
+          gh release create latest out/Kotoba3DS.3gx out/dict.bin out/Kotoba3DS-ocr-model.zip \
             --target "$GITHUB_SHA" --latest \
             --title "Kotoba3DS (latest build)" \
             --notes "Built automatically from ${GITHUB_SHA::7} on $(date -u +%Y-%m-%d).
 
           1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\` (every game), or \`/luma/plugins/<TitleID>/Kotoba3DS.3gx\` for one game.
           2. Copy **dict.bin** to \`/3ds/kotoba3ds/dict.bin\`.
+          3. Optional, for reading the screen on the 3DS itself (offline): unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card. The model is [VOCR5 by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only.
 
           See the README for the PC tools (OCR server, Anki cards)."

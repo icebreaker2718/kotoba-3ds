@@ -17,6 +17,7 @@
 #include "core/kana.hpp"
 #include "core/net.hpp"
 #include "core/lens.hpp"
+#include "core/local_ocr.hpp"
 #include "core/wrap.hpp"
 #include "core/search.hpp"
 
@@ -141,14 +142,15 @@ static bool g_cardsEnabled = true;  // send saved words to the PC to become Anki
 static bool g_hotkeyOpens = true;   // the screenshot hotkey also opens the lookup
 static u64 g_pcDownUntil = 0;       // after a failed attempt, don't retry for a while
 static bool g_lensEnabled = true;   // no PC? read the screen with Google Lens (needs internet)
+static bool g_localEnabled = true;  // read the screen on the 3DS itself when a model is installed
 static std::string *g_serverPtr = nullptr;  // "192.168.1.20:7331", empty = find automatically
 #define g_server Leaky(g_serverPtr)
 static const int kOcrPort = 7331;
 
 static void SaveSettings() {
-    WriteWholeFile(kSettingsPath, Utils::Format("hotkey=%d\nocr=%d\ncards=%d\nquick=%d\nlens=%d\nserver=", g_hotkey,
+    WriteWholeFile(kSettingsPath, Utils::Format("hotkey=%d\nocr=%d\ncards=%d\nquick=%d\nlens=%d\nlocal=%d\nserver=", g_hotkey,
                                                 g_ocrEnabled ? 1 : 0, g_cardsEnabled ? 1 : 0, g_hotkeyOpens ? 1 : 0,
-                                                g_lensEnabled ? 1 : 0) +
+                                                g_lensEnabled ? 1 : 0, g_localEnabled ? 1 : 0) +
                                       g_server + "\n");
 }
 
@@ -178,6 +180,8 @@ static void LoadSettings() {
         if (!v.empty()) g_hotkeyOpens = v != "0";
         v = SettingValue(s, "lens");
         if (!v.empty()) g_lensEnabled = v != "0";
+        v = SettingValue(s, "local");
+        if (!v.empty()) g_localEnabled = v != "0";
         g_server = SettingValue(s, "server");
     }
 }
@@ -765,26 +769,110 @@ static bool LensRead(const std::string &shotName, std::vector<std::string> &para
     return kt::lensOcr(jpeg, w, h, rnd, 20000, paragraphs, error);
 }
 
-// Several blocks of text on screen (Lens reads everything): let the player pick the line.
-static bool PickParagraph(const std::vector<std::string> &paragraphs, std::string &out) {
-    if (paragraphs.size() == 1) { out = paragraphs[0]; return true; }
-    std::vector<std::string> labels;
-    for (const std::string &p : paragraphs) {
-        std::vector<std::string> lines = Wrap(p);
-        labels.push_back(lines.empty() ? p : lines[0] + (lines.size() > 1 ? "…" : ""));
-    }
-    if (g_snap.valid) ClearTopPanel();
-    int c = BottomList(labels);
-    if (c < 0) return false;
-    out = paragraphs[c];
-    return true;
+// ---------------------------------------------------------------------------
+// On-device OCR (VOCR, plugin/Sources/vocr): no PC, no internet. Needs a model file on the SD.
+// ---------------------------------------------------------------------------
+static const char *kModelDir = "/3ds/kotoba3ds/ocr/";
+static const char *const kModelNames[] = {"VOCR5_N_w8.vocr", "VOCR5_S_w8.vocr", "VOCR5_L_w8.vocr", "model.vocr"};
+static kt::LocalOcr *g_localOcrPtr = nullptr;
+#define g_localOcr Leaky(g_localOcrPtr)
+static std::string *g_modelNamePtr = nullptr;  // file the loaded model came from
+#define g_modelName Leaky(g_modelNamePtr)
+
+static std::string FindModel() {
+    for (const char *n : kModelNames)
+        if (File::Exists(std::string(kModelDir) + n) == 1) return n;
+    return "";
 }
 
-// OCRs a saved screenshot: on the PC (tools/ocr_server.py) if it can be reached, otherwise with
-// Google Lens when that's on. `chunks` are the word starts to offer.
+static void LocalProgress(unsigned i, unsigned n) {
+    ShowBusy("Reading the screen on the 3DS...", Utils::Format("line %u of %u", i + 1, n));
+}
+
+static void LogOcr(const std::string &line) {  // timings, to see how fast this console is
+    File f;
+    if (File::Open(f, "/3ds/kotoba3ds/ocr_log.txt", File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
+        f.Write(line.c_str(), line.size());
+        f.Write("\n", 1);
+        f.Close();
+    }
+}
+
+static bool LocalRead(const std::string &shotName, std::vector<std::string> &paragraphs, std::string &error) {
+    u64 t0 = osGetTime();
+    if (!g_localOcr.loaded()) {
+        std::string name = FindModel();
+        if (name.empty()) { error = "no OCR model on the SD card (see the README)"; return false; }
+        ShowBusy("Loading the OCR model...", "first time only, " + name);
+        SdReader mf;
+        if (!mf.open(kModelDir + name)) { error = "could not open " + name; return false; }
+        if (!g_localOcr.load(mf, error)) return false;
+        g_modelName = name;
+    }
+    u64 t1 = osGetTime();
+    ShowBusy("Reading the screen on the 3DS...");
+    SdReader bmp;
+    if (!bmp.open(std::string(kShotDir) + "/" + shotName)) { error = "could not open " + shotName; return false; }
+    unsigned w = 0, h = 0;
+    uint8_t *grey = kt::topScreenGrey(bmp, w, h, error);
+    if (!grey) return false;
+    osSetSpeedupEnable(true);  // New 3DS: full CPU speed while reading (ignored where not allowed)
+    std::vector<kt::LensLine> lines;
+    bool ok = g_localOcr.read(grey, w, h, lines, error, LocalProgress);
+    free(grey);
+    u64 t2 = osGetTime();
+    if (ok) paragraphs = kt::lensParagraphs(lines);
+    if (ok && paragraphs.empty()) { ok = false; error = "no text found on the screen"; }
+    LogOcr(Utils::Format("%s: load %lu ms, read %lu ms, %u lines, %s", g_modelName.c_str(),
+                         (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned)lines.size(),
+                         ok ? paragraphs[0].c_str() : error.c_str()));
+    return ok;
+}
+
+// Several blocks of text on screen: let the player pick the line. With `offerOther`, a last item
+// lets them read it again with the PC / Google Lens instead. 1 = picked, 0 = cancelled, 2 = other.
+static int PickParagraph(const std::vector<std::string> &paragraphs, std::string &out, bool offerOther = false) {
+    if (paragraphs.size() == 1 && !offerOther) { out = paragraphs[0]; return 1; }
+    std::vector<std::string> labels;
+    size_t best = 0;
+    for (size_t i = 0; i < paragraphs.size(); i++) {
+        std::vector<std::string> lines = Wrap(paragraphs[i]);
+        labels.push_back(lines.empty() ? paragraphs[i] : lines[0] + (lines.size() > 1 ? "…" : ""));
+        if (paragraphs[i].size() > paragraphs[best].size()) best = i;  // the dialogue is usually the longest
+    }
+    if (offerOther) labels.push_back("[ Wrong? Read it with the PC / Google Lens ]");
+    if (g_snap.valid) ClearTopPanel();
+    int c = BottomList(labels, (int)best);
+    if (c < 0) return 0;
+    if (c >= (int)paragraphs.size()) return 2;
+    out = paragraphs[c];
+    return 1;
+}
+
+// OCRs a saved screenshot: on the 3DS itself when a model is installed (and that's on), else on
+// the PC (tools/ocr_server.py) if it can be reached, else with Google Lens when that's on.
+// `chunks` are the word starts to offer.
 static bool RunOcr(const std::string &shotName, std::string &sentence, std::vector<std::string> &chunks,
                    std::string &error) {
-    if (!kt::netStart(error)) return false;
+    std::string localError;
+    if (g_localEnabled && (g_localOcr.loaded() || !FindModel().empty())) {
+        std::vector<std::string> paragraphs;
+        if (LocalRead(shotName, paragraphs, localError)) {
+            int pick = PickParagraph(paragraphs, sentence, true);
+            if (pick == 0) { error = "cancelled"; return false; }
+            if (pick == 1) {
+                ShowBusy("Finding the words...");
+                chunks = kt::chunkText(g_dict, sentence);
+                return true;
+            }
+            localError = "you chose another reader";
+        }
+    }
+    std::string netError;
+    if (!kt::netStart(netError)) {
+        error = localError.empty() ? netError : "On the 3DS: " + localError + "\nNetwork: " + netError;
+        return false;
+    }
     bool ok = false;
     std::string pcError;
     bool tryPc = !(g_pcDownUntil && osGetTime() < g_pcDownUntil);
@@ -804,19 +892,20 @@ static bool RunOcr(const std::string &shotName, std::string &sentence, std::vect
     } else {
         pcError = "PC not reachable a moment ago";
     }
+    std::string prefix = localError.empty() ? "" : "On the 3DS: " + localError + "\n";
     std::vector<std::string> paragraphs;
     bool viaLens = false;
     if (!ok && g_lensEnabled) {
         if (tryPc) g_pcDownUntil = osGetTime() + 2 * 60 * 1000;  // don't wait for the PC again for a while
         std::string lensError;
         viaLens = LensRead(shotName, paragraphs, lensError);
-        if (!viaLens) error = "PC: " + pcError + "\nGoogle Lens: " + lensError;
+        if (!viaLens) error = prefix + "PC: " + pcError + "\nGoogle Lens: " + lensError;
     } else if (!ok) {
-        error = pcError;
+        error = prefix + (prefix.empty() ? "" : "PC: ") + pcError;
     }
     kt::netStop();  // never leave the network running while the game plays
     if (viaLens) {
-        if (!PickParagraph(paragraphs, sentence)) { error = "cancelled"; return false; }
+        if (PickParagraph(paragraphs, sentence) != 1) { error = "cancelled"; return false; }
         ShowBusy("Finding the words...");
         chunks = kt::chunkText(g_dict, sentence);
         ok = true;
@@ -1029,9 +1118,12 @@ static void ChooseServer(MenuEntry *entry) {
         g_ocrEnabled ? "Turn OCR off (Read screen = typing)" : "Turn OCR on",
         g_cardsEnabled ? "Stop making Anki cards in-game (use mine.py)" : "Make Anki cards in-game when saving",
         g_lensEnabled ? "Turn off Google Lens (when the PC isn't found)" : "Use Google Lens when the PC isn't found",
+        g_localEnabled ? "Turn off reading on the 3DS (offline OCR)" : "Read on the 3DS first (offline OCR)",
     };
+    std::string model = FindModel();
     Keyboard kb("OCR server\nRun tools/ocr_server.py on your PC, on the same Wi-Fi as the 3DS.\n" +
-                    std::string(Color::Gray) + "Now: " + (g_server.empty() ? std::string("not set") : g_server),
+                    std::string(Color::Gray) + "Now: " + (g_server.empty() ? std::string("not set") : g_server) +
+                    "\nOffline OCR model: " + (model.empty() ? std::string("none in /3ds/kotoba3ds/ocr/") : model),
                 opts);
     int c = kb.Open();
     if (c < 0) return;
@@ -1072,8 +1164,10 @@ static void ChooseServer(MenuEntry *entry) {
         g_ocrEnabled = !g_ocrEnabled;
     } else if (c == 4) {
         g_cardsEnabled = !g_cardsEnabled;
-    } else {
+    } else if (c == 5) {
         g_lensEnabled = !g_lensEnabled;
+    } else {
+        g_localEnabled = !g_localEnabled;
     }
     g_pcDownUntil = 0;
     SaveSettings();
@@ -1086,8 +1180,9 @@ static const char *kHelp =
     "   game still visible on top. (Or press Select later and use this menu.)\n"
     "2. Settings and saved words are in this menu (Select).\n"
     "3. 'Read screen': with tools/ocr_server.py running on your PC, the line is\n"
-    "   read for you; pick where the word starts. No PC but internet? Google\n"
-    "   Lens reads it instead. Neither? You can type the word.\n"
+    "   read for you; pick where the word starts. With an OCR model in\n"
+    "   /3ds/kotoba3ds/ocr/ the 3DS reads it by itself, offline. Otherwise\n"
+    "   Google Lens (internet), or type the word.\n"
     "   'Look up word': type it in romaji. Conjugated forms work (tabenakatta).\n"
     "   'Look up by kanji parts': pick the parts of a kanji you can't read.\n"
     "4. Pick a result, read it, choose Yes to save it.\n"

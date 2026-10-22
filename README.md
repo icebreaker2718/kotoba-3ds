@@ -82,6 +82,7 @@ python tools/build_dict.py --jmdict JMdict_e.gz -o dict.bin  # current one from 
 |---|---|
 | `Kotoba3DS.3gx` | `SD:/luma/plugins/default.3gx` (every game), **or** `SD:/luma/plugins/<TitleID>/Kotoba3DS.3gx` for one game |
 | `dict.bin` (~41 MB) | `SD:/3ds/kotoba3ds/dict.bin` |
+| `Kotoba3DS-ocr-model.zip` (optional, offline OCR) | unzip to the root of the SD card: `SD:/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr` |
 
 Then open the Rosalina menu (**L + Down + Select**), set **Plugin loader: [Enabled]**, and
 start a game. After a few seconds the plugin is ready; press **Select** to open it.
@@ -162,9 +163,30 @@ If the PC is off, the server isn't running, or the game won't allow network acce
 screen says why and offers the romaji lookup instead. All the other lookups never need the
 network.
 
-## 3c. No PC? Google Lens
+## 3c. Reading the screen on the 3DS itself (offline)
 
-When the PC can't be found but the 3DS is on the internet (home Wi-Fi, or your phone's
+With the OCR model on the SD card (`Kotoba3DS-ocr-model.zip` from the release, unzipped to the
+root of the SD card), *Read screen* reads the text **on the 3DS**: no PC, no internet.
+
+- It reads the whole top screen, so there's no text box to set up, and a box that moves around
+  is fine. Furigana is dropped. If there are several blocks of text, pick the one you want (the
+  longest is preselected).
+- The list ends with **[ Wrong? Read it with the PC / Google Lens ]** for the odd misread.
+- Expect a few seconds per text box (the first read also loads the model, ~1 MB). Each read's
+  time goes into `SD:/3ds/kotoba3ds/ocr_log.txt`.
+- Turn it off in *Select → OCR server → Turn off reading on the 3DS*; then the PC is tried
+  first again.
+
+The OCR is VOCR from [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), the recognizer
+[Rubi](https://github.com/bee-san/Rubi_for_vita) uses on the PS Vita, trained for game dialogue.
+`VOCR5_S_w8.vocr` (smaller, faster) or `VOCR5_L_w8.vocr` (bigger, a bit more accurate) from its
+[releases](https://github.com/bee-san/vita-vn-ocr/releases) also work: put one in the same
+folder (Normal is used when several are there). The weights are for **non-commercial use only**.
+
+## 3d. No PC? Google Lens
+
+When there's no OCR model on the SD card (or you choose "Wrong?" above), the PC can't be found,
+and the 3DS is on the internet (home Wi-Fi, or your phone's
 hotspot), *Read screen* sends the top screen to **Google Lens** instead:
 
 - The 3DS connects to Google itself over HTTPS. Nothing has to run on your PC.
@@ -325,6 +347,16 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
   (The Pixellizer Group licence) and [Luma3DS](https://github.com/LumaTeam/Luma3DS)'s plugin
   loader.
 - Conjugation handling follows the approach of [Yomitan](https://github.com/yomidevs/yomitan).
+- On-device OCR: the VOCR runtime and VOCR5 models of
+  [bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr) (GPL-3.0-or-later; the model weights
+  are for non-commercial use only, see the `ATTRIBUTION.md` that comes with them), the OCR of
+  [Rubi](https://github.com/bee-san/Rubi_for_vita).
 - Google Lens message layout from Chromium's Lens overlay protos (BSD), as used by
   [owocr](https://github.com/AuroraWright/owocr). HTTPS by [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0);
   JPEG encoding by [stb_image_write](https://github.com/nothings/stb) (public domain).
+
+## Licence
+
+Kotoba3DS is free software under the GNU General Public License v3.0 or later ([LICENSE](LICENSE)),
+because it includes the GPL-licensed VOCR runtime. The dictionaries, the OCR model and the
+third-party code keep their own licences (above).
