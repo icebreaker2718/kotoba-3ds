@@ -8,6 +8,7 @@
 
 #include "core/dict.hpp"  // kt::Reader
 #include "core/lens.hpp"  // kt::LensLine
+#include "core/textbox.hpp"
 
 namespace kt {
 
@@ -26,9 +27,11 @@ public:
     const std::string &modelInfo() const { return info_; }
 
     // grey: w*h bytes (row-major), grey = (77 R + 150 G + 29 B) >> 8 as the model expects.
-    // progress(i, n) is called before each line is recognized (may be null).
+    // Reads the region (rx, ry, rw, rh), the whole image when rw or rh is 0. Line positions are
+    // relative to the whole image. progress(i, n) is called before each line (may be null).
     bool read(const uint8_t *grey, unsigned w, unsigned h, std::vector<LensLine> &lines, std::string &error,
-              void (*progress)(unsigned i, unsigned n) = nullptr);
+              void (*progress)(unsigned i, unsigned n) = nullptr, unsigned rx = 0, unsigned ry = 0,
+              unsigned rw = 0, unsigned rh = 0);
 
 private:
     unsigned char *blob_ = nullptr;   // 16-byte aligned
@@ -43,5 +46,13 @@ private:
 
 // The top 400x240 of a CTRPF screenshot as grey bytes (malloc'd; caller frees with free()).
 uint8_t *topScreenGrey(Reader &bmp, unsigned &w, unsigned &h, std::string &error);
+// R, G, B bytes -> grey bytes as the model expects (malloc'd; nullptr if out of memory).
+uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h);
+
+// Reads the best text box (findTextBoxes) and falls back to the whole screen when it holds no
+// Japanese. Returns the text blocks (lensParagraphs); `usedBox` = index of the box read, -1 = screen.
+bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h, const std::vector<TextBox> &boxes,
+                     std::vector<std::string> &paragraphs, std::string &error,
+                     void (*progress)(unsigned i, unsigned n) = nullptr, int *usedBox = nullptr);
 
 }  // namespace kt

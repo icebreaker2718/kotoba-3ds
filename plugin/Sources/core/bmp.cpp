@@ -116,6 +116,14 @@ static uint8_t *topScreenRGB(Reader &bmp, uint32_t &outW, uint32_t &outH, int sc
     return rgb;
 }
 
+uint8_t *topScreenRGB888(Reader &bmp, unsigned &w, unsigned &h, std::string &error) {
+    uint32_t ww = 0, hh = 0;
+    uint8_t *rgb = topScreenRGB(bmp, ww, hh, 1, error);
+    w = ww;
+    h = hh;
+    return rgb;
+}
+
 static void appendBytes(void *ctx, void *data, int size) { ((std::string *)ctx)->append((const char *)data, size); }
 
 bool topScreenJpeg(Reader &bmp, int scale, int quality, std::string &out, int &width, int &height,

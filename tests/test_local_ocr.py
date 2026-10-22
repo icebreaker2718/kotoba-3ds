@@ -18,9 +18,16 @@ if not noto:
     print("::warning title=On-device OCR test::no Japanese font, skipped")
     sys.exit(0)
 
-def screen(lines, font, size, box, fg, bg, furigana=None, aa=True, scene=(40, 90, 60)):
+def screen(lines, font, size, box, fg, bg, furigana=None, aa=True, scene=(40, 90, 60), busy=False):
     img = Image.new("RGB", (400, 480), scene)
     dr = ImageDraw.Draw(img)
+    if busy:  # cluttered scenery with high-contrast edges everywhere (fools a whole-screen line finder)
+        import random
+        rnd = random.Random(7)
+        for _ in range(500):
+            x, y = rnd.randrange(400), rnd.randrange(240)
+            c = tuple(rnd.randrange(256) for _ in range(3))
+            dr.rectangle((x, y, x + rnd.randrange(3, 25), y + rnd.randrange(2, 12)), fill=c)
     if not aa:
         dr.fontmode = "1"
     for i in range(0, 400, 25):                                   # some scenery
@@ -48,6 +55,9 @@ cases = [
     ("Noto 13px, no anti-aliasing", ["もう何も食べられなかった。"],
      dict(font=noto[0], size=13, box=(30, 170, 370, 205), fg=(0, 0, 0), bg=(255, 255, 255), aa=False)),
 ]
+cases.append(("busy scene, cream box with furigana (like Mario & Luigi)", ["ツアー参加者は早く", "時計台前に行ってください！"],
+              dict(font=noto[0], size=16, box=(80, 15, 330, 100), fg=(30, 30, 30), bg=(250, 250, 222),
+                   furigana=("さんかしゃ", "ツアー"), busy=True)))
 if misaki:
     cases.append(("Misaki pixel font at 16px", ["ルイージ、はやく来てくれ！", "城の中に入るぞ。"],
                   dict(font=misaki[0], size=16, box=(10, 160, 390, 230), fg=(255, 255, 255), bg=(20, 20, 20), aa=False)))

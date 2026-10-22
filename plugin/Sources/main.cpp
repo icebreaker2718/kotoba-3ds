@@ -20,6 +20,7 @@
 #include "core/net.hpp"
 #include "core/lens.hpp"
 #include "core/local_ocr.hpp"
+#include "core/textbox.hpp"
 #include "core/wrap.hpp"
 #include "core/search.hpp"
 
@@ -810,33 +811,37 @@ static void LogOcr(const std::string &line) {  // timings, to see how fast this 
 
 static bool LocalRead(const std::string &shotName, std::vector<std::string> &paragraphs, std::string &error) {
     u64 t0 = osGetTime();
-    if (!g_localOcr.loaded()) {
-        std::string name = FindModel();
-        if (name.empty()) { error = "no OCR model on the SD card (see the README)"; return false; }
-        ShowBusy("Loading the OCR model...", "first time only, " + name);
-        SdReader mf;
-        if (!mf.open(kModelDir + name)) { error = "could not open " + name; return false; }
-        if (!g_localOcr.load(mf, error)) return false;
-        g_modelName = name;
-    }
-    u64 t1 = osGetTime();
+    std::string name = FindModel();
+    if (name.empty()) { error = "no OCR model on the SD card (see the README)"; return false; }
     ShowBusy("Reading the screen on the 3DS...");
+    // 1. the picture: find the text box (by its colour), then grey for the OCR
     SdReader bmp;
     if (!bmp.open(std::string(kShotDir) + "/" + shotName)) { error = "could not open " + shotName; return false; }
     unsigned w = 0, h = 0;
-    uint8_t *grey = kt::topScreenGrey(bmp, w, h, error);
-    if (!grey) return false;
-    osSetSpeedupEnable(true);  // New 3DS: full CPU speed while reading (ignored where not allowed)
-    std::vector<kt::LensLine> lines;
-    bool ok = g_localOcr.read(grey, w, h, lines, error, LocalProgress);
-    free(grey);
+    uint8_t *rgb = kt::topScreenRGB888(bmp, w, h, error);
+    if (!rgb) return false;
+    std::vector<kt::TextBox> boxes = kt::findTextBoxes(rgb, w, h);
+    uint8_t *grey = kt::greyFromRGB(rgb, w, h);
+    free(rgb);
+    if (!grey) { error = "not enough memory for the picture"; return false; }
+    // 2. the model (loaded for this read only: it needs ~1.4 MB of the plugin's memory)
+    u64 t1 = osGetTime();
+    ShowBusy("Reading the screen on the 3DS...", "loading " + name);
+    SdReader mf;
+    if (!mf.open(kModelDir + name)) { free(grey); error = "could not open " + name; return false; }
+    if (!g_localOcr.load(mf, error)) { free(grey); return false; }
+    g_modelName = name;
+    // 3. read the box (or the whole screen)
     u64 t2 = osGetTime();
-    if (ok) paragraphs = kt::lensParagraphs(lines);
-    if (ok && paragraphs.empty()) { ok = false; error = "no text found on the screen"; }
+    osSetSpeedupEnable(true);  // New 3DS: full CPU speed while reading (ignored where not allowed)
+    int used = -1;
+    bool ok = kt::localReadScreen(g_localOcr, grey, w, h, boxes, paragraphs, error, LocalProgress, &used);
+    free(grey);
+    u64 t3 = osGetTime();
     struct mallinfo mi = mallinfo();
-    LogOcr(Utils::Format("%s: load %lu ms, read %lu ms, %u lines, heap free %lu KB, %s", g_modelName.c_str(),
-                         (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned)lines.size(),
-                         (unsigned long)(mi.fordblks / 1024),
+    LogOcr(Utils::Format("%s: box %lu ms, load %lu ms, read %lu ms (%s), heap free %lu KB, %s", name.c_str(),
+                         (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned long)(t3 - t2),
+                         used >= 0 ? "text box" : "whole screen", (unsigned long)(mi.fordblks / 1024),
                          ok ? paragraphs[0].c_str() : error.c_str()));
     return ok;
 }

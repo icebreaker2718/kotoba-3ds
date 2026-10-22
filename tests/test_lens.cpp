@@ -55,24 +55,29 @@ int main(int argc, char **argv) {
     }
     if (argc >= 4 && !strcmp(argv[1], "--local")) {  // --local model.vocr shot.bmp: on-device OCR
         FileReader mf(argv[2]), bmp(argv[3]);
-        LocalOcr ocr;
         std::string e;
-        if (!ocr.load(mf, e)) { printf("MODEL FAILED: %s\n", e.c_str()); return 3; }
         unsigned w = 0, h = 0;
-        uint8_t *grey = topScreenGrey(bmp, w, h, e);
-        if (!grey) { printf("BMP FAILED: %s\n", e.c_str()); return 3; }
-        std::vector<LensLine> lines;
-        bool ok = ocr.read(grey, w, h, lines, e);
+        uint8_t *rgb = topScreenRGB888(bmp, w, h, e);
+        if (!rgb) { printf("BMP FAILED: %s\n", e.c_str()); return 3; }
+        std::vector<TextBox> boxes = findTextBoxes(rgb, w, h);
+        uint8_t *grey = greyFromRGB(rgb, w, h);
+        free(rgb);
+        for (auto &b : boxes) printf("BOX: %u,%u %ux%u colour %u,%u,%u score %.0f\n", b.x, b.y, b.w, b.h, b.r, b.g, b.b, b.score);
+        LocalOcr ocr;
+        if (!ocr.load(mf, e)) { printf("MODEL FAILED: %s\n", e.c_str()); return 3; }
+        std::vector<std::string> paras;
+        int used = -1;
+        bool ok = localReadScreen(ocr, grey, w, h, boxes, paras, e, nullptr, &used);
         // the plugin frees the model after every read and loads it again next time
         ocr.unload();
-        std::vector<LensLine> again;
+        std::vector<std::string> again;
         FileReader mf2(argv[2]);
-        bool ok2 = !ocr.loaded() && ocr.load(mf2, e) && ocr.read(grey, w, h, again, e);
+        bool ok2 = !ocr.loaded() && ocr.load(mf2, e) && localReadScreen(ocr, grey, w, h, boxes, again, e);
         free(grey);
-        if (ok && (!ok2 || again.size() != lines.size())) { printf("RELOAD FAILED: %s\n", e.c_str()); return 3; }
         if (!ok) { printf("OCR FAILED: %s\n", e.c_str()); return 3; }
-        for (auto &l : lines) printf("LINE: %s\n", l.text.c_str());
-        for (auto &p : lensParagraphs(lines)) printf("PARAGRAPH: %s\n", p.c_str());
+        if (!ok2 || again != paras) { printf("RELOAD FAILED: %s\n", e.c_str()); return 3; }
+        printf("READ: %s\n", used >= 0 ? "text box" : "whole screen");
+        for (auto &p : paras) printf("PARAGRAPH: %s\n", p.c_str());
         return 0;
     }
     if (argc >= 3 && !strcmp(argv[1], "--live")) {

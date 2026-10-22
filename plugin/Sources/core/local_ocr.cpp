@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "core/kana.hpp"
 #include "vocr.h"
 #include "vocr_lines.h"
 #include "vocr_lines_refine.h"
@@ -100,16 +101,17 @@ static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsign
 }
 
 bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<LensLine> &lines, std::string &error,
-                    void (*progress)(unsigned, unsigned)) {
+                    void (*progress)(unsigned, unsigned), unsigned rx, unsigned ry, unsigned rw, unsigned rh) {
     lines.clear();
     if (!blob_) { error = "no OCR model loaded"; return false; }
+    if (!rw || !rh || rx + rw > w || ry + rh > h) { rx = ry = 0; rw = w; rh = h; }
     VocrLinesImage im;
-    im.pixels = grey;
-    im.width = w;
-    im.height = h;
+    im.pixels = grey + (size_t)ry * w + rx;
+    im.width = rw;
+    im.height = rh;
     im.stride = w;
     im.bpp = VOCR_LINES_GREY;
-    size_t la = vocr_lines_arena_bytes(w, h);
+    size_t la = vocr_lines_arena_bytes(rw, rh);
     void *larena = malloc(la);
     if (!larena) { error = "not enough memory for the OCR"; return false; }
     VocrLineSet set;
@@ -134,7 +136,9 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Len
     const vocr_model *m = (const vocr_model *)model_;
     for (size_t k = 0; k < todo.size(); k++) {
         if (progress) progress((unsigned)k, (unsigned)todo.size());
-        const VocrLine &L = set.lines[todo[k]];
+        VocrLine L = set.lines[todo[k]];
+        L.x += rx;  // region -> whole image
+        L.y += ry;
         std::string text;
         r = runLine(c, m, grey, w, L, text);
 #ifndef __3DS__
@@ -153,6 +157,14 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Len
     }
     if (lines.empty()) { error = "no text found on the screen"; return false; }
     return true;
+}
+
+uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
+    uint8_t *grey = (uint8_t *)malloc((size_t)w * h);
+    if (!grey) return nullptr;
+    for (size_t i = 0; i < (size_t)w * h; i++)
+        grey[i] = (uint8_t)((77u * rgb[i * 3] + 150u * rgb[i * 3 + 1] + 29u * rgb[i * 3 + 2]) >> 8);
+    return grey;
 }
 
 uint8_t *topScreenGrey(Reader &bmp, unsigned &outW, unsigned &outH, std::string &error) {
@@ -197,6 +209,41 @@ uint8_t *topScreenGrey(Reader &bmp, unsigned &outW, unsigned &outH, std::string 
     }
     free(row);
     return grey;
+}
+
+static unsigned japaneseChars(const std::vector<std::string> &paragraphs) {
+    unsigned n = 0;
+    for (const std::string &p : paragraphs)
+        for (size_t i = 0; i < p.size();) {
+            uint32_t cp = utf8Next(p, i);
+            if ((cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0x3400 && cp <= 0x9FFF)) n++;
+        }
+    return n;
+}
+
+bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h, const std::vector<TextBox> &boxes,
+                     std::vector<std::string> &paragraphs, std::string &error,
+                     void (*progress)(unsigned, unsigned), int *usedBox) {
+    paragraphs.clear();
+    if (usedBox) *usedBox = -1;
+    std::vector<LensLine> lines;
+    for (size_t bi = 0; bi < boxes.size() && bi < 2; bi++) {  // the best two boxes, then the whole screen
+        const TextBox &b = boxes[bi];
+        unsigned x0 = b.x > 2 ? b.x - 2 : 0, y0 = b.y > 2 ? b.y - 2 : 0;
+        unsigned x1 = b.x + b.w + 2 < w ? b.x + b.w + 2 : w, y1 = b.y + b.h + 2 < h ? b.y + b.h + 2 : h;
+        std::string e;
+        if (ocr.read(grey, w, h, lines, e, progress, x0, y0, x1 - x0, y1 - y0)) {
+            paragraphs = lensParagraphs(lines);
+            if (japaneseChars(paragraphs) >= 2) {
+                if (usedBox) *usedBox = (int)bi;
+                return true;
+            }
+        }
+    }
+    if (!ocr.read(grey, w, h, lines, error, progress)) return false;  // the whole screen
+    paragraphs = lensParagraphs(lines);
+    if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
+    return true;
 }
 
 }  // namespace kt
