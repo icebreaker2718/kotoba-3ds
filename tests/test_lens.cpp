@@ -99,6 +99,21 @@ int main(int argc, char **argv) {
     std::string empty;
     check(!lensParse(empty, lines, err), "empty reply rejected");
 
+    {   // Lens splitting a 2-line text box into 2 paragraphs; a menu elsewhere stays separate
+        auto L = [](const char *t, int p, float cx, float cy, float w, float h) {
+            LensLine l; l.text = t; l.paragraph = p; l.centerX = cx; l.centerY = cy; l.width = w; l.height = h; return l;
+        };
+        std::vector<LensLine> ls = {L("メニュー", 0, 0.10f, 0.05f, 0.15f, 0.05f),
+                                    L("ゆめせかい", 1, 0.25f, 0.66f, 0.12f, 0.02f),
+                                    L("また夢世界へ行く時は", 2, 0.36f, 0.72f, 0.60f, 0.07f),
+                                    L("声をかけるんじゃぞ!", 3, 0.35f, 0.83f, 0.58f, 0.07f),
+                                    L("はい", 4, 0.85f, 0.95f, 0.08f, 0.07f)};
+        std::vector<std::string> ps = lensParagraphs(ls);
+        check(ps.size() == 3 && ps[1] == "また夢世界へ行く時は声をかけるんじゃぞ!",
+              "lines of one text box merged" + (ps.size() > 1 ? ": " + ps[1] : std::string()));
+        check(ps.size() == 3 && ps[0] == "メニュー" && ps[2] == "はい", "menu and a far-off choice stay separate");
+    }
+
     std::string chunked;
     check(dechunk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", chunked) && chunked == "hello world", "chunked body");
     check(!dechunk("5\r\nhel", chunked), "cut-off chunked body rejected");

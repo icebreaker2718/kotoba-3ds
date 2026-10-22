@@ -36,7 +36,8 @@ r = subprocess.run(args, capture_output=True, text=True, timeout=120)
 print(r.stdout + r.stderr)
 paras = [l[len("PARAGRAPH: "):] for l in r.stdout.splitlines() if l.startswith("PARAGRAPH: ")]
 want = "また夢世界へ行く時は声をかけるんじゃぞ"
-good = any(want in p.replace(" ", "") for p in paras)
+norm = lambda t: t.replace(" ", "").replace("!", "！")
+good = any(want in norm(p) for p in paras)
 no_furigana = not any(p.strip() == "ゆめせかい" for p in paras)
 summary = " / ".join(paras)[:300] or (r.stdout.strip().splitlines() or ["no output"])[-1]
 if r.returncode == 0 and good:

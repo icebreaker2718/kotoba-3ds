@@ -133,7 +133,9 @@ static void readBox(const char *p, size_t n, LensLine &line) {  // Geometry { 1:
     Field f;
     while (r.next(f)) {
         if (f.wire != 5) continue;
+        if (f.number == 1) line.centerX = asFloat(f.value);
         if (f.number == 2) line.centerY = asFloat(f.value);
+        if (f.number == 3) line.width = asFloat(f.value);
         if (f.number == 4) line.height = asFloat(f.value);
     }
 }
@@ -208,14 +210,25 @@ std::vector<std::string> lensParagraphs(const std::vector<LensLine> &lines) {
     }
     std::vector<std::string> out;
     int current = -1;
+    const LensLine *prev = nullptr;
     for (const LensLine &l : lines) {
         bool furigana = typical > 0 && l.height > 0 && l.height < typical * 0.7f && kanaOnly(l.text) &&
                         utf8Length(l.text) <= 10;
         if (furigana) continue;
         if (l.paragraph != current || out.empty()) {
-            out.push_back("");
+            // a new Lens paragraph that is really the next line of the same text box?
+            bool continues = false;
+            if (prev && prev->height > 0 && l.height > 0) {
+                float ratio = l.height / prev->height;
+                float gap = l.centerY - prev->centerY;            // one line further down
+                float leftPrev = prev->centerX - prev->width / 2, left = l.centerX - l.width / 2;
+                continues = ratio > 0.8f && ratio < 1.25f && gap > 0.5f * prev->height &&
+                            gap < 2.0f * prev->height && (left - leftPrev) < 0.06f && (leftPrev - left) < 0.06f;
+            }
+            if (!continues || out.empty()) out.push_back("");
             current = l.paragraph;
         }
+        prev = &l;
         std::string &p = out.back();
         // English lines get a space between them, Japanese ones don't
         if (!p.empty() && (unsigned char)p.back() < 0x80 && (unsigned char)l.text[0] < 0x80) p += ' ';

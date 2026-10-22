@@ -21,6 +21,7 @@ struct LensLine {
     std::string text;
     float height = 0;   // line box height (normalized 0..1)
     float centerY = 0;
+    float centerX = 0, width = 0;
     int paragraph = 0;
 };
 
@@ -28,7 +29,9 @@ struct LensLine {
 bool lensParse(const std::string &reply, std::vector<LensLine> &lines, std::string &error);
 
 // One string per paragraph, furigana dropped (kana-only lines much shorter than the text
-// around them), lines of a paragraph joined. Empty paragraphs removed.
+// around them), lines of a paragraph joined. Lens often returns each line of a text box as its
+// own paragraph: paragraphs that continue straight below the previous one (same text size,
+// same left edge) are merged. Empty paragraphs removed.
 std::vector<std::string> lensParagraphs(const std::vector<LensLine> &lines);
 
 }  // namespace kt
