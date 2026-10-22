@@ -12,3 +12,6 @@ tools/dictionaries/
 __pycache__/
 tests/test_wrap
 tests/test_lens
+tests/test_net
+tests/bmp_tool
+tests/test_wrap
