@@ -18,12 +18,24 @@ void *LocalOcr::alignedAlloc(size_t bytes) {  // 16-byte aligned; freed by the d
     return (void *)p;
 }
 
-LocalOcr::~LocalOcr() {
+void LocalOcr::unload() {
     for (void *p : raw_) free(p);
+    std::vector<void *>().swap(raw_);
+    blob_ = arena_ = nullptr;
+    model_ = ctx_ = nullptr;
+    info_.clear();
 }
+
+LocalOcr::~LocalOcr() { unload(); }
 
 bool LocalOcr::load(Reader &file, std::string &error) {
     if (blob_) return true;
+    bool ok = loadInner(file, error);
+    if (!ok) unload();  // give back anything allocated before the failure
+    return ok;
+}
+
+bool LocalOcr::loadInner(Reader &file, std::string &error) {
     uint32_t n = file.size();
     if (n < 64 || n > 8 * 1024 * 1024) { error = "the OCR model file looks wrong"; return false; }
     unsigned char *blob = (unsigned char *)alignedAlloc(n);

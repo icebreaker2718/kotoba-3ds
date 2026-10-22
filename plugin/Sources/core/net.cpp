@@ -21,7 +21,7 @@
 namespace kt {
 
 #ifdef __3DS__
-static u32 *g_socBuf = nullptr;  // allocated once, never freed (see main.cpp: no frees at exit)
+static u32 *g_socBuf = nullptr;  // allocated by netStart, freed by netStop (never at exit)
 static bool g_socUp = false;
 static const u32 kSocBufSize = 0x80000;
 static int closeSock(int s) { return closesocket(s); }
@@ -44,6 +44,8 @@ bool netStart(std::string &error) {
         else
             snprintf(buf, sizeof(buf), "network unavailable in this game (socInit %08lX)", (unsigned long)r);
         error = buf;
+        free(g_socBuf);
+        g_socBuf = nullptr;
         return false;
     }
     g_socUp = true;
@@ -58,6 +60,9 @@ void netStop() {
     if (g_socUp) {
         socExit();
         g_socUp = false;
+        // give the 512 KB back: CTRPF's screenshots need room in the plugin's memory
+        free(g_socBuf);
+        g_socBuf = nullptr;
     }
 #endif
 }

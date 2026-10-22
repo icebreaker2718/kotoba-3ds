@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include <malloc.h>
+
 #include "core/dict.hpp"
 #include "core/bmp.hpp"
 #include "core/kana.hpp"
@@ -218,9 +220,14 @@ static void InitShotCounter() {
     g_shotsTaken = 0;
 }
 
+// Set while a lookup is open. A screenshot then would need ~0.6 MB of plugin memory at a moment
+// the OCR may be using it, and CTRPF's screenshot task crashes when it can't get it.
+static volatile bool g_lookupOpen = false;
+
 static bool OnScreenshot() {
     // The engine fires while the hotkey is *held*: refuse a second shot within 1.5 s, so one
     // press = one screenshot. (Returning false cancels it.) No allocation here (see above).
+    if (g_lookupOpen) return false;
     u64 now = osGetTime();
     if (g_shotsTaken > 0 && now - g_lastShotTime < 1500) return false;
     g_lastShotTime = now;
@@ -323,6 +330,9 @@ static void TakeTopSnapshot() {  // call while the game is paused and nothing is
             memcpy(&g_snap.px[(y * 400 + x) * g_snap.bpp], top.GetFramebuffer(x, y), g_snap.bpp);
     g_snap.valid = true;
 }
+
+// Gives back what a lookup used (top-screen copy, OCR model), so the next screenshot has room.
+static void ReleaseLookupMemory();
 
 static inline void Darken(u8 *d, const u8 *s, u32 bpp, GSPFormat fmt) {
     if (bpp >= 3) {  // 8 bits per channel: keep ~37%
@@ -823,10 +833,18 @@ static bool LocalRead(const std::string &shotName, std::vector<std::string> &par
     u64 t2 = osGetTime();
     if (ok) paragraphs = kt::lensParagraphs(lines);
     if (ok && paragraphs.empty()) { ok = false; error = "no text found on the screen"; }
-    LogOcr(Utils::Format("%s: load %lu ms, read %lu ms, %u lines, %s", g_modelName.c_str(),
+    struct mallinfo mi = mallinfo();
+    LogOcr(Utils::Format("%s: load %lu ms, read %lu ms, %u lines, heap free %lu KB, %s", g_modelName.c_str(),
                          (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned)lines.size(),
+                         (unsigned long)(mi.fordblks / 1024),
                          ok ? paragraphs[0].c_str() : error.c_str()));
     return ok;
+}
+
+static void ReleaseLookupMemory() {
+    g_snap.valid = false;
+    std::vector<u8>().swap(g_snap.px);
+    if (g_localOcrPtr) g_localOcr.unload();
 }
 
 // Several blocks of text on screen: let the player pick the line. With `offerOther`, a last item
@@ -857,7 +875,9 @@ static bool RunOcr(const std::string &shotName, std::string &sentence, std::vect
     std::string localError;
     if (g_localEnabled && (g_localOcr.loaded() || !FindModel().empty())) {
         std::vector<std::string> paragraphs;
-        if (LocalRead(shotName, paragraphs, localError)) {
+        bool read = LocalRead(shotName, paragraphs, localError);
+        g_localOcr.unload();  // ~1.4 MB back right away (loading it again takes a moment, not a crash)
+        if (read) {
             int pick = PickParagraph(paragraphs, sentence, true);
             if (pick == 0) { error = "cancelled"; return false; }
             if (pick == 1) {
@@ -970,8 +990,11 @@ static void ReadScreen(MenuEntry *) {
                                               " while the line is on screen.");
         return;
     }
+    g_lookupOpen = true;
     ReadShot(shot);
     g_lookupShot = "";
+    ReleaseLookupMemory();
+    g_lookupOpen = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1025,7 @@ static void HotkeyWatcher(void) {  // called every frame by the plugin menu whil
     std::string shot;
     bool haveShot = WaitForScreenshot(before, shot);
     if (!EnsureDict()) return;
+    g_lookupOpen = true;
     Process::Pause();
     TakeTopSnapshot();  // the paused game, to draw definitions over
     g_lookupShot = haveShot ? shot : "";
@@ -1013,7 +1037,8 @@ static void HotkeyWatcher(void) {  // called every frame by the plugin menu whil
         ReadShot(shot);
     }
     g_lookupShot = "";
-    g_snap.valid = false;
+    ReleaseLookupMemory();
+    g_lookupOpen = false;
     Process::Play();
 }
 

@@ -21,6 +21,8 @@ public:
     // Loads a .vocr model file (read whole into memory, kept until the plugin ends).
     bool load(Reader &file, std::string &error);
     bool loaded() const { return blob_ != nullptr; }
+    // Frees the model and its working memory (load() again to use it).
+    void unload();
     const std::string &modelInfo() const { return info_; }
 
     // grey: w*h bytes (row-major), grey = (77 R + 150 G + 29 B) >> 8 as the model expects.
@@ -36,6 +38,7 @@ private:
     std::string info_;
     std::vector<void *> raw_;  // every allocation, for the destructor
     void *alignedAlloc(size_t bytes);
+    bool loadInner(Reader &file, std::string &error);
 };
 
 // The top 400x240 of a CTRPF screenshot as grey bytes (malloc'd; caller frees with free()).

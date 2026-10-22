@@ -63,7 +63,13 @@ int main(int argc, char **argv) {
         if (!grey) { printf("BMP FAILED: %s\n", e.c_str()); return 3; }
         std::vector<LensLine> lines;
         bool ok = ocr.read(grey, w, h, lines, e);
+        // the plugin frees the model after every read and loads it again next time
+        ocr.unload();
+        std::vector<LensLine> again;
+        FileReader mf2(argv[2]);
+        bool ok2 = !ocr.loaded() && ocr.load(mf2, e) && ocr.read(grey, w, h, again, e);
         free(grey);
+        if (ok && (!ok2 || again.size() != lines.size())) { printf("RELOAD FAILED: %s\n", e.c_str()); return 3; }
         if (!ok) { printf("OCR FAILED: %s\n", e.c_str()); return 3; }
         for (auto &l : lines) printf("LINE: %s\n", l.text.c_str());
         for (auto &p : lensParagraphs(lines)) printf("PARAGRAPH: %s\n", p.c_str());
