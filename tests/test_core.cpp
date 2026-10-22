@@ -143,6 +143,38 @@ static void testSearch(Dictionary &d, FileReader &fr) {
     so = search(d, "喰べる");
     r = findResult(so, "喰べる", d, &e);
     CHECK(r != nullptr, "alt kanji spelling kept as expression");
+    if (r) {
+        std::string line = mineLogLine("t", "tid", e, *r, "", "喰べる");
+        CHECK(line.find("\t喰べる\t") != std::string::npos, "card keeps a kanji spelling that was looked up");
+    }
+
+    // a word looked up in kana goes on the card with its kanji spelling (when it has one)
+    struct { const char *query, *card; } kana[] = {
+        {"たべる", "食べる"}, {"ちょっと", "一寸"}, {"ありがとう", "有難う"}, {"これ", "此れ"}, {"する", "為る"}, {"ひらがな", "平仮名"},
+    };
+    for (auto &c : kana) {
+        SearchOutput k = search(d, c.query);
+        Entry ke;
+        bool ok = false;
+        std::string got;
+        for (const Result &kr : k.results) {
+            if (!d.entry(kr.entryId, ke)) continue;
+            std::string col = mineLogLine("t", "tid", ke, kr, "", c.query);
+            size_t a = col.find('\t', col.find('\t') + 1) + 1;
+            got = col.substr(a, col.find('\t', a) - a);
+            if (got == c.card) { ok = true; break; }
+        }
+        CHECK(ok, "%s -> card says %s (top result gave %s)", c.query, c.card, got.c_str());
+    }
+    // no kanji form: stays kana
+    SearchOutput kk = search(d, "ここ");
+    for (const Result &kr : kk.results) {
+        Entry ke;
+        if (d.entry(kr.entryId, ke) && ke.kanjiForms.empty()) {
+            CHECK(cardExpressionFor(ke, kr.matchedKey) == ke.expression, "kana-only word stays kana: %s", ke.expression.c_str());
+            break;
+        }
+    }
 }
 
 static void testScan(Dictionary &d, FileReader &fr) {

@@ -206,6 +206,14 @@ std::string expressionFor(const Entry &e, const std::string &matchedKey) {
     return e.expression;
 }
 
+std::string cardExpressionFor(const Entry &e, const std::string &matchedKey) {
+    std::string seen = expressionFor(e, matchedKey);
+    for (const std::string &k : e.kanjiForms)
+        if (k == seen) return seen;      // looked up in kanji already: keep that spelling
+    if (!e.kanjiForms.empty()) return e.kanjiForms[0];  // the word's main kanji spelling
+    return seen;
+}
+
 static std::string truncateUtf8(const std::string &s, size_t maxBytes) {
     if (s.size() <= maxBytes) return s;
     size_t cut = maxBytes;
@@ -261,7 +269,7 @@ static std::string clean(const std::string &s) {
 std::string mineLogLine(const std::string &timestamp, const std::string &titleId, const Entry &e,
                         const Result &r, const std::string &screenshot, const std::string &query,
                         const std::string &sentence) {
-    std::string expr = expressionFor(e, r.matchedKey);
+    std::string expr = cardExpressionFor(e, r.matchedKey);  // kanji even if seen in kana
     std::string cols[] = {timestamp, titleId, expr, e.reading, ankiDefinition(e), screenshot,
                           query, r.reasons, std::to_string(e.id), sentence};
     std::string line;

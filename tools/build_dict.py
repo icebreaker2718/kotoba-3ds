@@ -488,7 +488,9 @@ def entry_blob(e: Entry) -> str:
         head = "・".join(shown_r)
     lines = [
         "\t".join([expr, reading, ",".join(all_pos),
-                   SEP.join(k[0] for k in e.kanji), SEP.join(r[0] for r in e.kana)]),
+                   # normal kanji forms first (the card uses the first one), rare/irregular ones last
+                   SEP.join(k[0] for k in good_k + [k for k in e.kanji if k not in good_k]),
+                   SEP.join(r[0] for r in e.kana)]),
         head,
     ]
     prev_pos = None

@@ -37,6 +37,10 @@ std::vector<std::string> chunkText(Dictionary &dict, const std::string &text, ui
 // kanji forms, use that form instead of the default headword.
 std::string expressionFor(const Entry &e, const std::string &matchedKey);
 
+// The spelling for the Anki card: the kanji form when the word has one, even if it was looked
+// up in kana (ちょっと -> 一寸). Words with no kanji form stay in kana.
+std::string cardExpressionFor(const Entry &e, const std::string &matchedKey);
+
 // One line for the results list: "食べる【たべる】 to eat; to live on…"
 std::string summaryLine(const Entry &e, const Result &r, size_t maxBytes = 110);
 
