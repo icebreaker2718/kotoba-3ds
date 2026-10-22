@@ -79,7 +79,8 @@ log = ("#time\ttitle_id\texpression\treading\tdefinition\tscreenshot\tquery\tinf
        "2026-10-19 08:30:00\t0004000000123400\t食べる\tたべる\t1. (v1,vt) to eat<br>2. to live on\tshot - 000.bmp\ttaberarenakatta\tpassive\t11866\n"
        "2026-10-19 08:31:10\t0004000000123400\t静か\tしずか\t1. (adj-na) quiet\t\tshizukana\tna-adjective\t2000\n"
        "2026-10-19 08:32:00\t0004000000123400\t猫\tねこ\t1. (n) cat\t\tneko\t\t3000\n"
-       "2026-10-19 08:33:00\t0004000000123400\t宝箱\tたからばこ\t1. (n) treasure chest\tshot - 000.bmp\t宝箱\t\t4000\tこの先に宝箱があるらしいぞ。\n")
+       "2026-10-19 08:33:00\t0004000000123400\t宝箱\tたからばこ\t1. (n) treasure chest\tshot - 000.bmp\t宝箱\t\t4000\tこの先に宝箱があるらしいぞ。\n"
+       "2026-10-19 08:34:00\t0004000000123400\t走る\tはしる\t1. (v5r) to run\tshot - 000.bmp\thashiru\t\t5000\n")
 with open(os.path.join(kdir, "mined.tsv"), "w", encoding="utf-8") as f:
     f.write(log)
 auth = DummyAuthorizer(); auth.add_anonymous(sd, perm="elradfmw")
@@ -116,7 +117,7 @@ threading.Thread(target=audio_srv.serve_forever, daemon=True).start()
 A = f"http://127.0.0.1:{audio_srv.server_port}"
 
 # ---- fake AnkiConnect with Lapis ----
-calls, notes, media = [], [], {}
+calls, notes, media, flags = [], [], {}, {}
 class Anki(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):
@@ -129,6 +130,8 @@ class Anki(BaseHTTPRequestHandler):
         elif a == "deckNames": res = ["Default", "Mining Deck"]
         elif a == "createDeck": res = 1
         elif a == "storeMediaFile": media[p["filename"]] = base64.b64decode(p["data"]); res = p["filename"]
+        elif a == "findCards": res = [int(p["query"].split(":")[1]) * 10]
+        elif a == "setSpecificValueOfCard": flags[p["card"]] = (p["keys"], p["newValues"], p.get("warning_check")); res = [True]
         elif a == "addNote":
             if set(p["note"]["fields"]) - set(LAPIS_FIELDS): err = "unknown field"
             elif any(n["fields"]["Expression"] == p["note"]["fields"]["Expression"] for n in notes):
@@ -166,7 +169,7 @@ check(run("setup") == 0, "setup finds Lapis + Mining Deck and indexes dictionari
 check("createDeck" not in calls, "existing deck not recreated")
 check(len(os.listdir(enrich.CACHE_DIR)) == 3, "three dictionary indexes cached")
 check(run() == 0, "import")
-check(len(notes) == 4, f"4 notes added (got {len(notes)})")
+check(len(notes) == 5, f"5 notes added (got {len(notes)})")
 by = {n["fields"]["Expression"]: n for n in notes}
 t, s, k = by["食べる"]["fields"], by["静か"]["fields"], by["猫"]["fields"]
 n0 = by["食べる"]
@@ -202,6 +205,24 @@ check(all(t[f] == "" for f in ("IsWordAndSentenceCard", "IsClickCard", "IsSenten
                                "SentenceFurigana", "SelectionText")), "card-type flags left empty")
 check("1. (n) cat" not in k["MainDefinition"] and "cat" in k["MainDefinition"],
       "word missing from Jitendex falls back to the 3DS definition")
+hs = by["走る"]
+check("check_sentence" in hs["tags"] and "<b>" not in hs["fields"]["Sentence"],
+      f"sentence without the word -> tagged {hs['tags']}")
+nid = notes.index(hs) + 1
+check(flags.get(nid * 10) == (["flags"], ["1"], True), f"...and its card gets flag 1 (red) {flags}")
+check(len(flags) == 1, "only that card is flagged")
+check(all("check_sentence" not in by[w]["tags"] for w in ("食べる", "静か", "猫", "宝箱")),
+      "words found in their sentence (or with no sentence) are not tagged")
+for sent, row, want in (("もう何も食べられなかった", ("食べる", "たべる", ""), True),
+                        ("一緒に行こう", ("行く", "いく", ""), True),
+                        ("早く走れ！", ("走る", "はしる", ""), True),
+                        ("ご飯を食事した", ("飲む", "のむ", ""), False),
+                        ("しずかな夜", ("静か", "しずか", ""), True),
+                        ("この先に宝箱", ("宝", "たから", "宝"), True),
+                        ("", ("猫", "ねこ", ""), False),
+                        ("あのね", ("猫", "ねこ", ""), False)):
+    got = mine.sentence_has_word(sent, {"expression": row[0], "reading": row[1], "query": row[2]})
+    check(got == want, f"sentence_has_word({sent!r}, {row[0]}) == {want}")
 aud = [v for n, v in media.items() if n.endswith(".mp3")]
 check(aud and aud[0] == MP3, "audio bytes stored in Anki media")
 

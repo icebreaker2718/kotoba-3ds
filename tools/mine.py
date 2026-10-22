@@ -68,6 +68,10 @@ DEFAULT_CONFIG = {
         },
         "tags": ["{game_tag}"],
         "allow_duplicates": False,
+        "_comment_flag": "When the card's sentence doesn't contain the looked-up word (OCR misread, or "
+                         "the wrong line was read), flag the card (1 = red, 0 = off) and add this tag.",
+        "flag_missing_word": 1,
+        "missing_word_tag": "check_sentence",
     },
     "dictionaries": {
         "_comment": "Put Yomitan .zip dictionaries in the folder below and they are found automatically "
@@ -498,6 +502,38 @@ def highlight(sentence, expression, reading):
     return sentence
 
 
+def sentence_has_word(sentence, row):
+    """Does the (plain or bolded) sentence contain the looked-up word, in any common form?
+    Conjugated forms are found by the dictionary form minus its last kana (食べる -> 食べ)."""
+    text = re.sub(r"<[^>]+>", "", sentence or "")
+    if not text:
+        return False
+    expr, reading, query = row["expression"], row["reading"], row.get("query", "")
+    if any(w and w in text for w in (expr, reading)):
+        return True
+    if query and not query.isascii() and query in text:  # what was tapped on the console
+        return True
+    for word, min_stem in ((expr, 1 if KANJI.search(expr or "") else 2), (reading, 2)):
+        if word and len(word) >= 2 and HIRAGANA.match(word[-1]):
+            stem = word[:-1]
+            if len(stem) >= min_stem and (KANJI.search(stem) or len(stem) >= 2) and stem in text:
+                return True
+    return False
+
+
+def flag_note(cfg, note_id, log=print):
+    """Flags the new note's cards (AnkiConnect setSpecificValueOfCard)."""
+    flag = int(cfg["anki"].get("flag_missing_word", 1) or 0)
+    if not flag or not note_id:
+        return
+    try:
+        for card in anki(cfg, "findCards", query=f"nid:{note_id}") or []:
+            anki(cfg, "setSpecificValueOfCard", card=card, keys=["flags"], newValues=[str(flag)],
+                 warning_check=True)
+    except AnkiError as e:
+        log(f"    (couldn't flag the card - update AnkiConnect? {e})")
+
+
 # ---------------------------------------------------------------------------
 # main import
 # ---------------------------------------------------------------------------
@@ -578,18 +614,24 @@ def make_card(cfg, enricher, row, img=None, dry_run=False, log=print):
         sentence = sentence_from_device(row)
     extra, more_media = enrich_row(enricher, row, log)
     fields = build_fields(cfg, row, sentence, picture_html, extra)
+    tags = build_tags(cfg, row)
+    # a sentence was expected (there's a screenshot or the console read one) but lacks the word
+    suspect = bool(img is not None or row["sentence"]) and not sentence_has_word(sentence, row)
+    if suspect and cfg["anki"].get("missing_word_tag"):
+        tags.append(cfg["anki"]["missing_word_tag"])
     if dry_run:
         filled = [k for k, v in fields.items() if v]
-        log(f"  would add {label}: fills {', '.join(filled)}" + ("" if extra.get("audio") else "  (no audio found)"))
+        log(f"  would add {label}: fills {', '.join(filled)}" + ("" if extra.get("audio") else "  (no audio found)")
+            + ("  (sentence lacks the word: would be flagged)" if suspect else ""))
         return "dry"
     try:
         for name, blob in ([media] if media else []) + more_media:
             anki(cfg, "storeMediaFile", filename=name, data=base64.b64encode(blob).decode())
-        anki(cfg, "addNote", note={
+        note_id = anki(cfg, "addNote", note={
             "deckName": cfg["anki"]["deck"],
             "modelName": cfg["anki"]["note_type"],
             "fields": fields,
-            "tags": build_tags(cfg, row),
+            "tags": tags,
             "options": {"allowDuplicate": bool(cfg["anki"].get("allow_duplicates")), "duplicateScope": "deck"},
         })
     except AnkiError as e:
@@ -598,10 +640,13 @@ def make_card(cfg, enricher, row, img=None, dry_run=False, log=print):
             return "duplicate"
         log(f"  {label}: {e}")
         return "unreachable" if "Can't reach" in str(e) else "failed"
+    if suspect:
+        flag_note(cfg, note_id, log)
     bits = [x for x, ok in (("audio", extra.get("audio")), ("pitch", extra.get("pitch_position")),
                             ("picture", picture_html)) if ok]
     log(f"  added {label}" + (f"  「{re.sub('<.*?>', '', sentence)}」" if sentence else "")
-        + (f"  [{', '.join(bits)}]" if bits else ""))
+        + (f"  [{', '.join(bits)}]" if bits else "")
+        + ("  ⚑ sentence doesn't contain the word - flagged to check" if suspect else ""))
     return "added"
 
 

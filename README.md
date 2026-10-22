@@ -225,6 +225,14 @@ these placeholders: `{expression} {reading} {furigana} {audio} {definition_html}
 {freq_sort} {game} {game_tag} {time} {inflection} {query} {title_id}`. For example, set
 `"IsWordAndSentenceCard": "x"` to make every card a word+sentence card.
 
+### Cards whose sentence missed the word
+If a card's sentence doesn't contain the word you looked up (OCR misread it, or the wrong line
+was read), the card is given **flag 1 (red)** and the tag `check_sentence`, so you can find
+them in the Anki browser (*Flag → Red*, or search `tag:check_sentence`) and fix the sentence.
+Conjugated forms count as found (食べる in 食べられなかった). Change the flag with
+`"flag_missing_word"` in the `anki` section (0 turns it off; 2 = orange, 3 = green, 4 = blue…)
+and the tag with `"missing_word_tag"` (`""` for none).
+
 ### Word audio
 `audio.sources` is tried in order for each word, until one has a recording:
 
