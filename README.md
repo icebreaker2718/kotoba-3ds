@@ -56,7 +56,7 @@ Server = https://thepixellizeross.gitlab.io/packages/x86_64/linux
 SigLevel = Optional
 EOF
 # on Windows use [thepixellizeross-win] with .../packages/x86_64/win instead of -linux
-dkp-pacman -Sy libctrpf 3gxtool
+dkp-pacman -Sy libctrpf 3gxtool 3ds-mbedtls
 make -C plugin            # -> plugin/Kotoba3DS.3gx
 ```
 Keep the project path free of spaces.
@@ -161,6 +161,24 @@ became cards. Turn this off under **OCR server** in the plugin menu, or start th
 If the PC is off, the server isn't running, or the game won't allow network access, Read
 screen says why and offers the romaji lookup instead. All the other lookups never need the
 network.
+
+## 3c. No PC? Google Lens
+
+When the PC can't be found but the 3DS is on the internet (home Wi-Fi, or your phone's
+hotspot), *Read screen* sends the top screen to **Google Lens** instead:
+
+- The 3DS connects to Google itself over HTTPS. Nothing has to run on your PC.
+- Lens reads everything on screen, so if there are several blocks of text you pick the line
+  first; furigana is dropped. Then pick where the word starts, as usual.
+- After one failed attempt the PC isn't searched again for 2 minutes, so later lookups go
+  straight to Lens.
+- Saved words wait in `mined.tsv` with their sentence; run `mine.py` later to make the cards.
+- Turn it off in *Select → OCR server → Turn off Google Lens*.
+
+Things to know: this uses the unofficial endpoint Chrome's Lens feature talks to (the same one
+[owocr](https://github.com/AuroraWright/owocr) uses). It's against Google's terms of service,
+it can stop working whenever Google changes it, and your screenshots go to Google. If Lens
+stops working, Read screen still offers manual lookup.
 
 ## 4. Make the Anki cards on your PC
 
@@ -307,3 +325,6 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
   (The Pixellizer Group licence) and [Luma3DS](https://github.com/LumaTeam/Luma3DS)'s plugin
   loader.
 - Conjugation handling follows the approach of [Yomitan](https://github.com/yomidevs/yomitan).
+- Google Lens message layout from Chromium's Lens overlay protos (BSD), as used by
+  [owocr](https://github.com/AuroraWright/owocr). HTTPS by [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0);
+  JPEG encoding by [stb_image_write](https://github.com/nothings/stb) (public domain).

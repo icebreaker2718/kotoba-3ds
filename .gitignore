@@ -11,3 +11,4 @@ tools/cache/
 tools/dictionaries/
 __pycache__/
 tests/test_wrap
+tests/test_lens

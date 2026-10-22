@@ -157,6 +157,49 @@ SearchOutput scanAt(Dictionary &dict, const std::string &text, size_t start, uin
     return so;
 }
 
+static size_t longestWordAt(Dictionary &dict, const std::string &text, size_t i, uint32_t maxChars) {
+    SearchOutput so = scanAt(dict, text, i, maxChars, 1);
+    size_t len = 0;
+    for (const Result &r : so.results)
+        if (!r.prefixOnly && r.surface.size() > len) len = r.surface.size();
+    return i + len <= text.size() ? len : 0;
+}
+
+static bool allHiragana(const std::string &s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        uint32_t cp = utf8Next(s, i);
+        if (cp < 0x3041 || cp > 0x309F) return false;
+    }
+    return !s.empty();
+}
+
+std::vector<std::string> chunkText(Dictionary &dict, const std::string &text, uint32_t maxChars) {
+    static const char *const kParticles[] = {"が", "は", "を", "に", "へ", "で", "と", "も", "の", "や"};
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t next = i;
+        utf8Next(text, next);
+        size_t len = longestWordAt(dict, text, i, maxChars);  // longest dictionary word here
+        // a particle glued to the next word (が+ある -> があ): split it off when the word after
+        // the particle reaches further
+        if (len > 0 && allHiragana(text.substr(i, len))) {
+            std::string first = text.substr(i, next - i);
+            bool particle = false;
+            for (const char *p : kParticles) particle = particle || first == p;
+            if (particle && next < text.size()) {
+                size_t after = longestWordAt(dict, text, next, maxChars);
+                if (after > 0 && next + after > i + len) len = next - i;
+            }
+        }
+        size_t end = len > 0 ? i + len : next;
+        out.push_back(text.substr(i, end - i));
+        i = end;
+    }
+    return out;
+}
+
 std::string expressionFor(const Entry &e, const std::string &matchedKey) {
     for (const std::string &k : e.kanjiForms)
         if (normalizeKey(k) == matchedKey) return k;

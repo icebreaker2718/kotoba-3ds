@@ -11,4 +11,9 @@ namespace kt {
 // Reads at most the top 400x240 of the picture (the top screen).
 bool topScreenRGB565(Reader &bmp, std::string &out, std::string &error);
 
+// The top screen as a JPEG, enlarged `scale` times (pixel-doubled: small game fonts read
+// better). Falls back to scale 1 if there isn't enough memory.
+bool topScreenJpeg(Reader &bmp, int scale, int quality, std::string &out, int &width, int &height,
+                   std::string &error);
+
 }  // namespace kt

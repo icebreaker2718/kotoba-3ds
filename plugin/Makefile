@@ -31,7 +31,7 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 ASFLAGS		:=	$(ARCH)
 LDFLAGS		:= -T $(TOPDIR)/3gx.ld $(ARCH) -Os -Wl,--gc-sections,--strip-discarded,--strip-debug
 
-LIBS		:= -lctrpf -lctru
+LIBS		:= -lctrpf -lmbedtls -lmbedx509 -lmbedcrypto -lctru
 LIBDIRS		:= 	$(CTRPFLIB) $(CTRULIB) $(PORTLIBS)
 
 #---------------------------------------------------------------------------------

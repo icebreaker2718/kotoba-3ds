@@ -30,6 +30,13 @@ private:
 bool netStart(std::string &error);
 void netStop();
 
+// TCP connection to an IP address or host name (DNS), with a timeout. Returns the socket
+// (blocking) or -1 with `error` set.
+int netConnect(const std::string &host, int port, int timeoutMs, std::string &error);
+void netClose(int s);
+// Waits until the socket can be read (or written). false = timeout.
+bool netWait(int s, bool forRead, int timeoutMs);
+
 // Broadcasts "KOTOBA3DS?" on UDP `port` and waits for a server's reply.
 bool netDiscover(int port, int timeoutMs, std::string &hostOut, int &portOut, std::string &error);
 

@@ -1,6 +1,7 @@
 #include "core/net.hpp"
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -92,7 +93,16 @@ static int connectTo(const std::string &host, int port, int timeoutMs, std::stri
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) { error = "bad address " + host; return -1; }
+    bool named = inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1;
+    const std::string who = named ? host : "the PC at " + host;
+    if (named) {
+        hostent *he = gethostbyname(host.c_str());  // a name (internet services), not an IP
+        if (!he || he->h_addrtype != AF_INET || !he->h_addr_list || !he->h_addr_list[0]) {
+            error = "could not look up " + host + " (no internet connection?)";
+            return -1;
+        }
+        memcpy(&addr.sin_addr, he->h_addr_list[0], sizeof(addr.sin_addr));
+    }
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) { error = "could not open a socket" + errStr("socket", errno); return -1; }
     int flags = fcntl(s, F_GETFL, 0);
@@ -101,7 +111,7 @@ static int connectTo(const std::string &host, int port, int timeoutMs, std::stri
     int r = connect(s, (sockaddr *)&addr, sizeof(addr));
     if (r < 0 && errno != EISCONN) {
         if (errno != EINPROGRESS && errno != EWOULDBLOCK && errno != EALREADY) {
-            error = "could not reach the PC at " + host + errStr("connect", errno);
+            error = "could not reach " + who + errStr("connect", errno);
             closeSock(s);
             return -1;
         }
@@ -119,14 +129,14 @@ static int connectTo(const std::string &host, int port, int timeoutMs, std::stri
             } else if (errno == EINPROGRESS || errno == EALREADY || errno == EWOULDBLOCK) {
                 lastErr = errno;  // still connecting
             } else {
-                error = "could not reach the PC at " + host + " (is ocr_server.py running?)" +
+                error = "could not reach " + who + (named ? "" : " (is ocr_server.py running?)") +
                         errStr("connect", errno);
                 closeSock(s);
                 return -1;
             }
         }
         if (!connected) {
-            error = "the PC at " + host + " did not answer" + errStr("timeout", lastErr);
+            error = who + " did not answer" + errStr("timeout", lastErr);
             closeSock(s);
             return -1;
         }
@@ -194,6 +204,12 @@ static bool readReply(int s, int timeoutMs, std::string &body, std::string &erro
     }
     return true;
 }
+
+int netConnect(const std::string &host, int port, int timeoutMs, std::string &error) {
+    return connectTo(host, port, timeoutMs, error);
+}
+void netClose(int s) { if (s >= 0) closeSock(s); }
+bool netWait(int s, bool forRead, int timeoutMs) { return waitFor(s, forRead ? POLLIN : POLLOUT, timeoutMs); }
 
 bool netPing(const std::string &host, int port, int timeoutMs, std::string &error) {
     int s = connectTo(host, port, timeoutMs, error);

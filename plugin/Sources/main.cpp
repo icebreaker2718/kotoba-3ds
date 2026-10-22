@@ -16,6 +16,7 @@
 #include "core/bmp.hpp"
 #include "core/kana.hpp"
 #include "core/net.hpp"
+#include "core/lens.hpp"
 #include "core/wrap.hpp"
 #include "core/search.hpp"
 
@@ -139,13 +140,15 @@ static bool g_ocrEnabled = true;
 static bool g_cardsEnabled = true;  // send saved words to the PC to become Anki cards right away
 static bool g_hotkeyOpens = true;   // the screenshot hotkey also opens the lookup
 static u64 g_pcDownUntil = 0;       // after a failed attempt, don't retry for a while
+static bool g_lensEnabled = true;   // no PC? read the screen with Google Lens (needs internet)
 static std::string *g_serverPtr = nullptr;  // "192.168.1.20:7331", empty = find automatically
 #define g_server Leaky(g_serverPtr)
 static const int kOcrPort = 7331;
 
 static void SaveSettings() {
-    WriteWholeFile(kSettingsPath, Utils::Format("hotkey=%d\nocr=%d\ncards=%d\nquick=%d\nserver=", g_hotkey,
-                                                g_ocrEnabled ? 1 : 0, g_cardsEnabled ? 1 : 0, g_hotkeyOpens ? 1 : 0) +
+    WriteWholeFile(kSettingsPath, Utils::Format("hotkey=%d\nocr=%d\ncards=%d\nquick=%d\nlens=%d\nserver=", g_hotkey,
+                                                g_ocrEnabled ? 1 : 0, g_cardsEnabled ? 1 : 0, g_hotkeyOpens ? 1 : 0,
+                                                g_lensEnabled ? 1 : 0) +
                                       g_server + "\n");
 }
 
@@ -173,6 +176,8 @@ static void LoadSettings() {
         if (!v.empty()) g_cardsEnabled = v != "0";
         v = SettingValue(s, "quick");
         if (!v.empty()) g_hotkeyOpens = v != "0";
+        v = SettingValue(s, "lens");
+        if (!v.empty()) g_lensEnabled = v != "0";
         g_server = SettingValue(s, "server");
     }
 }
@@ -745,26 +750,77 @@ static bool OfferManual(const std::string &title, const std::string &why) {
     return false;
 }
 
-// OCRs a saved screenshot on the PC.
+// Google Lens: the top screen as a JPEG, straight to Google (internet needed, no PC).
+static bool LensRead(const std::string &shotName, std::vector<std::string> &paragraphs, std::string &error) {
+    ShowBusy("Reading the screen...", "Asking Google Lens");
+    SdReader bmp;
+    if (!bmp.open(std::string(kShotDir) + "/" + shotName)) {
+        error = "could not open " + shotName;
+        return false;
+    }
+    std::string jpeg;
+    int w = 0, h = 0;
+    if (!kt::topScreenJpeg(bmp, 2, 88, jpeg, w, h, error)) return false;
+    uint64_t rnd = svcGetSystemTick() ^ ((uint64_t)osGetTime() << 24);
+    return kt::lensOcr(jpeg, w, h, rnd, 20000, paragraphs, error);
+}
+
+// Several blocks of text on screen (Lens reads everything): let the player pick the line.
+static bool PickParagraph(const std::vector<std::string> &paragraphs, std::string &out) {
+    if (paragraphs.size() == 1) { out = paragraphs[0]; return true; }
+    std::vector<std::string> labels;
+    for (const std::string &p : paragraphs) {
+        std::vector<std::string> lines = Wrap(p);
+        labels.push_back(lines.empty() ? p : lines[0] + (lines.size() > 1 ? "…" : ""));
+    }
+    if (g_snap.valid) ClearTopPanel();
+    int c = BottomList(labels);
+    if (c < 0) return false;
+    out = paragraphs[c];
+    return true;
+}
+
+// OCRs a saved screenshot: on the PC (tools/ocr_server.py) if it can be reached, otherwise with
+// Google Lens when that's on. `chunks` are the word starts to offer.
 static bool RunOcr(const std::string &shotName, std::string &sentence, std::vector<std::string> &chunks,
                    std::string &error) {
-    ShowBusy("Reading the screen...", "Sending to your PC");
-    std::string compact;
-    if (!CompactScreenshot(shotName, compact, error)) return false;
     if (!kt::netStart(error)) return false;
-    std::string host;
-    int port = kOcrPort;
     bool ok = false;
-    if (ResolveServer(host, port, error)) {
-        ShowBusy("Reading the screen...", "Waiting for OCR on " + host);
-        std::string body;
-        kt::MemReader upload(compact);
-        std::vector<std::string> headers = {"X-Title-Id: " + TitleIdHex(), "X-Shot-Name: " + shotName};
-        ok = kt::netPost(host, port, "/ocr", headers, upload, 2500, 25000, body, error) &&
-             kt::parseOcrReply(body, sentence, chunks, error);
+    std::string pcError;
+    bool tryPc = !(g_pcDownUntil && osGetTime() < g_pcDownUntil);
+    if (tryPc) {
+        ShowBusy("Reading the screen...", "Sending to your PC");
+        std::string compact, host;
+        int port = kOcrPort;
+        if (CompactScreenshot(shotName, compact, pcError) && ResolveServer(host, port, pcError)) {
+            ShowBusy("Reading the screen...", "Waiting for OCR on " + host);
+            std::string body;
+            kt::MemReader upload(compact);
+            std::vector<std::string> headers = {"X-Title-Id: " + TitleIdHex(), "X-Shot-Name: " + shotName};
+            ok = kt::netPost(host, port, "/ocr", headers, upload, 2500, 25000, body, pcError) &&
+                 kt::parseOcrReply(body, sentence, chunks, pcError);
+            if (ok) g_pcDownUntil = 0;
+        }
+    } else {
+        pcError = "PC not reachable a moment ago";
+    }
+    std::vector<std::string> paragraphs;
+    bool viaLens = false;
+    if (!ok && g_lensEnabled) {
+        if (tryPc) g_pcDownUntil = osGetTime() + 2 * 60 * 1000;  // don't wait for the PC again for a while
+        std::string lensError;
+        viaLens = LensRead(shotName, paragraphs, lensError);
+        if (!viaLens) error = "PC: " + pcError + "\nGoogle Lens: " + lensError;
+    } else if (!ok) {
+        error = pcError;
     }
     kt::netStop();  // never leave the network running while the game plays
-    if (ok) g_pcDownUntil = 0;
+    if (viaLens) {
+        if (!PickParagraph(paragraphs, sentence)) { error = "cancelled"; return false; }
+        ShowBusy("Finding the words...");
+        chunks = kt::chunkText(g_dict, sentence);
+        ok = true;
+    }
     return ok;
 }
 
@@ -801,7 +857,9 @@ static void ReadShot(const std::string &shot) {
         std::string sentence, error;
         std::vector<std::string> chunks;
         if (!RunOcr(shot, sentence, chunks, error)) {
-            OfferManual("Couldn't read the screen:", error + "\nIs ocr_server.py running on your PC, on the same Wi-Fi?");
+            if (error == "cancelled") return;
+            OfferManual("Couldn't read the screen:", error +
+                        (g_lensEnabled ? "" : "\nIs ocr_server.py running on your PC, on the same Wi-Fi?"));
             return;
         }
         g_ocr.shot = shot;
@@ -970,6 +1028,7 @@ static void ChooseServer(MenuEntry *entry) {
         "Forget the saved address",
         g_ocrEnabled ? "Turn OCR off (Read screen = typing)" : "Turn OCR on",
         g_cardsEnabled ? "Stop making Anki cards in-game (use mine.py)" : "Make Anki cards in-game when saving",
+        g_lensEnabled ? "Turn off Google Lens (when the PC isn't found)" : "Use Google Lens when the PC isn't found",
     };
     Keyboard kb("OCR server\nRun tools/ocr_server.py on your PC, on the same Wi-Fi as the 3DS.\n" +
                     std::string(Color::Gray) + "Now: " + (g_server.empty() ? std::string("not set") : g_server),
@@ -1011,8 +1070,10 @@ static void ChooseServer(MenuEntry *entry) {
         g_server = "";
     } else if (c == 3) {
         g_ocrEnabled = !g_ocrEnabled;
-    } else {
+    } else if (c == 4) {
         g_cardsEnabled = !g_cardsEnabled;
+    } else {
+        g_lensEnabled = !g_lensEnabled;
     }
     g_pcDownUntil = 0;
     SaveSettings();
@@ -1025,7 +1086,8 @@ static const char *kHelp =
     "   game still visible on top. (Or press Select later and use this menu.)\n"
     "2. Settings and saved words are in this menu (Select).\n"
     "3. 'Read screen': with tools/ocr_server.py running on your PC, the line is\n"
-    "   read for you; pick where the word starts. No PC? You can type instead.\n"
+    "   read for you; pick where the word starts. No PC but internet? Google\n"
+    "   Lens reads it instead. Neither? You can type the word.\n"
     "   'Look up word': type it in romaji. Conjugated forms work (tabenakatta).\n"
     "   'Look up by kanji parts': pick the parts of a kanji you can't read.\n"
     "4. Pick a result, read it, choose Yes to save it.\n"

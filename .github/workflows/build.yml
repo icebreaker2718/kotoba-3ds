@@ -17,6 +17,12 @@ jobs:
       - name: Install CTRPluginFramework + 3gxtool
         run: bash .github/workflows/install-ctrpf.sh
 
+      - name: Install mbedTLS for the 3DS (HTTPS for Google Lens)
+        run: |
+          for i in 1 2 3; do dkp-pacman -S --noconfirm --needed 3ds-mbedtls && break; sleep 10; done
+          ls $DEVKITPRO/portlibs/3ds/lib | grep -i mbed
+          grep -m1 MBEDTLS_VERSION_STRING $DEVKITPRO/portlibs/3ds/include/mbedtls/*version*.h $DEVKITPRO/portlibs/3ds/include/mbedtls/build_info.h 2>/dev/null || true
+
       - name: Build plugin
         run: |
           export PATH="$DEVKITPRO/tools/bin:$PATH"
@@ -79,8 +85,18 @@ jobs:
           name: Kotoba3DS-dict
           path: dict.bin
 
+      - name: Install mbedTLS + a Japanese font (for the HTTPS / Google Lens tests)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libmbedtls-dev fonts-noto-cjk
+
       - name: Test the plugin core against it
         run: make -C tests run DICT=../dict.bin
+
+      - name: Test the HTTPS client (local TLS server)
+        run: python tests/test_https.py
+
+      - name: Google Lens live test (real request; a failure here is a warning)
+        continue-on-error: true
+        run: python tests/test_lens_live.py dict.bin
 
       - name: Test the screenshot converter (compact upload)
         run: python tests/test_bmp.py
