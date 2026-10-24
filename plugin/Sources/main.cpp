@@ -244,36 +244,41 @@ static int BottomMessage(const std::string &text, const std::vector<std::string>
 }
 
 // ---------------------------------------------------------------------------
-// Full dictionary entry on the top screen: drawn over a darkened copy of the paused game, so
-// the scene stays visible underneath. The keyboard flips between two top-screen buffers
-// without drawing on them, so we draw into both.
+// The paused game's top screen, kept while a lookup is open: read by the OCR, drawn (dimmed)
+// under the definitions, saved as the card's screenshot. Kept in the framebuffer's own layout,
+// 400 columns of 240 pixels from the bottom up, so it goes back with one copy per column.
 // ---------------------------------------------------------------------------
 struct TopSnapshot {
     bool valid = false;
     u32 bpp = 0;
     GSPFormat format = GSP_RGBA8_OES;
-    std::vector<u8> px;  // 400x240 pixels in framebuffer format
+    std::vector<u8> px;
 };
 static TopSnapshot *g_snapPtr = nullptr;
 #define g_snap Leaky(g_snapPtr)
+
+static u8 *Column(const Screen &s, u32 x) { return s.GetFramebuffer(x, 239); }  // its pixel at y = 239
 
 static void TakeTopSnapshot() {  // call while the game is paused and nothing is drawn on top
     const Screen &top = OSD::GetTopScreen();
     g_snap.bpp = top.BytesPerPixel;
     g_snap.format = top.Format;
     if (g_snap.bpp < 2 || g_snap.bpp > 4) { g_snap.valid = false; return; }
-    g_snap.px.resize(400 * 240 * g_snap.bpp);
-    for (u32 y = 0; y < 240; y++)
-        for (u32 x = 0; x < 400; x++)
-            memcpy(&g_snap.px[(y * 400 + x) * g_snap.bpp], top.GetFramebuffer(x, y), g_snap.bpp);
+    const u32 col = 240 * g_snap.bpp;
+    g_snap.px.resize(400 * col);
+    for (u32 x = 0; x < 400; x++) memcpy(&g_snap.px[x * col], Column(top, x), col);
     g_snap.valid = true;
 }
 
-// The snapshot as R, G, B bytes (malloc'd; free() it), or nullptr.
+// The snapshot as R, G, B bytes, row by row from the top (malloc'd; free() it), or nullptr.
 static uint8_t *SnapshotRGB() {
     if (!g_snap.valid) return nullptr;
     uint8_t *rgb = (uint8_t *)malloc(400 * 240 * 3);
-    if (rgb) kt::framebufferToRGB(g_snap.px.data(), 400 * 240, (int)g_snap.format, g_snap.bpp, rgb);
+    if (!rgb) return nullptr;
+    for (u32 x = 0; x < 400; x++)
+        for (u32 k = 0; k < 240; k++)  // k-th pixel of the column = y 239 - k
+            kt::framebufferToRGB(&g_snap.px[(x * 240 + k) * g_snap.bpp], 1, (int)g_snap.format, g_snap.bpp,
+                                 rgb + ((239 - k) * 400 + x) * 3);
     return rgb;
 }
 
@@ -292,16 +297,37 @@ static inline void Darken(u8 *d, const u8 *s, u32 bpp, GSPFormat fmt) {
     d[1] = (u8)(v >> 8);
 }
 
-static void ClearTopPanel() {  // the paused game as it was, in both buffers
-    if (!g_snap.valid) return;
-    for (int pass = 0; pass < 2; pass++) {
-        const Screen &top = OSD::GetTopScreen();
-        if (top.BytesPerPixel != g_snap.bpp) return;
-        for (u32 y = 0; y < 240; y++)
-            for (u32 x = 0; x < 400; x++)
-                memcpy(top.GetFramebuffer(x, y), &g_snap.px[(y * 400 + x) * g_snap.bpp], g_snap.bpp);
-        OSD::SwapBuffers();
+// The paused game onto the top screen's draw buffer, dimmed or as it was.
+static bool PaintGame(bool dim) {
+    const Screen &top = OSD::GetTopScreen();
+    if (!g_snap.valid || top.BytesPerPixel != g_snap.bpp) return false;
+    const u32 bpp = g_snap.bpp, col = 240 * bpp;
+    for (u32 x = 0; x < 400; x++) {
+        u8 *d = Column(top, x);
+        const u8 *src = &g_snap.px[x * col];
+        if (!dim) memcpy(d, src, col);
+        else for (u32 k = 0; k < col; k += bpp) Darken(d + k, src + k, bpp, g_snap.format);
     }
+    return true;
+}
+
+// Shows what was drawn, and copies it into the other buffers (CTRPF alternates between two per
+// screen; the right eye's too when the game's 3D is on), so one drawing serves them all.
+static void Present() {
+    const Screen &t = OSD::GetTopScreen(), &b = OSD::GetBottomScreen();
+    u8 *top = (u8 *)t.LeftFramebuffer, *bottom = (u8 *)b.LeftFramebuffer;
+    const u32 topBytes = 400 * t.Stride, bottomBytes = 320 * b.Stride;
+    if (t.Is3DEnabled && t.RightFramebuffer && (u8 *)t.RightFramebuffer != top) memcpy((u8 *)t.RightFramebuffer, top, topBytes);
+    OSD::SwapBuffers();
+    const Screen &t2 = OSD::GetTopScreen(), &b2 = OSD::GetBottomScreen();
+    if ((u8 *)t2.LeftFramebuffer != top && t2.Stride * 400 == topBytes) memcpy((u8 *)t2.LeftFramebuffer, top, topBytes);
+    if (t2.Is3DEnabled && t2.RightFramebuffer && (u8 *)t2.RightFramebuffer != top) memcpy((u8 *)t2.RightFramebuffer, top, topBytes);
+    if ((u8 *)b2.LeftFramebuffer != bottom && b2.Stride * 320 == bottomBytes) memcpy((u8 *)b2.LeftFramebuffer, bottom, bottomBytes);
+}
+
+static void ClearTopPanel() {  // the paused game as it was
+    if (!PaintGame(false)) return;
+    Present();
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +468,7 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
 // ---------------------------------------------------------------------------
 // The lookup screens (core/lookup_view): the text on the touchscreen, the entry on the top screen
 // ---------------------------------------------------------------------------
+static void LogOcr(const std::string &line);
 static SystemFont *g_fontPtr = nullptr;
 #define g_font Leaky(g_fontPtr)
 static kt::TextRenderer *g_textPtr = nullptr;
@@ -453,27 +480,16 @@ static kt::LookupView &View() {
     return *g_viewPtr;
 }
 
-// Both screens, into both of each screen's buffers (CTRPF flips between them).
-static void DrawLookup(kt::LookupView &v) {
-    for (int pass = 0; pass < 2; pass++) {
-        const Screen &top = OSD::GetTopScreen();
-        if (g_snap.valid && top.BytesPerPixel == g_snap.bpp) {  // the paused game, dimmed
-            for (u32 y = 0; y < 240; y++)
-                for (u32 x = 0; x < 400; x++) {
-                    const u8 *src = &g_snap.px[(y * 400 + x) * g_snap.bpp];
-                    u8 *dst = top.GetFramebuffer(x, y);
-                    if (v.hidden()) memcpy(dst, src, g_snap.bpp);
-                    else Darken(dst, src, g_snap.bpp, g_snap.format);
-                }
-        } else {
-            top.DrawRect(0, 0, 400, 240, Color(15, 18, 22));
-        }
-        ScreenCanvas tc(top);
-        v.drawTop(tc);
-        ScreenCanvas bc(OSD::GetBottomScreen());
-        v.drawBottom(bc);
-        OSD::SwapBuffers();
-    }
+// Draws both screens once and shows them. Returns the milliseconds it took.
+static u32 DrawLookup(kt::LookupView &v) {
+    u64 t0 = osGetTime();
+    if (!PaintGame(!v.hidden())) OSD::GetTopScreen().DrawRect(0, 0, 400, 240, Color(15, 18, 22));
+    ScreenCanvas tc(OSD::GetTopScreen());
+    v.drawTop(tc);
+    ScreenCanvas bc(OSD::GetBottomScreen());
+    v.drawBottom(bc);
+    Present();
+    return (u32)(osGetTime() - t0);
 }
 
 static void SaveSelected(kt::LookupView &v) {
@@ -491,58 +507,88 @@ static void SaveSelected(kt::LookupView &v) {
     v.setStatus(status, !ok || pcProblem ? kt::Rgb(255, 170, 90) : kt::Rgb(123, 216, 143));
 }
 
-// Runs the lookup screens until B / Close. Tap a character, D-pad, L/R, Circle Pad, A, X.
+// Timings of the lookup screens, written to ocr_log.txt when they close.
+struct ViewStats {
+    u32 moves = 0, prefetched = 0;
+    u64 lookSum = 0, lookMax = 0, drawSum = 0, drawMax = 0, draws = 0;
+};
+
+// Runs the lookup screens until B / Close. Tap a character; D-pad or Circle Pad: words and rows;
+// L/R: matches; C-stick: scroll; A save, X hide.
 static void RunLookupView(kt::LookupView &v) {
+    ViewStats st;
+    OSD::SwapBuffers();  // let CTRPF finish any pending redraw of its own first
     DrawLookup(v);
     bool touchWas = true;  // a touch held from before doesn't count
     u32 repeatKey = 0;
     u64 repeatAt = 0;
-    const u32 scrollKeys = Key::CPadUp | Key::CPadDown | Key::CStickUp | Key::CStickDown;
-    const u32 moveKeys = Key::DPadLeft | Key::DPadRight | Key::DPadUp | Key::DPadDown | scrollKeys;
+    const u32 kLeft = Key::DPadLeft | Key::CPadLeft, kRight = Key::DPadRight | Key::CPadRight,
+              kUp = Key::DPadUp | Key::CPadUp, kDown = Key::DPadDown | Key::CPadDown,
+              kScroll = Key::CStickUp | Key::CStickDown, kMoves = kLeft | kRight | kUp | kDown | kScroll;
     while (true) {
         Controller::Update();
         u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
         bool changed = false;
+        u64 t0 = osGetTime();
+        bool moved = false;
         if (down & Key::B) break;
         if (down & Key::A) { SaveSelected(v); changed = true; }
         if (down & Key::X) { v.setHidden(!v.hidden()); changed = true; }
-        if (down & Key::L) changed |= v.page(-1);
-        if (down & Key::R) changed |= v.page(1);
-        // D-pad and Circle Pad repeat while held
-        u32 k = down & moveKeys;
-        u64 now = osGetTime();
+        if (down & Key::L) moved |= v.page(-1);
+        if (down & Key::R) moved |= v.page(1);
+        // moving: on the press, then repeating while held
+        u32 k = down & kMoves;
         if (k) {
             repeatKey = k;
-            repeatAt = now + 350;
-        } else if (repeatKey && (held & repeatKey) == repeatKey) {
-            if (now >= repeatAt) {
-                k = repeatKey;
-                repeatAt = now + ((repeatKey & scrollKeys) ? 60 : 110);
+            repeatAt = t0 + 300;
+        } else if (repeatKey && (held & repeatKey)) {
+            if (t0 >= repeatAt) {
+                k = held & repeatKey;
+                repeatAt = t0 + ((repeatKey & kScroll) ? 50 : 90);
             }
         } else {
             repeatKey = 0;
         }
-        if (k & Key::DPadRight) changed |= v.moveWord(1);
-        if (k & Key::DPadLeft) changed |= v.moveWord(-1);
-        if (k & Key::DPadDown) changed |= v.moveRow(1);
-        if (k & Key::DPadUp) changed |= v.moveRow(-1);
-        if (k & (Key::CPadDown | Key::CStickDown)) changed |= v.scroll(1);
-        if (k & (Key::CPadUp | Key::CStickUp)) changed |= v.scroll(-1);
+        if (k & kRight) moved |= v.moveWord(1);
+        else if (k & kLeft) moved |= v.moveWord(-1);
+        if (k & kDown) moved |= v.moveRow(1);
+        else if (k & kUp) moved |= v.moveRow(-1);
+        if (k & Key::CStickDown) changed |= v.scroll(1);
+        else if (k & Key::CStickUp) changed |= v.scroll(-1);
         // touch: acts on the press
         bool touch = Touch::IsDown();
         if (touch && !touchWas) {
             UIntVector p = Touch::GetPosition();
             kt::LookupView::Button b = kt::LookupView::kNone;
-            changed |= v.tap((int)p.x, (int)p.y, b);
+            moved |= v.tap((int)p.x, (int)p.y, b);
             if (b == kt::LookupView::kClose) break;
             if (b == kt::LookupView::kSave) { SaveSelected(v); changed = true; }
             if (b == kt::LookupView::kHide) { v.setHidden(!v.hidden()); changed = true; }
         }
         touchWas = touch;
-        if (changed) DrawLookup(v);
-        Sleep(Milliseconds(16));
+        if (moved) {
+            u64 ms = osGetTime() - t0;
+            st.moves++;
+            st.lookSum += ms;
+            if (ms > st.lookMax) st.lookMax = ms;
+        }
+        if (moved || changed) {
+            u32 ms = DrawLookup(v);
+            st.draws++;
+            st.drawSum += ms;
+            if (ms > st.drawMax) st.drawMax = ms;
+            continue;  // straight back to the buttons
+        }
+        // idle: look up the words the next press could go to, one per pass
+        if (!held && v.prefetch()) { st.prefetched++; continue; }
+        Sleep(Milliseconds(10));
     }
     ClearTopPanel();  // the game as it was
+    if (st.draws)
+        LogOcr(Utils::Format("view: %lu moves, look-up avg %lu ms (max %lu), draw avg %lu ms (max %lu), %lu looked up ahead",
+                             (unsigned long)st.moves, (unsigned long)(st.moves ? st.lookSum / st.moves : 0),
+                             (unsigned long)st.lookMax, (unsigned long)(st.drawSum / st.draws), (unsigned long)st.drawMax,
+                             (unsigned long)st.prefetched));
 }
 
 // ---------------------------------------------------------------------------
@@ -818,9 +864,9 @@ static void ChooseCards(MenuEntry *entry) {
 static const char *kHelp =
     "1. In a game, press the hotkey (ZL+ZR) when a line with a word you don't\n"
     "   know is on screen. The game pauses and the 3DS reads the text.\n"
-    "2. The text shows on the touchscreen. Tap a word (or move with the D-pad)\n"
-    "   and its entry shows on the top screen. L/R: other meanings,\n"
-    "   Circle Pad: scroll, X: hide it to see the game.\n"
+    "2. The text shows on the touchscreen. Tap a word (or move with the D-pad\n"
+    "   or Circle Pad) and its entry shows on the top screen.\n"
+    "   L/R: other meanings, C-stick: scroll, X: hide it to see the game.\n"
     "3. A saves the word to mined.tsv with a screenshot. B closes.\n"
     "4. Anki cards: with tools/ocr_server.py running on your PC they're made\n"
     "   right away; otherwise run tools/mine.py later.\n\n"

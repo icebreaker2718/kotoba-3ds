@@ -96,10 +96,10 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    | Control | Does |
    |---|---|
    | Tap a character | look up the word starting there |
-   | D-pad ◀ ▶ | previous / next word |
-   | D-pad ▲ ▼ | the row above / below |
+   | D-pad or Circle Pad ◀ ▶ | previous / next word (held: keeps going) |
+   | D-pad or Circle Pad ▲ ▼ | the row above / below |
    | L / R | the other matches at that spot (homographs, shorter words), shown as 1/3 |
-   | Circle Pad (or C-stick) | scroll a long definition |
+   | C-stick (New 3DS / 2DS) | scroll a long definition |
    | **A** (or the Save button) | save the word |
    | X (or Hide) | hide the definition to see the game |
    | **B** (or Close) | close; the game continues |

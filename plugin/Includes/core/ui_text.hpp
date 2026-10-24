@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace kt {
@@ -63,7 +64,15 @@ public:
 private:
     GlyphSource &font_;
     std::vector<uint8_t> cell_;
+    struct Scaled {
+        int advance = 0, ox = 0, w = 0, h = 0;
+        std::vector<uint8_t> alpha;  // w x h
+    };
+    static const size_t kCacheBytes = 160 * 1024;
+    std::unordered_map<uint64_t, Scaled> cache_;
+    size_t cacheBytes_ = 0;
     uint32_t fallback(uint32_t cp);
+    const Scaled *scaled(uint32_t cp, int size);
 };
 
 }  // namespace kt

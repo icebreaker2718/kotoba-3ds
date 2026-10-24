@@ -111,6 +111,7 @@ void LookupView::setText(const std::vector<std::string> &blocks) {
     selBlock_ = -1;
     so_ = SearchOutput();
     entry_.clear();
+    cache_.clear();
     layout();
     stops_.assign(blocks_.size(), {});
     for (size_t b = 0; b < blocks_.size(); b++) {
@@ -150,8 +151,7 @@ bool LookupView::selectAt(int block, size_t byte) {
     if (block < 0 || block >= (int)blocks_.size() || byte >= blocks_[block].size()) return false;
     selBlock_ = block;
     selByte_ = byte;
-    so_ = scanAt(dict_, blocks_[block], byte);
-    trimResults(so_);
+    so_ = lookup(block, byte);
     resultIdx_ = 0;
     buildEntry();
     keepVisible();
@@ -328,22 +328,47 @@ bool LookupView::tap(int x, int y, Button &button) {
     return selectAt(cells_[c].block, cells_[c].byte);
 }
 
-bool LookupView::moveWord(int dir) {
+// The dictionary matches at a spot, remembered: moving back and forth costs no disk reads, and
+// prefetch() looks the neighbours up while the player reads.
+SearchOutput LookupView::lookup(int block, size_t byte) {
+    for (const Cached &c : cache_)
+        if (c.block == block && c.byte == byte) return c.so;
+    Cached c;
+    c.block = block;
+    c.byte = byte;
+    c.so = scanAt(dict_, blocks_[block], byte);
+    trimResults(c.so);
+    if (!c.so.results.empty()) {  // read its entry too, so its disk blocks are in the cache
+        Entry e;
+        dict_.entry(c.so.results[0].entryId, e);
+    }
+    if (cache_.size() >= 64) cache_.erase(cache_.begin());
+    cache_.push_back(c);
+    return c.so;
+}
+
+bool LookupView::isCached(int block, size_t byte) const {
+    for (const Cached &c : cache_)
+        if (c.block == block && c.byte == byte) return true;
+    return false;
+}
+
+bool LookupView::wordTarget(int dir, int &block, size_t &byte) const {
     if (selBlock_ < 0) return false;
     if (dir > 0) {
         size_t from = selByte_ + std::max<size_t>(selLen_, 1);
         for (size_t b = selBlock_; b < blocks_.size(); b++)
             for (size_t s : stops_[b])
-                if (b > (size_t)selBlock_ || s >= from) { status_.clear(); return selectAt((int)b, s); }
+                if (b > (size_t)selBlock_ || s >= from) { block = (int)b; byte = s; return true; }
     } else {
         for (int b = selBlock_; b >= 0; b--)
             for (size_t k = stops_[b].size(); k-- > 0;)
-                if (b < selBlock_ || stops_[b][k] < selByte_) { status_.clear(); return selectAt(b, stops_[b][k]); }
+                if (b < selBlock_ || stops_[b][k] < selByte_) { block = b; byte = stops_[b][k]; return true; }
     }
     return false;
 }
 
-bool LookupView::moveRow(int dir) {
+bool LookupView::rowTarget(int dir, int &block, size_t &byte) const {
     int c = selectedCell();
     if (c < 0) return false;
     int target = cells_[c].row + dir;
@@ -355,8 +380,45 @@ bool LookupView::moveRow(int dir) {
         if (d < bestD) { bestD = d; best = i; }
     }
     if (best < 0) return false;
+    block = cells_[best].block;
+    byte = cells_[best].byte;
+    return true;
+}
+
+bool LookupView::moveWord(int dir) {
+    int b;
+    size_t at;
+    if (!wordTarget(dir, b, at)) return false;
     status_.clear();
-    return selectAt(cells_[best].block, cells_[best].byte);
+    return selectAt(b, at);
+}
+
+bool LookupView::moveRow(int dir) {
+    int b;
+    size_t at;
+    if (!rowTarget(dir, b, at)) return false;
+    status_.clear();
+    return selectAt(b, at);
+}
+
+bool LookupView::prefetch() {
+    if (selBlock_ < 0) return false;
+    int b;
+    size_t at;
+    // where the next press goes: the next and previous words, the rows below and above
+    for (int step = 0; step < 4; step++) {
+        bool ok = step == 0 ? wordTarget(1, b, at) : step == 1 ? wordTarget(-1, b, at) : rowTarget(step == 2 ? 1 : -1, b, at);
+        if (ok && !isCached(b, at)) { lookup(b, at); return true; }
+    }
+    // then a few words further on
+    int ahead = 0;
+    for (size_t bl = selBlock_; bl < blocks_.size(); bl++)
+        for (size_t st : stops_[bl]) {
+            if (bl == (size_t)selBlock_ && st <= selByte_) continue;
+            if (++ahead > 6) return false;
+            if (!isCached((int)bl, st)) { lookup((int)bl, st); return true; }
+        }
+    return false;
 }
 
 bool LookupView::page(int dir) {
@@ -438,13 +500,13 @@ void LookupView::drawBottom(Canvas &c) {
         std::vector<std::string> s = tr_.wrap(status_, kStatusSize, kBottomW - 2 * kMargin);
         if (!s.empty()) tr_.draw(c, kMargin, kStatusY, s[0], kStatusSize, statusColor_);
     } else {
-        std::string hint = " words   rows   meanings   scroll";
+        std::string hint = "\uE07B\uE07C\uE049 words  \uE052\uE053 meanings  C-stick scroll";
         int w = tr_.width(hint, 13);
         tr_.draw(c, (kBottomW - w) / 2, kStatusY + 1, hint, 13, kDim);
     }
     // buttons
     const int bw = (kBottomW - 16) / 3;
-    const char *labels[3] = {" Save", hidden_ ? " Show" : " Hide", " Close"};
+    const char *labels[3] = {"\uE000 Save", hidden_ ? "\uE002 Show" : "\uE002 Hide", "\uE001 Close"};
     for (int i = 0; i < 3; i++) {
         int x = 8 + i * bw;
         frame(c, x + 2, kButtonY, bw - 4, kButtonH, kButton, kButtonEdge);
@@ -474,7 +536,7 @@ void LookupView::drawTop(Canvas &c) {
     if (so_.results.size() > 1) {
         char b[24];
         snprintf(b, sizeof(b), "%u/%u", (unsigned)resultIdx_ + 1, (unsigned)so_.results.size());
-        std::string t = std::string("") + b + "";
+        std::string t = std::string("\uE052") + b + "\uE053";
         int w = tr_.width(t, kSmall);
         tr_.draw(c, kTopW - kTopMargin - w, kTopMargin + 4, t, kSmall, kDim);
     }

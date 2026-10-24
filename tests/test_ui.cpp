@@ -160,6 +160,16 @@ int main(int argc, char **argv) {
         check(v.selectedCell() >= 0 && v.cells()[v.selectedCell()].row == 2 && !v.moveWord(1),
               "right stops at the last word: " + v.selectedText());
     }
+    {   // looking up ahead while idle: finite, and moving still works afterwards
+        v.setText({line});
+        int n = 0;
+        while (v.prefetch() && n < 100) n++;
+        check(n >= 2 && n < 20, "words looked up ahead: " + std::to_string(n));
+        std::string before = v.selectedText();
+        check(v.moveWord(1) && v.selectedText() != before && v.moveWord(-1) && v.selectedText() == before,
+              "moving over prefetched words");
+        while (v.moveWord(1)) {}
+    }
     {   // D-pad: rows
         check(v.moveRow(-1) && v.cells()[v.selectedCell()].row == 1, "up: the row above");
         check(v.moveRow(-1) && v.cells()[v.selectedCell()].row == 0 && !v.moveRow(-1), "up on the top row: nothing");

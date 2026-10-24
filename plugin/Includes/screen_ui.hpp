@@ -32,10 +32,12 @@ public:
     void blend(int x, int y, kt::Rgb c, uint8_t alpha) override;
     void shade(int x, int y, int w, int h, uint8_t alpha) override;
 
+    u8 *at(int x, int y) const { return base_ + ((size_t)x * column_ + (239 - y)) * bpp_; }
+
 private:
-    const Screen &s_;
+    u8 *base_;
     int fmt_;
-    unsigned bpp_;
+    unsigned bpp_, column_;
 };
 
 }  // namespace CTRPluginFramework

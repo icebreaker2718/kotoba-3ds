@@ -80,7 +80,11 @@ bool SystemFont::pixels(uint32_t cp, uint8_t *out) {
 // ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
-ScreenCanvas::ScreenCanvas(const Screen &s) : s_(s), fmt_((int)s.Format), bpp_(s.BytesPerPixel) {
+// The framebuffer is stored column by column, bottom to top: pixel (x, y) is at
+// base + (x * column + 239 - y) * bpp, `column` = Stride / bpp pixels (240 plus any gap).
+ScreenCanvas::ScreenCanvas(const Screen &s)
+    : base_((u8 *)s.LeftFramebuffer), fmt_((int)s.Format), bpp_(s.BytesPerPixel),
+      column_(s.BytesPerPixel ? s.Stride / s.BytesPerPixel : 240) {
     width = s.IsTop ? 400 : 320;
     height = 240;
 }
@@ -93,13 +97,21 @@ void ScreenCanvas::fill(int x, int y, int w, int h, kt::Rgb c) {
     if (w <= 0 || h <= 0) return;
     uint8_t rgb[3] = {c.r, c.g, c.b}, px[4];
     kt::rgbToFramebuffer(rgb, fmt_, px);
-    for (int xx = x; xx < x + w; xx++)
-        for (int yy = y; yy < y + h; yy++) memcpy(s_.GetFramebuffer(xx, yy), px, bpp_);
+    for (int xx = x; xx < x + w; xx++) {
+        u8 *p = at(xx, y + h - 1);  // the column runs upwards in memory
+        for (int k = 0; k < h; k++, p += bpp_)
+            for (unsigned b = 0; b < bpp_; b++) p[b] = px[b];
+    }
 }
 
 void ScreenCanvas::blend(int x, int y, kt::Rgb c, uint8_t a) {
     if (x < 0 || y < 0 || x >= width || y >= height || !a) return;
-    u8 *p = s_.GetFramebuffer(x, y);
+    u8 *p = at(x, y);
+    if (a == 255) {
+        uint8_t rgb[3] = {c.r, c.g, c.b};
+        kt::rgbToFramebuffer(rgb, fmt_, p);
+        return;
+    }
     uint8_t rgb[3];
     kt::framebufferToRGB(p, 1, fmt_, bpp_, rgb);
     rgb[0] = (uint8_t)((c.r * a + rgb[0] * (255 - a)) / 255);
@@ -113,14 +125,21 @@ void ScreenCanvas::shade(int x, int y, int w, int h, uint8_t a) {
     if (y < 0) { h += y; y = 0; }
     if (x + w > width) w = width - x;
     if (y + h > height) h = height - y;
-    for (int xx = x; xx < x + w; xx++)
-        for (int yy = y; yy < y + h; yy++) {
-            u8 *p = s_.GetFramebuffer(xx, yy);
-            uint8_t rgb[3];
-            kt::framebufferToRGB(p, 1, fmt_, bpp_, rgb);
-            for (int k = 0; k < 3; k++) rgb[k] = (uint8_t)(rgb[k] * (255 - a) / 255);
-            kt::rgbToFramebuffer(rgb, fmt_, p);
+    if (w <= 0 || h <= 0) return;
+    const unsigned keep = 255 - a;
+    for (int xx = x; xx < x + w; xx++) {
+        u8 *p = at(xx, y + h - 1);
+        for (int k = 0; k < h; k++, p += bpp_) {
+            if (bpp_ >= 3) {  // 8 bits a channel (RGBA8 keeps its alpha byte)
+                for (unsigned b = (fmt_ == 0 ? 1 : 0); b < bpp_; b++) p[b] = (u8)((p[b] * keep) >> 8);
+            } else {
+                uint8_t rgb[3];
+                kt::framebufferToRGB(p, 1, fmt_, bpp_, rgb);
+                for (int q = 0; q < 3; q++) rgb[q] = (uint8_t)((rgb[q] * keep) >> 8);
+                kt::rgbToFramebuffer(rgb, fmt_, p);
+            }
         }
+    }
 }
 
 }  // namespace CTRPluginFramework

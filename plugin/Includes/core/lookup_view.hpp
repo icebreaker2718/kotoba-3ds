@@ -29,10 +29,13 @@ public:
     // A touch at (x, y) on the touchscreen: a character (looks up the word starting there), or a
     // button (returned through `button`).
     bool tap(int x, int y, Button &button);
-    bool moveWord(int dir);     // D-pad left/right: previous/next word
-    bool moveRow(int dir);      // D-pad up/down: the row above/below, same position
+    bool moveWord(int dir);     // D-pad / Circle Pad left/right: previous/next word
+    bool moveRow(int dir);      // D-pad / Circle Pad up/down: the row above/below, same position
+    // Looks up one of the words the next press could go to (call while idle). False when there
+    // is nothing left to look up.
+    bool prefetch();
     bool page(int dir);         // L/R: the other dictionary matches at this spot
-    bool scroll(int lines);     // Circle Pad: the definition up/down
+    bool scroll(int lines);     // C-stick: the definition up/down
     void setHidden(bool hidden) { hidden_ = hidden; }
     bool hidden() const { return hidden_; }
 
@@ -90,8 +93,15 @@ private:
     std::string status_;
     Rgb statusColor_;
 
+    struct Cached { int block; size_t byte; SearchOutput so; };
+    std::vector<Cached> cache_;
+
     void layout();
     static void trimResults(SearchOutput &so);
+    SearchOutput lookup(int block, size_t byte);
+    bool isCached(int block, size_t byte) const;
+    bool wordTarget(int dir, int &block, size_t &byte) const;
+    bool rowTarget(int dir, int &block, size_t &byte) const;
     bool selectAt(int block, size_t byte);
     void buildEntry();
     void keepVisible();
