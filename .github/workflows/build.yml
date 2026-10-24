@@ -169,6 +169,6 @@ jobs:
           2. Copy **dict.bin** to \`/3ds/kotoba3ds/dict.bin\`.
           3. Unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card (the on-device OCR model). The model is [VOCR5 by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only.
 
-          **Kotoba3DS-2MiB-test.3gx** is a test copy for games that crash at start with the plugin: it asks Luma for 2 MiB of the game's memory instead of 5. Reading the screen doesn't fit in 2 MiB, so it only shows whether the game starts.
+          **Kotoba3DS-2MiB-test.3gx** is a test copy for games that crash at start with the plugin: it asks Luma for 2 MiB of the game's memory instead of 5. Reading the screen doesn't fit in 2 MiB, so it only shows whether the game starts (and its start-up line in ocr_log.txt).
 
           See the README for the PC tools (OCR server, Anki cards)."

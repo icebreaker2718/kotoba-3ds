@@ -29,6 +29,8 @@
 #include "core/wrap.hpp"
 #include "screen_ui.hpp"
 
+extern "C" u32 __ctru_heap_size;  // libctru: the plugin's heap (what Luma gave it, minus code and CTRPF's own)
+
 namespace CTRPluginFramework {
 
 // ---------------------------------------------------------------------------
@@ -916,6 +918,10 @@ int main(void) {
     Directory::Create(kRootDir);
     Directory::Create(kShotDir);
     LoadSettings();
+    {   // what this game leaves the plugin (the OCR needs ~2.5 MB at its peak)
+        LogOcr(Utils::Format("start: game %s, plugin heap %lu KB, largest free block %lu KB", TitleIdHex().c_str(),
+                             (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(LargestFreeBlock() / 1024)));
+    }
     {   // CTRPF's own screenshot hotkey stays off: the plugin makes its screenshots itself
         bool *enabled = nullptr;
         u32 *hotkey = nullptr;

@@ -1,6 +1,9 @@
 #!/bin/bash
 # Installs CTRPluginFramework (libctrpf) and 3gxtool into the devkitPro container.
-# 1) tries the ThePixellizerOSS pacman repository, 2) falls back to building from source.
+# libctrpf is always built from source, with one change: CTRPF sets aside 1 MiB of the plugin's
+# memory at start for its cheat-search engine, which Kotoba3DS turns off; 128 KB is plenty for the
+# rest (file and folder buffers), and the other ~900 KB goes to the OCR. 3gxtool comes from the
+# ThePixellizerOSS pacman repository, or is built from source.
 # Every problem is reported as a GitHub annotation so it shows on the run's summary page.
 set -u
 note() { echo "::warning title=$1::$2"; }
@@ -26,7 +29,7 @@ EOF
 PAC=$(command -v dkp-pacman || command -v pacman || true)
 if [ -n "$PAC" ]; then
   for attempt in 1 2 3; do
-    if "$PAC" -Sy --noconfirm libctrpf 3gxtool >pac.log 2>&1; then break; fi
+    if "$PAC" -Sy --noconfirm 3gxtool >pac.log 2>&1; then break; fi
     note "pacman repo (attempt $attempt)" "$(tailof pac.log)"
     sleep $((attempt * 20))
   done
@@ -45,6 +48,11 @@ if [ ! -f "$DKP/libctrpf/lib/libctrpf.a" ]; then
       # newer GCC warns about things in CTRPF's code; don't let -Werror stop the build
       find ctrpf-src/Library -name Makefile -exec sed -i 's/-Werror[^ ]*//g' {} +
       if [ ! -d ctrpf-src/Library ]; then note "libctrpf ($url)" "no Library folder"; continue; fi
+      # its start-up heap: 1 MiB -> 128 KB (see the top of this file)
+      init=$(grep -rl "Mostly used for Search" ctrpf-src/Library/source || true)
+      if [ -z "$init" ]; then note "libctrpf ($url)" "start-up heap line not found"; continue; fi
+      sed -i 's/size = 0x100000; \/\/\/< Mostly used for Search/size = 0x20000; \/\/\/< Mostly used for Search (Kotoba3DS: 128 KB)/' $init
+      grep -q "size = 0x20000;" $init || { note "libctrpf ($url)" "could not shrink the start-up heap"; continue; }
       if make -C ctrpf-src/Library install >ctrpf-build.log 2>&1; then
         ok=1; echo "libctrpf built from $url"; break
       else
