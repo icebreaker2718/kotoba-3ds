@@ -23,12 +23,6 @@ jobs:
           ls $DEVKITPRO/portlibs/3ds/lib | grep -i mbed
           grep -m1 MBEDTLS_VERSION_STRING $DEVKITPRO/portlibs/3ds/include/mbedtls/*version*.h $DEVKITPRO/portlibs/3ds/include/mbedtls/build_info.h 2>/dev/null || true
 
-      - name: Show CTRPF's task API (for the multi-core OCR)
-        continue-on-error: true
-        run: |
-          h=$(find $DEVKITPRO/libctrpf -name Task.hpp | head -1)
-          echo "::notice title=CTRPF Task.hpp::$(grep -nE 'Core|=' "$h" | tr '\n' ' ' | tail -c 1500)"
-
       - name: Build plugin
         run: |
           export PATH="$DEVKITPRO/tools/bin:$PATH"

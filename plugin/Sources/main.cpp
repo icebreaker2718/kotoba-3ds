@@ -832,8 +832,8 @@ static void LogOcr(const std::string &line) {  // timings, to see how fast this 
     }
 }
 
-// Runs job(arg) on n CPU cores at once (CTRPF tasks: New 3DS cores 2 and 3, then core 0, where
-// the paused game leaves room) and waits for all of them.
+// Runs job(arg) on n CPU cores at once (CTRPF tasks: the New 3DS's extra app core 2, and core 0,
+// where the paused game leaves room) and waits for all of them.
 struct CoreJob { void (*job)(void *); void *arg; };
 static s32 CoreTask(void *a) {
     CoreJob *j = (CoreJob *)a;
@@ -841,10 +841,10 @@ static s32 CoreTask(void *a) {
     return 0;
 }
 static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
-    static const s32 kAffinity[] = {Task::NewAppCore, -1, Task::AppCore};  // core 2, any free core, core 0
+    static const s32 kAffinity[] = {Task::NewAppCore, Task::AppCore};
     CoreJob cj = {job, arg};
     std::vector<Task> tasks;
-    for (unsigned i = 0; i < n && i < 3; i++) tasks.emplace_back(CoreTask, &cj, kAffinity[i]);
+    for (unsigned i = 0; i < n && i < 2; i++) tasks.emplace_back(CoreTask, &cj, kAffinity[i]);
     for (Task &t : tasks) t.Start();
     for (Task &t : tasks) t.Wait();
 }
@@ -874,7 +874,7 @@ static bool LocalRead(const std::string &shotName, std::vector<std::string> &par
     // 3. read the box (or the whole screen)
     u64 t2 = osGetTime();
     BoostCpu();  // normally on already (the lookup is open); the clock is logged below
-    g_localOcr.setParallel(System::IsNew3DS() ? 3 : 1, RunOnCores);
+    g_localOcr.setParallel(System::IsNew3DS() ? 2 : 1, RunOnCores);
     int used = -1;
     bool ok = kt::localReadScreen(g_localOcr, grey, w, h, boxes, paragraphs, error, LocalProgress, &used);
     free(grey);
