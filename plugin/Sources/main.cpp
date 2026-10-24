@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <malloc.h>
+#include <unistd.h>
 
 #include "core/bmp.hpp"
 #include "core/dict.hpp"
@@ -627,16 +628,13 @@ static void FixLine(std::string &text, const std::vector<kt::OcrAlt> &alts, void
     g_fixedChars += kt::fixOcrLine(g_dict, text, alts);
 }
 
-// The biggest block malloc can hand out right now (for the log: what the next OCR model load
-// will find). Probes by halving; everything is freed again.
-static u32 LargestFreeBlock() {
-    u32 lo = 0, hi = 8 * 1024 * 1024;
-    while (hi - lo > 16 * 1024) {
-        u32 mid = lo + (hi - lo) / 2;
-        void *p = malloc(mid);
-        if (p) { free(p); lo = mid; } else hi = mid;
-    }
-    return lo;
+// Free heap: what malloc has free inside the heap plus what it hasn't claimed yet (nothing is
+// allocated to find out).
+extern "C" char *fake_heap_end;
+static u32 HeapFree() {
+    struct mallinfo mi = mallinfo();
+    char *top = (char *)sbrk(0);
+    return (u32)mi.fordblks + (top && top < fake_heap_end ? (u32)(fake_heap_end - top) : 0);
 }
 
 static void LogOcr(const std::string &line) {  // timings, to see how fast this console is
@@ -681,8 +679,8 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
     SdReader mf;
     if (!mf.open(kModelDir + name)) { error = "could not open " + name; return false; }
     if (!g_localOcr.load(mf, error)) {
-        LogOcr(Utils::Format("%s: load failed (%s), largest free block %lu KB", name.c_str(), error.c_str(),
-                             (unsigned long)(LargestFreeBlock() / 1024)));
+        LogOcr(Utils::Format("%s: load failed (%s), heap free %lu KB", name.c_str(), error.c_str(),
+                             (unsigned long)(HeapFree() / 1024)));
         return false;
     }
     g_modelName = name;
@@ -704,10 +702,10 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
     free(grey);
     g_localOcr.unload();  // ~1.4 MB back right away
     u64 t3 = osGetTime();
-    LogOcr(Utils::Format("%s: load %lu ms, box %lu ms, read %lu ms (%s, %u threads, %d MHz, %u fixed), largest free block %lu KB, %s",
+    LogOcr(Utils::Format("%s: load %lu ms, box %lu ms, read %lu ms (%s, %u threads, %d MHz, %u fixed), heap free %lu KB, %s",
                          name.c_str(), (unsigned long)(t2 - t1 + (t1 - t0)), (unsigned long)(t2b - t2),
                          (unsigned long)(t3 - t2b), used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(),
-                         CpuMHz(), g_fixedChars, (unsigned long)(LargestFreeBlock() / 1024),
+                         CpuMHz(), g_fixedChars, (unsigned long)(HeapFree() / 1024),
                          ok ? paragraphs[0].c_str() : error.c_str()));
     return ok;
 }
@@ -902,7 +900,32 @@ static const char *kHelp =
     "   right away; otherwise run tools/mine.py later.\n\n"
     "Needs: /3ds/kotoba3ds/dict.bin and the OCR model in /3ds/kotoba3ds/ocr/.";
 
+// Runs before the game's first instruction: records the game's memory budget as the game will
+// see it (Nintendo's SDK sizes the game's heap from these), for games that crash at start.
+static void LogBootMemory() {
+    s64 appRegion = 0, appUsed = 0, sysUsed = 0, baseUsed = 0;
+    svcGetSystemInfo(&appRegion, 0x10000, 0x80);  // Luma: the APPLICATION region's size
+    svcGetSystemInfo(&appUsed, 0, 1);
+    svcGetSystemInfo(&sysUsed, 0, 2);
+    svcGetSystemInfo(&baseUsed, 0, 3);
+    u32 appMemAlloc = *(vu32 *)0x1FF80040;  // what the game is told it may use
+    s64 commitMax = -1, commitNow = -1;
+    Handle rl = 0;
+    if (R_SUCCEEDED(svcGetResourceLimit(&rl, CUR_PROCESS_HANDLE))) {
+        ResourceLimitType t = RESLIMIT_COMMIT;
+        svcGetResourceLimitLimitValues(&commitMax, rl, &t, 1);
+        svcGetResourceLimitCurrentValues(&commitNow, rl, &t, 1);
+        svcCloseHandle(rl);
+    }
+    LogOcr(Utils::Format("boot: game %s, APPMEMALLOC %lu KB, commit limit %ld KB, committed %ld KB, app region %ld KB "
+                         "(used %ld KB), system used %ld KB, base used %ld KB, plugin heap %lu KB",
+                         TitleIdHex().c_str(), (unsigned long)(appMemAlloc / 1024), (long)(commitMax / 1024),
+                         (long)(commitNow / 1024), (long)(appRegion / 1024), (long)(appUsed / 1024),
+                         (long)(sysUsed / 1024), (long)(baseUsed / 1024), (unsigned long)(__ctru_heap_size / 1024)));
+}
+
 void PatchProcess(FwkSettings &settings) {
+    LogBootMemory();
     settings.AllowActionReplay = false;
     settings.AllowSearchEngine = false;
 }
@@ -919,8 +942,8 @@ int main(void) {
     Directory::Create(kShotDir);
     LoadSettings();
     {   // what this game leaves the plugin (the OCR needs ~2.5 MB at its peak)
-        LogOcr(Utils::Format("start: game %s, plugin heap %lu KB, largest free block %lu KB", TitleIdHex().c_str(),
-                             (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(LargestFreeBlock() / 1024)));
+        LogOcr(Utils::Format("start: game %s, plugin heap %lu KB, heap free %lu KB", TitleIdHex().c_str(),
+                             (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(HeapFree() / 1024)));
     }
     {   // CTRPF's own screenshot hotkey stays off: the plugin makes its screenshots itself
         bool *enabled = nullptr;
