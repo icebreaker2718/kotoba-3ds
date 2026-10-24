@@ -1,13 +1,15 @@
 // Kotoba3DS - in-game Japanese dictionary + Anki mining log, as a Luma3DS (CTRPF) plugin.
 //
 // In a game, press the hotkey (default ZL+ZR) on a line with a word you don't know: the game
-// pauses, the 3DS reads the top screen itself (on-device OCR, plugin/Sources/vocr), you pick
-// where the word starts and see its full entry on the top screen. Saved words go to
+// pauses, the 3DS reads the top screen itself (on-device OCR, plugin/Sources/vocr) and shows the
+// text on the touchscreen: tap a word (or move with the D-pad) and its entry shows on the top
+// screen over the dimmed game (the layout follows Rubi for Vita's overlay). Saved words go to
 // SD:/3ds/kotoba3ds/mined.tsv with a screenshot; tools/mine.py on the PC (or ocr_server.py,
 // right away) turns them into Anki cards through AnkiConnect.
 #include <3ds.h>
 #include <CTRPluginFramework.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <ctime>
 #include <string>
@@ -17,12 +19,15 @@
 
 #include "core/bmp.hpp"
 #include "core/dict.hpp"
+#include "core/correct.hpp"
 #include "core/local_ocr.hpp"
+#include "core/lookup_view.hpp"
 #include "core/net.hpp"
 #include "core/search.hpp"
 #include "core/textbox.hpp"
 #include "core/textlines.hpp"
 #include "core/wrap.hpp"
+#include "screen_ui.hpp"
 
 namespace CTRPluginFramework {
 
@@ -79,11 +84,11 @@ static T &Leaky(T *&slot) {
 static SdReader *g_readerPtr = nullptr;
 static kt::Dictionary *g_dictPtr = nullptr;
 static std::string *g_dictErrorPtr = nullptr;
-static kt::SearchOutput *g_lastPtr = nullptr;
+static std::vector<std::string> *g_lastBlocksPtr = nullptr;  // the text of the last lookup
 #define g_reader Leaky(g_readerPtr)
 #define g_dict Leaky(g_dictPtr)
 #define g_dictError Leaky(g_dictErrorPtr)
-#define g_last Leaky(g_lastPtr)
+#define g_lastBlocks Leaky(g_lastBlocksPtr)
 
 static bool EnsureDict() {
     if (g_dict.isOpen()) return true;
@@ -273,65 +278,31 @@ static uint8_t *SnapshotRGB() {
 }
 
 static inline void Darken(u8 *d, const u8 *s, u32 bpp, GSPFormat fmt) {
-    if (bpp >= 3) {  // 8 bits per channel: keep ~37%
-        for (u32 i = 0; i < bpp; i++) d[i] = (u8)((s[i] >> 2) + (s[i] >> 3));
+    if (bpp >= 3) {  // 8 bits per channel: keep ~19%
+        for (u32 i = 0; i < bpp; i++) d[i] = (u8)((s[i] >> 3) + (s[i] >> 4));
+        if (fmt == GSP_RGBA8_OES) d[0] = s[0];  // alpha
         return;
     }
+    // 16 bits: keep 1/4 (shift each field by 2; masks drop the bits that cross into a neighbour)
     u16 v = (u16)(s[0] | (s[1] << 8));
-    if (fmt == GSP_RGB565_OES) v = (u16)(((v >> 2) & 0x39E7) + ((v >> 3) & 0x18E3));
-    else if (fmt == GSP_RGBA4_OES) v = (u16)((v >> 2) & 0x3333);
-    else v = (u16)((v >> 2) & 0x39CE);  // RGB5A1
+    if (fmt == GSP_RGB565_OES) v = (u16)((v >> 2) & 0x39E7);
+    else if (fmt == GSP_RGBA4_OES) v = (u16)(((v >> 2) & 0x3330) | (v & 0xF));
+    else v = (u16)(((v >> 2) & 0x39CE) | (v & 1));  // RGB5A1
     d[0] = (u8)(v & 0xFF);
     d[1] = (u8)(v >> 8);
 }
 
-struct PanelLine { std::string text; Color color; };
-
-// Draws `lines` (from `scroll`) over the darkened game; show=false puts the plain game back.
-static void DrawTopPanel(const std::vector<PanelLine> &lines, int scroll, bool show) {
+static void ClearTopPanel() {  // the paused game as it was, in both buffers
     if (!g_snap.valid) return;
-    const int perScreen = 14;
-    // When a menu closes, CTRPF queues a "clean" that refills the next shown buffer with the faded
-    // game. Flip once first so that happens now, not over one of the two buffers drawn below
-    // (otherwise the screen alternates between the definition and the faded game: flicker).
-    OSD::SwapBuffers();
     for (int pass = 0; pass < 2; pass++) {
         const Screen &top = OSD::GetTopScreen();
         if (top.BytesPerPixel != g_snap.bpp) return;
         for (u32 y = 0; y < 240; y++)
-            for (u32 x = 0; x < 400; x++) {
-                const u8 *src = &g_snap.px[(y * 400 + x) * g_snap.bpp];
-                u8 *dst = top.GetFramebuffer(x, y);
-                if (show) Darken(dst, src, g_snap.bpp, g_snap.format);
-                else memcpy(dst, src, g_snap.bpp);
-            }
-        if (show) {
-            int y = 6;
-            for (int i = scroll; i < (int)lines.size() && i < scroll + perScreen; i++, y += 16)
-                top.DrawSysfont(lines[i].text, 8, y, lines[i].color);
-            if (scroll > 0) top.DrawSysfont("\u25B2", 384, 4, Color::Gray);
-            if (scroll + perScreen < (int)lines.size()) top.DrawSysfont("\u25BC", 384, 222, Color::Gray);
-        }
+            for (u32 x = 0; x < 400; x++)
+                memcpy(top.GetFramebuffer(x, y), &g_snap.px[(y * 400 + x) * g_snap.bpp], g_snap.bpp);
         OSD::SwapBuffers();
     }
 }
-
-static std::vector<PanelLine> EntryLines(const kt::Entry &e, const kt::Result &r) {
-    std::vector<PanelLine> out;
-    for (const std::string &l : Wrap(e.headline, 380.f)) out.push_back({l, Color::Yellow});
-    if (!r.reasons.empty())
-        for (const std::string &l : Wrap("(" + r.reasons + ")", 380.f)) out.push_back({l, Color::Gray});
-    for (const std::string &sense : e.senses)
-        for (const std::string &l : Wrap(sense, 380.f)) out.push_back({l, Color::White});
-    return out;
-}
-
-static void ShowEntryOnTop(const kt::Result &r, int scroll = 0) {
-    kt::Entry e;
-    if (g_dict.entry(r.entryId, e)) DrawTopPanel(EntryLines(e, r), scroll, true);
-}
-
-static void ClearTopPanel() { DrawTopPanel({}, 0, false); }
 
 // ---------------------------------------------------------------------------
 // The PC (tools/ocr_server.py): saved words become Anki cards right away
@@ -439,14 +410,15 @@ static std::string SaveScreenshot() {
     return name;
 }
 
-static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string &query,
-                     const std::string &sentence) {
+// Saves a word to mined.tsv (and sends it to the PC). `status` gets the line to show.
+static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string &query, const std::string &sentence,
+                     std::string &status) {
     ShowBusy("Saving...");
     std::string shot = SaveScreenshot();
     bool fresh = File::Exists(kLogPath) != 1;
     File f;
     if (File::Open(f, kLogPath, File::WRITE | File::CREATE | File::APPEND | File::SYNC) != File::SUCCESS) {
-        MessageBox("Kotoba3DS", std::string("Could not write ") + kLogPath)();
+        status = std::string("Could not write ") + kLogPath;
         return false;
     }
     std::string text;
@@ -456,98 +428,121 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
     text += line + "\n";
     bool ok = f.Write(text.data(), text.size()) == File::SUCCESS;
     f.Close();
-    if (ok) {
-        int n = CountSaved();
-        std::string status = SendCardToPc(line, shot);  // saved on the SD card first, so nothing is lost
-        OSD::Notify(Utils::Format("Saved (%d word%s)", n, n == 1 ? "" : "s") + (status.empty() ? "" : " - " + status),
-                    Color::White, status == "card sent to PC" || status.empty() ? Color::ForestGreen : Color::Orange);
+    if (!ok) {
+        status = "Could not save (is the SD card full?)";
+        return false;
     }
-    return ok;
+    int n = CountSaved();
+    std::string pc = SendCardToPc(line, shot);  // saved on the SD card first, so nothing is lost
+    status = "Saved " + kt::cardExpressionFor(e, r.matchedKey) + Utils::Format(" (%d word%s)", n, n == 1 ? "" : "s") +
+             (pc.empty() ? "" : " · " + pc);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
-// Results & details
+// The lookup screens (core/lookup_view): the text on the touchscreen, the entry on the top screen
 // ---------------------------------------------------------------------------
-static void ShowDetails(const kt::Result &r, const std::string &query, const std::string &sentence) {
-    kt::Entry e;
-    if (!g_dict.entry(r.entryId, e)) {
-        BottomMessage("Could not read this entry.", {"[ Back ]"});
-        return;
-    }
-    std::vector<PanelLine> lines = EntryLines(e, r);
-    if (!g_snap.valid) {  // no game picture to draw over (e.g. inside the Select menu): old way
-        std::string body = kt::detailText(e, r);
-        int c = BottomMessage(body, {"[ Save this word ]", "[ Back ]"});
-        if (c == 0) SaveWord(e, r, r.surface.empty() ? query : r.surface, sentence);
-        return;
-    }
-    const int perScreen = 14;
-    int scroll = 0, sel = 0;
-    bool shown = true;
-    while (true) {
-        DrawTopPanel(lines, scroll, shown);
-        std::vector<std::string> opts = {"[ Save this word ]"};
-        bool canDown = shown && scroll + perScreen < (int)lines.size(), canUp = shown && scroll > 0;
-        if (canDown) opts.push_back("[ \u25BC More of the definition ]");
-        if (canUp) opts.push_back("[ \u25B2 Back up ]");
-        opts.push_back(shown ? "[ Hide definition (see the game) ]" : "[ Show definition ]");
-        opts.push_back("[ Back ]");
-        if (sel >= (int)opts.size()) sel = 0;
-        int c = BottomList(opts, sel);
-        if (c < 0 || opts[c] == "[ Back ]") return;
-        sel = c;
-        const std::string &o = opts[c];
-        if (c == 0) {
-            SaveWord(e, r, r.surface.empty() ? query : r.surface, sentence);  // surface = text as seen
-            return;
-        }
-        if (o.find("More") != std::string::npos) scroll += perScreen - 2;
-        else if (o.find("Back up") != std::string::npos) scroll = scroll - (perScreen - 2) < 0 ? 0 : scroll - (perScreen - 2);
-        else shown = !shown;
-    }
+static SystemFont *g_fontPtr = nullptr;
+#define g_font Leaky(g_fontPtr)
+static kt::TextRenderer *g_textPtr = nullptr;
+static kt::LookupView *g_viewPtr = nullptr;
+
+static kt::LookupView &View() {
+    if (!g_textPtr) g_textPtr = new kt::TextRenderer(g_font);
+    if (!g_viewPtr) g_viewPtr = new kt::LookupView(g_dict, *g_textPtr);
+    return *g_viewPtr;
 }
 
-static std::string *g_lastSentencePtr = nullptr;  // sentence that goes with g_last ("" = manual)
-#define g_lastSentence Leaky(g_lastSentencePtr)
-
-static const kt::SearchOutput *g_listing = nullptr;  // results being browsed (for the cursor callback)
-
-static void OnResultCursor(Keyboard &, KeyboardEvent &ev) {
-    if (ev.type == KeyboardEvent::SelectionChanged && g_listing && ev.selectedIndex < g_listing->results.size())
-        ShowEntryOnTop(g_listing->results[ev.selectedIndex]);
-}
-
-static void ShowResults(const kt::SearchOutput &so, const std::string &sentence = "") {
-    if (so.results.empty()) {
-        BottomMessage("No results for 「" + so.query + "」", {"[ Back ]"});
-        return;
-    }
-    std::vector<std::string> labels;
-    labels.reserve(so.results.size());
-    for (const kt::Result &r : so.results) {
-        kt::Entry e;
-        std::string line = g_dict.entry(r.entryId, e) ? kt::summaryLine(e, r, 90) : "?";
-        labels.push_back((r.prefixOnly ? "→ " : "") + line);
-    }
-    int sel = 0;
-    while (true) {
-        int choice;
-        if (g_snap.valid) {  // the highlighted word's full entry is shown on the top screen
-            ShowEntryOnTop(so.results[sel]);
-            g_listing = &so;
-            Keyboard kb(labels);
-            kb.DisplayTopScreen = false;
-            kb.OnKeyboardEvent(OnResultCursor);
-            if (sel > 0) kb.ChangeSelectedEntry(sel);
-            choice = kb.Open();
-            g_listing = nullptr;
+// Both screens, into both of each screen's buffers (CTRPF flips between them).
+static void DrawLookup(kt::LookupView &v) {
+    for (int pass = 0; pass < 2; pass++) {
+        const Screen &top = OSD::GetTopScreen();
+        if (g_snap.valid && top.BytesPerPixel == g_snap.bpp) {  // the paused game, dimmed
+            for (u32 y = 0; y < 240; y++)
+                for (u32 x = 0; x < 400; x++) {
+                    const u8 *src = &g_snap.px[(y * 400 + x) * g_snap.bpp];
+                    u8 *dst = top.GetFramebuffer(x, y);
+                    if (v.hidden()) memcpy(dst, src, g_snap.bpp);
+                    else Darken(dst, src, g_snap.bpp, g_snap.format);
+                }
         } else {
-            choice = BottomList(labels, sel);
+            top.DrawRect(0, 0, 400, 240, Color(15, 18, 22));
         }
-        if (choice < 0) { if (g_snap.valid) ClearTopPanel(); return; }
-        sel = choice;
-        ShowDetails(so.results[choice], so.query, sentence);
+        ScreenCanvas tc(top);
+        v.drawTop(tc);
+        ScreenCanvas bc(OSD::GetBottomScreen());
+        v.drawBottom(bc);
+        OSD::SwapBuffers();
     }
+}
+
+static void SaveSelected(kt::LookupView &v) {
+    const kt::Result *r = v.result();
+    if (!r) return;
+    kt::Entry e;
+    std::string status;
+    if (!g_dict.entry(r->entryId, e)) {
+        v.setStatus("Could not read this entry.", kt::Rgb(255, 170, 90));
+        return;
+    }
+    bool ok = SaveWord(e, *r, r->surface.empty() ? v.query() : r->surface, v.sentence(), status);
+    if (ok) v.markSaved();
+    bool pcProblem = status.find("run mine.py later") != std::string::npos;
+    v.setStatus(status, !ok || pcProblem ? kt::Rgb(255, 170, 90) : kt::Rgb(123, 216, 143));
+}
+
+// Runs the lookup screens until B / Close. Tap a character, D-pad, L/R, Circle Pad, A, X.
+static void RunLookupView(kt::LookupView &v) {
+    DrawLookup(v);
+    bool touchWas = true;  // a touch held from before doesn't count
+    u32 repeatKey = 0;
+    u64 repeatAt = 0;
+    const u32 scrollKeys = Key::CPadUp | Key::CPadDown | Key::CStickUp | Key::CStickDown;
+    const u32 moveKeys = Key::DPadLeft | Key::DPadRight | Key::DPadUp | Key::DPadDown | scrollKeys;
+    while (true) {
+        Controller::Update();
+        u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
+        bool changed = false;
+        if (down & Key::B) break;
+        if (down & Key::A) { SaveSelected(v); changed = true; }
+        if (down & Key::X) { v.setHidden(!v.hidden()); changed = true; }
+        if (down & Key::L) changed |= v.page(-1);
+        if (down & Key::R) changed |= v.page(1);
+        // D-pad and Circle Pad repeat while held
+        u32 k = down & moveKeys;
+        u64 now = osGetTime();
+        if (k) {
+            repeatKey = k;
+            repeatAt = now + 350;
+        } else if (repeatKey && (held & repeatKey) == repeatKey) {
+            if (now >= repeatAt) {
+                k = repeatKey;
+                repeatAt = now + ((repeatKey & scrollKeys) ? 60 : 110);
+            }
+        } else {
+            repeatKey = 0;
+        }
+        if (k & Key::DPadRight) changed |= v.moveWord(1);
+        if (k & Key::DPadLeft) changed |= v.moveWord(-1);
+        if (k & Key::DPadDown) changed |= v.moveRow(1);
+        if (k & Key::DPadUp) changed |= v.moveRow(-1);
+        if (k & (Key::CPadDown | Key::CStickDown)) changed |= v.scroll(1);
+        if (k & (Key::CPadUp | Key::CStickUp)) changed |= v.scroll(-1);
+        // touch: acts on the press
+        bool touch = Touch::IsDown();
+        if (touch && !touchWas) {
+            UIntVector p = Touch::GetPosition();
+            kt::LookupView::Button b = kt::LookupView::kNone;
+            changed |= v.tap((int)p.x, (int)p.y, b);
+            if (b == kt::LookupView::kClose) break;
+            if (b == kt::LookupView::kSave) { SaveSelected(v); changed = true; }
+            if (b == kt::LookupView::kHide) { v.setHidden(!v.hidden()); changed = true; }
+        }
+        touchWas = touch;
+        if (changed) DrawLookup(v);
+        Sleep(Milliseconds(16));
+    }
+    ClearTopPanel();  // the game as it was
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +562,12 @@ static std::string FindModel() {
 
 static void LocalProgress(unsigned i, unsigned n) {
     ShowBusy("Reading the screen on the 3DS...", Utils::Format("line %u of %u", i + 1, n));
+}
+
+// OCR misreads the dictionary can fix: 造跡 -> 遺跡 (遺 was the recognizer's second guess).
+static unsigned g_fixedChars = 0;
+static void FixLine(std::string &text, const std::vector<kt::OcrAlt> &alts, void *) {
+    g_fixedChars += kt::fixOcrLine(g_dict, text, alts);
 }
 
 static void LogOcr(const std::string &line) {  // timings, to see how fast this console is
@@ -621,68 +622,38 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
     // 3. read the box (or the whole screen)
     u64 t2 = osGetTime();
     g_localOcr.setParallel(System::IsNew3DS() ? 2 : 1, RunOnCores);
+    g_localOcr.setFixer(FixLine, nullptr);
+    g_fixedChars = 0;
     int used = -1;
     bool ok = kt::localReadScreen(g_localOcr, grey, 400, 240, boxes, paragraphs, error, LocalProgress, &used);
     free(grey);
     g_localOcr.unload();  // ~1.4 MB back right away
     u64 t3 = osGetTime();
     struct mallinfo mi = mallinfo();
-    LogOcr(Utils::Format("%s: box %lu ms, load %lu ms, read %lu ms (%s, %u threads, %d MHz), heap free %lu KB, %s",
+    LogOcr(Utils::Format("%s: box %lu ms, load %lu ms, read %lu ms (%s, %u threads, %d MHz, %u fixed), heap free %lu KB, %s",
                          name.c_str(), (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned long)(t3 - t2),
-                         used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(), CpuMHz(),
+                         used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
                          (unsigned long)(mi.fordblks / 1024), ok ? paragraphs[0].c_str() : error.c_str()));
     return ok;
 }
 
-// Several blocks of text: let the player pick one (the longest is preselected).
-static bool PickParagraph(const std::vector<std::string> &paragraphs, std::string &out) {
-    if (paragraphs.size() == 1) { out = paragraphs[0]; return true; }
-    std::vector<std::string> labels;
-    size_t best = 0;
-    for (size_t i = 0; i < paragraphs.size(); i++) {
-        std::vector<std::string> lines = Wrap(paragraphs[i]);
-        labels.push_back(lines.empty() ? paragraphs[i] : lines[0] + (lines.size() > 1 ? "…" : ""));
-        if (paragraphs[i].size() > paragraphs[best].size()) best = i;
-    }
-    if (g_snap.valid) ClearTopPanel();
-    int c = BottomList(labels, (int)best);
-    if (c < 0) return false;
-    out = paragraphs[c];
-    return true;
-}
-
-// Pick where the word starts, then the results.
-static void TapWord(const std::string &sentence, const std::vector<std::string> &chunks) {
-    int sel = 0;
-    while (true) {
-        if (g_snap.valid) ClearTopPanel();  // the plain game picture while picking a word
-        int c = BottomList(chunks, sel);
-        if (c < 0) return;
-        sel = c;
-        size_t offset = 0;
-        for (int i = 0; i < c; i++) offset += chunks[i].size();
-        kt::SearchOutput so = kt::scanAt(g_dict, sentence, offset);
-        if (so.results.empty()) {
-            BottomMessage("Nothing in the dictionary starts at 「" + chunks[c] + "」.", {"[ Back ]"});
-            continue;
-        }
-        g_last = so;
-        g_lastSentence = sentence;
-        ShowResults(so, sentence);
-    }
-}
-
 static void Lookup() {
     std::vector<std::string> paragraphs;
-    std::string error, sentence;
+    std::string error;
     if (!ReadSnapshot(paragraphs, error)) {
         BottomMessage("Couldn't read the screen:\n" + error, {"[ Close ]"});
         return;
     }
-    if (!PickParagraph(paragraphs, sentence)) return;
+    // the longest block first (the dialogue, usually)
+    std::stable_sort(paragraphs.begin(), paragraphs.end(),
+                     [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
     ShowBusy("Finding the words...");
-    std::vector<std::string> chunks = kt::chunkText(g_dict, sentence);
-    TapWord(sentence, chunks);
+    g_lastBlocks = paragraphs;
+    static bool fontLogged = false;
+    if (!fontLogged) { LogOcr(g_font.describe()); fontLogged = true; }
+    kt::LookupView &v = View();
+    v.setText(paragraphs);
+    RunLookupView(v);
 }
 
 static void ReleaseLookupMemory() {
@@ -847,9 +818,10 @@ static void ChooseCards(MenuEntry *entry) {
 static const char *kHelp =
     "1. In a game, press the hotkey (ZL+ZR) when a line with a word you don't\n"
     "   know is on screen. The game pauses and the 3DS reads the text.\n"
-    "2. On the bottom screen, pick where the word starts. Its entry shows on the\n"
-    "   top screen; move through the results with the D-pad.\n"
-    "3. Choose 'Save this word'. It goes to mined.tsv with a screenshot.\n"
+    "2. The text shows on the touchscreen. Tap a word (or move with the D-pad)\n"
+    "   and its entry shows on the top screen. L/R: other meanings,\n"
+    "   Circle Pad: scroll, X: hide it to see the game.\n"
+    "3. A saves the word to mined.tsv with a screenshot. B closes.\n"
     "4. Anki cards: with tools/ocr_server.py running on your PC they're made\n"
     "   right away; otherwise run tools/mine.py later.\n\n"
     "Needs: /3ds/kotoba3ds/dict.bin and the OCR model in /3ds/kotoba3ds/ocr/.";
@@ -879,12 +851,15 @@ int main(void) {
 
     *menu += new MenuEntry("Last results", nullptr,
                            [](MenuEntry *) {
-                               if (g_last.results.empty())
+                               if (g_lastBlocks.empty()) {
                                    MessageBox("Kotoba3DS", "No lookup yet.")();
-                               else if (EnsureDict())
-                                   ShowResults(g_last, g_lastSentence);
+                               } else if (EnsureDict()) {
+                                   kt::LookupView &v = View();
+                                   v.setText(g_lastBlocks);
+                                   RunLookupView(v);
+                               }
                            },
-                           "Reopen the words from your last lookup.");
+                           "Reopen the text of your last lookup.");
     *menu += new MenuEntry("Saved words", nullptr, SavedWords, "Review or delete saved words.");
     *menu += new MenuEntry(HotkeyEntryName(), nullptr, ChooseHotkey, "The button combo that reads the screen.");
     *menu += new MenuEntry(CardsEntryName(), nullptr, ChooseCards, "Make Anki cards right away with your PC.");

@@ -10,6 +10,7 @@
 #include "core/dict.hpp"
 #include "core/textbox.hpp"
 #include "core/textlines.hpp"
+#include "core/correct.hpp"
 #include "core/local_ocr.hpp"
 #include "core/net.hpp"
 #include "core/search.hpp"
@@ -150,6 +151,22 @@ int main(int argc, char **argv) {
             bool hasGa = false, hasTakarabako = false;
             for (auto &x : c) { hasGa |= x == "が"; hasTakarabako |= x == "宝箱"; }
             check(hasGa && hasTakarabako, "particle split off, compound kept");
+            // misread kanji fixed by the dictionary from the recognizer's other guesses
+            auto alt = [](uint32_t byte, std::vector<std::string> o) { OcrAlt a; a.byte = byte; a.len = 3; a.options = o; return a; };
+            std::string t = "造跡の壁にこんな一文を";
+            check(fixOcrLine(d, t, {alt(0, {"遺", "遠"}), alt(24, {"ー"})}) == 1 && t == "遺跡の壁にこんな一文を",
+                  "造跡 -> 遺跡: " + t);
+            t = "この島には造跡がたくさん";
+            fixOcrLine(d, t, {alt(15, {"遺"})});
+            check(t == "この島には遺跡がたくさん", "fixed mid-line: " + t);
+            t = "建物を造る";  // 造 is part of a word already: left alone
+            check(fixOcrLine(d, t, {alt(9, {"遺"})}) == 0 && t == "建物を造る", "a kanji inside a word is trusted");
+            t = "人に会う";   // no guess makes a longer word: left alone
+            check(fixOcrLine(d, t, {alt(0, {"入"})}) == 0 && t == "人に会う", "nothing better: unchanged");
+            t = "ここは門の造跡";  // offsets after a fix still line up
+            fixOcrLine(d, t, {alt(15, {"遺"}), alt(18, {"跡"})});
+            check(t == "ここは門の遺跡", "later alternatives after a fix: " + t);
+            check(wordCover(d, "遺跡が", 0, 3) == 2 && wordCover(d, "造跡が", 0, 3) <= 1, "wordCover");
         }
     }
     printf(fails ? "%d FAILED\n" : "ALL PASSED\n", fails);

@@ -19,6 +19,9 @@ uint8_t *topScreenRGB888(Reader &bmp, unsigned &w, unsigned &h, std::string &err
 void framebufferToRGB(const uint8_t *px, unsigned count, int format, unsigned bpp, uint8_t *rgb);
 
 // A 24-bit BMP file (bottom-up rows) of w x h R, G, B pixels.
+// One R, G, B pixel -> framebuffer bytes (the inverse of framebufferToRGB, opaque).
+void rgbToFramebuffer(const uint8_t *rgb, int format, uint8_t *px);
+
 std::string bmpFromRGB(const uint8_t *rgb, unsigned w, unsigned h);
 
 }  // namespace kt

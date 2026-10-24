@@ -136,6 +136,20 @@ void framebufferToRGB(const uint8_t *px, unsigned count, int format, unsigned bp
     }
 }
 
+void rgbToFramebuffer(const uint8_t *rgb, int format, uint8_t *px) {
+    uint8_t r = rgb[0], g = rgb[1], b = rgb[2];
+    uint16_t v;
+    switch (format) {
+    case 0: px[0] = 0xFF; px[1] = b; px[2] = g; px[3] = r; return;  // RGBA8: A, B, G, R
+    case 1: px[0] = b; px[1] = g; px[2] = r; return;                 // BGR8
+    case 2: v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)); break;
+    case 3: v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xF8) << 3) | ((b & 0xF8) >> 2) | 1); break;
+    default: v = (uint16_t)(((r & 0xF0) << 8) | ((g & 0xF0) << 4) | (b & 0xF0) | 0xF); break;
+    }
+    px[0] = (uint8_t)(v & 0xFF);
+    px[1] = (uint8_t)(v >> 8);
+}
+
 std::string bmpFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
     const unsigned stride = (w * 3 + 3) & ~3u, dataSize = stride * h;
     std::string out(54 + (size_t)dataSize, '\0');

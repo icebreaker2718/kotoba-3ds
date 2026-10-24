@@ -5,6 +5,7 @@
 #include <cstring>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 
 #include "core/kana.hpp"
 #include "vocr.h"
@@ -27,6 +28,7 @@ void LocalOcr::unload() {
     blob_ = arena_ = nullptr;
     model_ = ctx_ = nullptr;
     ctxs_.clear();
+    topk_.clear();
     info_.clear();
 }
 
@@ -88,10 +90,12 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
 }
 
 // Recognizes one line into out (cap bytes, NUL-terminated); a line too long for the model is read
-// in pieces. Runs on worker threads: no allocation, little stack.
+// in pieces. With tk, also fills alts[0..*nAlts) with the characters the recognizer was unsure of.
+// Runs on worker threads: no allocation, little stack.
 static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsigned stride, const VocrLine &L,
-                   char *out, size_t cap) {
+                   char *out, size_t cap, const TopK *tk, RawAlt *alts, unsigned *nAlts) {
     out[0] = 0;
+    if (nAlts) *nAlts = 0;
     size_t used = 0;
     int fmt = VOCR_GREY8 | (L.dark ? VOCR_INVERT : 0);
     unsigned pieces = 1;
@@ -106,9 +110,49 @@ static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsign
         im.height = L.h;
         im.stride = stride;
         im.format = fmt;
-        int r = vocr_run(c, &im, out + used, cap - used, nullptr);
+        vocr_extra ex;
+        memset(&ex, 0, sizeof(ex));
+        bool withAlts = tk && tk->logit && alts && nAlts &&
+                        vocr_resized_width(m, im.width, im.height) / m->stride + 1 <= tk->cap;
+        if (withAlts) {
+            ex.topk = kTopK;
+            ex.topk_logit = tk->logit;
+            ex.topk_class = tk->cls;
+            ex.cap_frames = tk->cap;
+        }
+        int r = vocr_run(c, &im, out + used, cap - used, withAlts ? &ex : nullptr);
         if (r != VOCR_OK && r != VOCR_E_TEXT) return r;
-        used += strlen(out + used);
+        size_t len = strlen(out + used);
+        if (withAlts && r == VOCR_OK) {
+            // redo the greedy CTC over the frames' argmax, to know which frame wrote each character
+            unsigned last = 0;
+            size_t at = used;
+            bool same = true;
+            for (unsigned f = 0; f < ex.frames && same; f++) {
+                const uint16_t *tc = tk->cls + (size_t)f * kTopK;
+                const float *tv = tk->logit + (size_t)f * kTopK;
+                unsigned best = tc[0];
+                if (best && best != last) {
+                    unsigned n;
+                    const char *s = vocr_class_text(m, best, &n);
+                    if (at + n > used + len || memcmp(out + at, s, n)) { same = false; break; }
+                    // the other guesses for this character, with their share of the frame's top K
+                    float sum = 1.0f;
+                    for (unsigned j = 1; j < kTopK; j++) sum += expf(tv[j] - tv[0]);
+                    RawAlt a;
+                    a.byte = (uint16_t)at;
+                    a.len = (uint16_t)n;
+                    a.n = 0;
+                    for (unsigned j = 1; j < kTopK && a.n < 3; j++)
+                        if (tc[j] && expf(tv[j] - tv[0]) / sum >= kAltMinShare) a.cls[a.n++] = tc[j];
+                    if (a.n && *nAlts < kMaxAlts) alts[(*nAlts)++] = a;
+                    at += n;
+                }
+                last = best;
+            }
+            if (!same || at != used + len) *nAlts = 0;  // couldn't line them up: no alternatives
+        }
+        used += len;
     }
     return VOCR_OK;
 }
@@ -124,14 +168,19 @@ struct LineJob {
     unsigned count = 0;
     char *text = nullptr;   // count x kLineCap
     int *rc = nullptr;
+    const TopK *tk = nullptr;  // per worker
+    RawAlt *alts = nullptr;    // count x kMaxAlts
+    unsigned *nAlts = nullptr;
     std::atomic<unsigned> next{0}, worker{0};
 };
 
 void lineWorker(void *arg) {
     LineJob *j = (LineJob *)arg;
-    vocr_ctx *c = (vocr_ctx *)j->ctxs[j->worker.fetch_add(1)];
+    unsigned w = j->worker.fetch_add(1);
+    vocr_ctx *c = (vocr_ctx *)j->ctxs[w];
     for (unsigned i; (i = j->next.fetch_add(1)) < j->count;)
-        j->rc[i] = runLine(c, j->model, j->grey, j->stride, j->lines[i], j->text + (size_t)i * kLineCap, kLineCap);
+        j->rc[i] = runLine(c, j->model, j->grey, j->stride, j->lines[i], j->text + (size_t)i * kLineCap, kLineCap,
+                           j->tk ? &j->tk[w] : nullptr, j->alts + (size_t)i * kMaxAlts, &j->nAlts[i]);
 }
 }  // namespace
 
@@ -187,11 +236,22 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
         if (!c2 || !a2 || vocr_init(c2, m, &o, a2, arenaBytes_) != VOCR_OK) break;  // fewer workers then
         ctxs_.push_back(c2);
     }
+    // top-K buffers per worker (a few KB): only when someone will use the alternatives
+    while (fixer_ && topk_.size() < ctxs_.size()) {
+        TopK t;
+        t.cap = m->max_width / m->stride + 8;
+        t.logit = (float *)alignedAlloc((size_t)t.cap * kTopK * sizeof(float));
+        t.cls = (uint16_t *)alignedAlloc((size_t)t.cap * kTopK * sizeof(uint16_t));
+        if (!t.logit || !t.cls) t = TopK();
+        topk_.push_back(t);
+    }
     if (workers > ctxs_.size()) workers = (unsigned)ctxs_.size();
     if (workers < 1) workers = 1;
     lastWorkers_ = workers;
     std::vector<char> text((size_t)std::max(n, 1u) * kLineCap, 0);
     std::vector<int> rc(std::max(n, 1u), VOCR_E_ARG);
+    std::vector<RawAlt> rawAlts(fixer_ ? (size_t)std::max(n, 1u) * kMaxAlts : 1);
+    std::vector<unsigned> nAlts(std::max(n, 1u), 0);
     LineJob job;
     job.model = m;
     job.ctxs = ctxs_.data();
@@ -201,13 +261,17 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
     job.count = n;
     job.text = text.data();
     job.rc = rc.data();
+    job.tk = fixer_ && topk_.size() >= workers ? (const TopK *)topk_.data() : nullptr;
+    job.alts = rawAlts.data();
+    job.nAlts = nAlts.data();
     if (workers > 1) {
         if (progress) progress(0, 1);
         runner_(workers, lineWorker, &job);
     } else {
         for (unsigned k = 0; k < n; k++) {  // one at a time, with progress
             if (progress) progress(k, n);
-            job.rc[k] = runLine((vocr_ctx *)ctxs_[0], m, grey, w, todoLines[k], job.text + (size_t)k * kLineCap, kLineCap);
+            job.rc[k] = runLine((vocr_ctx *)ctxs_[0], m, grey, w, todoLines[k], job.text + (size_t)k * kLineCap, kLineCap,
+                                job.tk, job.alts + (size_t)k * kMaxAlts, &job.nAlts[k]);
         }
     }
     for (unsigned k = 0; k < n; k++) {
@@ -219,6 +283,30 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
         if (rc[k] != VOCR_OK || !t[0]) continue;
         TextLine line;
         line.text = t;
+        if (fixer_ && nAlts[k]) {  // let the dictionary pick between the recognizer's guesses
+            std::vector<OcrAlt> alts;
+            for (unsigned a = 0; a < nAlts[k]; a++) {
+                const RawAlt &ra = rawAlts[(size_t)k * kMaxAlts + a];
+                OcrAlt oa;
+                oa.byte = ra.byte;
+                oa.len = ra.len;
+                for (unsigned q = 0; q < ra.n; q++) {
+                    unsigned len;
+                    const char *s = vocr_class_text(m, ra.cls[q], &len);
+                    oa.options.push_back(std::string(s, len));
+                }
+                alts.push_back(oa);
+            }
+#ifndef __3DS__
+            if (getenv("LO_DEBUG"))
+                for (const OcrAlt &oa : alts) {
+                    fprintf(stderr, "alt @%u %s:", oa.byte, line.text.substr(oa.byte, oa.len).c_str());
+                    for (const std::string &o : oa.options) fprintf(stderr, " %s", o.c_str());
+                    fprintf(stderr, "\n");
+                }
+#endif
+            fixer_(line.text, alts, fixerUser_);
+        }
         line.paragraph = (int)k;  // each line its own block; textParagraphs() joins a text box's lines
         line.centerX = (L.x + L.w / 2.0f) / w;
         line.centerY = (L.y + L.h / 2.0f) / h;

@@ -12,6 +12,29 @@
 
 namespace kt {
 
+// A character the recognizer was unsure of: text[byte, byte + len) could also be one of options
+// (likeliest first).
+struct OcrAlt {
+    uint32_t byte = 0, len = 0;
+    std::vector<std::string> options;
+};
+// Called for each recognized line with its unsure characters; may change the text.
+typedef void (*LineFixer)(std::string &text, const std::vector<OcrAlt> &alts, void *user);
+
+// internal: an unsure character as a worker thread records it (no allocation there)
+struct RawAlt {
+    uint16_t byte = 0, len = 0, n = 0;
+    uint16_t cls[3] = {0, 0, 0};
+};
+enum { kTopK = 4, kMaxAlts = 48 };
+static const float kAltMinShare = 0.02f;  // a guess with less than 2% of the top 4's weight is ignored
+
+struct TopK {  // internal: per-worker buffers for the recognizer's top-K guesses
+    float *logit = nullptr;
+    uint16_t *cls = nullptr;
+    unsigned cap = 0;  // frames
+};
+
 class LocalOcr {
 public:
     LocalOcr() = default;
@@ -29,7 +52,9 @@ public:
     // and return when all have finished. Each extra worker needs its own ~180 KB of memory.
     typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
     void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
-    unsigned lastWorkers() const { return lastWorkers_; }  // how many the last read used
+    unsigned lastWorkers() const { return lastWorkers_; }
+    // With a fixer, each line's uncertain characters are passed to it (see fixOcrLine in correct.hpp).
+    void setFixer(LineFixer fixer, void *user) { fixer_ = fixer; fixerUser_ = user; }  // how many the last read used
     const std::string &modelInfo() const { return info_; }
 
     // grey: w*h bytes (row-major), grey = (77 R + 150 G + 29 B) >> 8 as the model expects.
@@ -51,6 +76,9 @@ private:
     int mode_ = 0;
     unsigned workers_ = 1, lastWorkers_ = 1;
     Runner runner_ = nullptr;
+    LineFixer fixer_ = nullptr;
+    void *fixerUser_ = nullptr;
+    std::vector<TopK> topk_;
     void *alignedAlloc(size_t bytes);
     bool loadInner(Reader &file, std::string &error);
 };

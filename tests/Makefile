@@ -30,12 +30,16 @@ test_wrap: test_wrap.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.
 test_ocr_core: test_ocr_core.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
 	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_ocr_core.cpp $(CORE) $(LDLIBS)
 
-run: test_wrap test_core test_ocr_core
+test_ui: test_ui.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
+	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_ui.cpp $(CORE) $(LDLIBS)
+
+run: test_wrap test_core test_ocr_core test_ui
 	./test_core $(DICT)
 	./test_wrap $(DICT)
 	./test_ocr_core $(DICT)
+	./test_ui $(DICT)
 
 clean:
-	rm -f test_core test_net bmp_tool test_wrap test_ocr_core libvocr.a vocr_*.o
+	rm -f test_core test_net bmp_tool test_wrap test_ocr_core test_ui libvocr.a vocr_*.o
 
 .PHONY: run clean
