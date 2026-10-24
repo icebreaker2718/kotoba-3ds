@@ -5,8 +5,8 @@ words you save into Anki cards with the screenshot and the sentence.
 
 **On the 3DS** (Luma3DS plugin): press **ZL + ZR** in any game when a line has a word you
 don't know. The game pauses, the 3DS **reads the screen itself** (on-device OCR, no PC or
-internet), you pick where the word starts, and its full entry appears on the top screen over the
-paused game. Conjugated forms are matched (食べられなかった → 食べる). **Save** the word: it goes
+internet) and shows the text on the touchscreen: tap a word and its full entry appears on the top
+screen over the paused game. Conjugated forms are matched (食べられなかった → 食べる). **Save** the word: it goes
 to `SD:/3ds/kotoba3ds/mined.tsv` with the sentence and a screenshot.
 
 **On the PC** (`tools/mine.py`): fetches the saved words over Wi-Fi (ftpd) or from the SD card
@@ -86,21 +86,37 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
 ## 3. Use it while playing
 
 1. A line has a word you don't know → press **ZL + ZR**. The game pauses and the 3DS reads the
-   top screen ("Reading the screen…", about a second).
-2. If several blocks of text were found, pick the line (the longest is preselected).
-3. The line appears split into words on the **bottom screen**. Pick where your word starts.
-4. The results are listed; the highlighted one's **full entry** shows on the top screen over the
-   dimmed game. Open one to save it, scroll a long entry, or hide the definition to see the game.
-5. **Save this word** writes it to `mined.tsv` with the sentence and a screenshot of the paused
-   game (in `SD:/3ds/kotoba3ds/shots/`). Press B to back out; the game continues.
+   top screen ("Reading the screen…", under a second).
+2. The text appears in large type on the **touchscreen**. **Tap a word**: its entry shows on the
+   top screen over the dimmed game (the layout follows
+   [Rubi for Vita](https://github.com/bee-san/Rubi_for_vita)'s overlay), the word in yellow, its
+   reading in blue, any conjugation under it. Conjugated forms are matched whole
+   (食べられなかった → 食べる).
 
-The **Select** menu has: *Last results* (reopen your last lookup), *Saved words* (review or
+   | Control | Does |
+   |---|---|
+   | Tap a character | look up the word starting there |
+   | D-pad ◀ ▶ | previous / next word |
+   | D-pad ▲ ▼ | the row above / below |
+   | L / R | the other matches at that spot (homographs, shorter words), shown as 1/3 |
+   | Circle Pad (or C-stick) | scroll a long definition |
+   | **A** (or the Save button) | save the word |
+   | X (or Hide) | hide the definition to see the game |
+   | **B** (or Close) | close; the game continues |
+
+   If the screen had several blocks of text (a menu and a dialogue box), they are all there, the
+   longest first, with a line between them.
+3. **Save** writes the word to `mined.tsv` with the sentence and a screenshot of the paused game
+   (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green.
+
+The **Select** menu has: *Last results* (reopen the text of your last lookup), *Saved words* (review or
 delete), *Hotkey* (if ZL + ZR does something in your game), *Anki cards* (see below) and
 *How to use*.
 
 **How it reads the screen.** The text box is found by its flat colour (so a box that moves
 around is fine), its lines are read, furigana and stray marks (the "next" arrow) are dropped.
-With no box on screen it reads the whole screen. The OCR is VOCR from
+With no box on screen it reads the whole screen. Where the recognizer was unsure of a kanji, the
+dictionary decides: a guess that makes a word replaces one that doesn't (造跡 → 遺跡). The OCR is VOCR from
 [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), the recognizer
 [Rubi](https://github.com/bee-san/Rubi_for_vita) uses on the PS Vita, trained for game dialogue.
 `VOCR5_S_w8.vocr` (smaller, faster) or `VOCR5_L_w8.vocr` (bigger, a bit more accurate) from its
