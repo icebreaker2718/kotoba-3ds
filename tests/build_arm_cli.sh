@@ -11,5 +11,7 @@ for f in ../plugin/Sources/vocr/*.c; do
 done
 arm-linux-gnueabihf-g++ $ARCH -static -Os -std=gnu++17 -fno-exceptions -fno-rtti -I../plugin/Includes -I../plugin/Includes/vocr \
   -o ocr_cli_arm ocr_cli.cpp ../plugin/Sources/core/local_ocr.cpp ../plugin/Sources/core/textbox.cpp \
-  ../plugin/Sources/core/bmp.cpp ../plugin/Sources/core/textlines.cpp ../plugin/Sources/core/kana.cpp arm_build/*.o -lm
+  ../plugin/Sources/core/bmp.cpp ../plugin/Sources/core/textlines.cpp ../plugin/Sources/core/kana.cpp \
+  ../plugin/Sources/core/correct.cpp ../plugin/Sources/core/dict.cpp ../plugin/Sources/core/search.cpp \
+  ../plugin/Sources/core/deinflect.cpp arm_build/*.o -lm
 arm-linux-gnueabihf-objdump -d arm_build/vocr.o | grep -q smlad && echo "ocr_cli_arm built (ARMv6 SIMD kernel in use)"
