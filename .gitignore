@@ -19,3 +19,4 @@ tests/libvocr.a
 tests/vocr_*.o
 tests/ocr_cli_arm
 tests/arm_build/
+tests/test_lens
