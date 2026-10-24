@@ -32,7 +32,7 @@ CXXFLAGS	:= $(COMMON) -Os $(INCLUDE) -D__3DS__ -fno-rtti -fno-exceptions -std=gn
 ASFLAGS		:=	$(ARCH)
 LDFLAGS		:= -T $(TOPDIR)/3gx.ld $(ARCH) -Os -Wl,--gc-sections,--strip-discarded,--strip-debug
 
-LIBS		:= -lctrpf -lmbedtls -lmbedx509 -lmbedcrypto -lctru
+LIBS		:= -lctrpf -lctru
 LIBDIRS		:= 	$(CTRPFLIB) $(CTRULIB) $(PORTLIBS)
 
 #---------------------------------------------------------------------------------

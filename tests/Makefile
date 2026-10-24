@@ -4,7 +4,7 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -fsanitize=address,undefined -fno-sanitize=shift
 CORE := $(wildcard ../plugin/Sources/core/*.cpp)
 DICT ?= ../dict.bin
-LDLIBS := libvocr.a -lmbedtls -lmbedx509 -lmbedcrypto -lm -lpthread   # apt install libmbedtls-dev
+LDLIBS := libvocr.a -lm -lpthread
 CFLAGS_VOCR := -std=c99 -O2 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize=shift
 CXXFLAGS += -I../plugin/Includes/vocr
 VOCR_SRC := $(wildcard ../plugin/Sources/vocr/*.c)
@@ -27,15 +27,15 @@ bmp_tool: bmp_tool.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hp
 test_wrap: test_wrap.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
 	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_wrap.cpp $(CORE) $(LDLIBS)
 
-test_lens: test_lens.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
-	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_lens.cpp $(CORE) $(LDLIBS)
+test_ocr_core: test_ocr_core.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
+	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_ocr_core.cpp $(CORE) $(LDLIBS)
 
-run: test_wrap test_core test_lens
+run: test_wrap test_core test_ocr_core
 	./test_core $(DICT)
 	./test_wrap $(DICT)
-	./test_lens $(DICT)
+	./test_ocr_core $(DICT)
 
 clean:
-	rm -f test_core test_net bmp_tool test_wrap test_lens libvocr.a vocr_*.o
+	rm -f test_core test_net bmp_tool test_wrap test_ocr_core libvocr.a vocr_*.o
 
 .PHONY: run clean

@@ -135,7 +135,7 @@ void lineWorker(void *arg) {
 }
 }  // namespace
 
-bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<LensLine> &lines, std::string &error,
+bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<TextLine> &lines, std::string &error,
                     void (*progress)(unsigned, unsigned), unsigned rx, unsigned ry, unsigned rw, unsigned rh) {
     lines.clear();
     if (!blob_) { error = "no OCR model loaded"; return false; }
@@ -217,9 +217,9 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Len
         if (getenv("LO_DEBUG")) fprintf(stderr, "run r=%d [%s]\n", rc[k], t);
 #endif
         if (rc[k] != VOCR_OK || !t[0]) continue;
-        LensLine line;
+        TextLine line;
         line.text = t;
-        line.paragraph = (int)k;  // each line its own block; lensParagraphs() joins a text box's lines
+        line.paragraph = (int)k;  // each line its own block; textParagraphs() joins a text box's lines
         line.centerX = (L.x + L.w / 2.0f) / w;
         line.centerY = (L.y + L.h / 2.0f) / h;
         line.width = (float)L.w / w;
@@ -297,14 +297,15 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
                      void (*progress)(unsigned, unsigned), int *usedBox) {
     paragraphs.clear();
     if (usedBox) *usedBox = -1;
-    std::vector<LensLine> lines;
+    std::vector<TextLine> lines;
     for (size_t bi = 0; bi < boxes.size() && bi < 2; bi++) {  // the best two boxes, then the whole screen
         const TextBox &b = boxes[bi];
         unsigned x0 = b.x > 2 ? b.x - 2 : 0, y0 = b.y > 2 ? b.y - 2 : 0;
         unsigned x1 = b.x + b.w + 2 < w ? b.x + b.w + 2 : w, y1 = b.y + b.h + 2 < h ? b.y + b.h + 2 : h;
         std::string e;
         if (ocr.read(grey, w, h, lines, e, progress, x0, y0, x1 - x0, y1 - y0)) {
-            paragraphs = lensParagraphs(lines);
+            paragraphs = textParagraphs(lines);
+            cleanParagraphs(paragraphs);
             if (japaneseChars(paragraphs) >= 2) {
                 if (usedBox) *usedBox = (int)bi;
                 return true;
@@ -312,7 +313,8 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
         }
     }
     if (!ocr.read(grey, w, h, lines, error, progress)) return false;  // the whole screen
-    paragraphs = lensParagraphs(lines);
+    paragraphs = textParagraphs(lines);
+    cleanParagraphs(paragraphs);
     if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
     return true;
 }

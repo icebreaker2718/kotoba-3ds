@@ -4,19 +4,6 @@
 #include <cstdlib>
 #include <vector>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#define STBI_WRITE_NO_STDIO
-#define STBIW_ASSERT(x) ((void)0)
-#ifdef __GNUC__
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#endif
-#include "stb_image_write.h"
-#ifdef __GNUC__
-#pragma GCC diagnostic pop
-#endif
 
 namespace kt {
 
@@ -124,27 +111,55 @@ uint8_t *topScreenRGB888(Reader &bmp, unsigned &w, unsigned &h, std::string &err
     return rgb;
 }
 
-static void appendBytes(void *ctx, void *data, int size) { ((std::string *)ctx)->append((const char *)data, size); }
+void framebufferToRGB(const uint8_t *px, unsigned count, int format, unsigned bpp, uint8_t *rgb) {
+    for (unsigned i = 0; i < count; i++, px += bpp, rgb += 3) {
+        uint16_t v = (uint16_t)(px[0] | (px[1] << 8));
+        switch (format) {
+        case 0: rgb[0] = px[3]; rgb[1] = px[2]; rgb[2] = px[1]; break;  // RGBA8: A, B, G, R
+        case 1: rgb[0] = px[2]; rgb[1] = px[1]; rgb[2] = px[0]; break;  // BGR8: B, G, R
+        case 2:                                                          // RGB565
+            rgb[0] = (uint8_t)((v >> 8) & 0xF8);
+            rgb[1] = (uint8_t)((v >> 3) & 0xFC);
+            rgb[2] = (uint8_t)((v << 3) & 0xF8);
+            break;
+        case 3:                                                          // RGB5A1
+            rgb[0] = (uint8_t)((v >> 8) & 0xF8);
+            rgb[1] = (uint8_t)((v >> 3) & 0xF8);
+            rgb[2] = (uint8_t)((v << 2) & 0xF8);
+            break;
+        default:                                                         // RGBA4
+            rgb[0] = (uint8_t)((v >> 8) & 0xF0);
+            rgb[1] = (uint8_t)((v >> 4) & 0xF0);
+            rgb[2] = (uint8_t)(v & 0xF0);
+            break;
+        }
+    }
+}
 
-bool topScreenJpeg(Reader &bmp, int scale, int quality, std::string &out, int &width, int &height,
-                   std::string &error) {
-    uint32_t w = 0, h = 0;
-    uint8_t *rgb = topScreenRGB(bmp, w, h, scale, error);
-    if (!rgb && scale > 1) {  // not enough memory for the bigger picture: send it as it is
-        std::string e2;
-        rgb = topScreenRGB(bmp, w, h, 1, e2);
+std::string bmpFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
+    const unsigned stride = (w * 3 + 3) & ~3u, dataSize = stride * h;
+    std::string out(54 + (size_t)dataSize, '\0');
+    auto put32 = [&](size_t at, uint32_t v) { for (int i = 0; i < 4; i++) out[at + i] = (char)((v >> (8 * i)) & 0xFF); };
+    out[0] = 'B';
+    out[1] = 'M';
+    put32(2, 54 + dataSize);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, w);
+    put32(22, h);         // bottom-up
+    out[26] = 1;          // planes
+    out[28] = 24;         // bits per pixel
+    put32(34, dataSize);
+    for (unsigned y = 0; y < h; y++) {
+        char *row = &out[54 + (size_t)(h - 1 - y) * stride];
+        const uint8_t *src = rgb + (size_t)y * w * 3;
+        for (unsigned x = 0; x < w; x++) {
+            row[x * 3] = (char)src[x * 3 + 2];  // B, G, R
+            row[x * 3 + 1] = (char)src[x * 3 + 1];
+            row[x * 3 + 2] = (char)src[x * 3];
+        }
     }
-    if (!rgb) return false;
-    out.clear();
-    int ok = stbi_write_jpg_to_func(appendBytes, &out, (int)w, (int)h, 3, rgb, quality);
-    free(rgb);
-    if (!ok || out.empty()) {
-        error = "could not encode the picture";
-        return false;
-    }
-    width = (int)w;
-    height = (int)h;
-    return true;
+    return out;
 }
 
 }  // namespace kt

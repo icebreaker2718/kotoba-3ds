@@ -17,12 +17,6 @@ jobs:
       - name: Install CTRPluginFramework + 3gxtool
         run: bash .github/workflows/install-ctrpf.sh
 
-      - name: Install mbedTLS for the 3DS (HTTPS for Google Lens)
-        run: |
-          for i in 1 2 3; do dkp-pacman -S --noconfirm --needed 3ds-mbedtls && break; sleep 10; done
-          ls $DEVKITPRO/portlibs/3ds/lib | grep -i mbed
-          grep -m1 MBEDTLS_VERSION_STRING $DEVKITPRO/portlibs/3ds/include/mbedtls/*version*.h $DEVKITPRO/portlibs/3ds/include/mbedtls/build_info.h 2>/dev/null || true
-
       - name: Build plugin
         run: |
           export PATH="$DEVKITPRO/tools/bin:$PATH"
@@ -85,8 +79,8 @@ jobs:
           name: Kotoba3DS-dict
           path: dict.bin
 
-      - name: Install mbedTLS + Japanese fonts (for the HTTPS / Lens / on-device OCR tests)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libmbedtls-dev fonts-noto-cjk fonts-misaki
+      - name: Install Japanese fonts (for the on-device OCR tests)
+        run: sudo apt-get update -q && sudo apt-get install -y -q fonts-noto-cjk fonts-misaki
 
       - name: Get the on-device OCR model (VOCR5 Normal, from bee-san/vita-vn-ocr)
         run: |
@@ -112,9 +106,6 @@ jobs:
       - name: Test the plugin core against it
         run: make -C tests run DICT=../dict.bin
 
-      - name: Test the HTTPS client (local TLS server)
-        run: python tests/test_https.py
-
       - name: Test on-device OCR on rendered 3DS screens
         run: python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr
 
@@ -123,10 +114,6 @@ jobs:
           sudo apt-get install -y -q gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user
           tests/build_arm_cli.sh
           OCR_PROBE="qemu-arm -cpu cortex-a15 $PWD/tests/ocr_cli_arm" python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr
-
-      - name: Google Lens live test (real request; a failure here is a warning)
-        continue-on-error: true
-        run: python tests/test_lens_live.py dict.bin
 
       - name: Test the screenshot converter (compact upload)
         run: python tests/test_bmp.py
@@ -171,6 +158,6 @@ jobs:
 
           1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\` (every game), or \`/luma/plugins/<TitleID>/Kotoba3DS.3gx\` for one game.
           2. Copy **dict.bin** to \`/3ds/kotoba3ds/dict.bin\`.
-          3. Optional, for reading the screen on the 3DS itself (offline): unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card. The model is [VOCR5 by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only.
+          3. Unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card (the on-device OCR model). The model is [VOCR5 by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only.
 
           See the README for the PC tools (OCR server, Anki cards)."

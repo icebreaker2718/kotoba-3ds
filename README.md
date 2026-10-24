@@ -3,17 +3,11 @@
 An in-game Japanese dictionary for a modded (New) 3DS / 2DS, plus a PC script that turns the
 words you save into Anki cards with the screenshot and the sentence.
 
-**On the 3DS** (Luma3DS plugin, opened with **Select** while any game runs):
-- **Read screen**: with `tools/ocr_server.py` running on your PC, the plugin sends your last
-  screenshot to it, shows the line as text, and you pick the word, Yomitan-style. If the PC
-  can't be reached, it offers the manual lookup instead.
-- Look up words by typing **romaji**. You see the kana as you type, and conjugated forms
-  work: `taberarenakatta` finds 食べる (passive › negative › past).
-- Look up kanji you can't read by **picking their parts** (氵 + 青 → 清), then search or
-  add okurigana.
-- Words that *start* with what you typed are listed too, so typing one kanji (勉) finds 勉強.
-- **Save** a word: it goes to `SD:/3ds/kotoba3ds/mined.tsv` together with the screenshot you
-  took with the hotkey (default **ZL + ZR**).
+**On the 3DS** (Luma3DS plugin): press **ZL + ZR** in any game when a line has a word you
+don't know. The game pauses, the 3DS **reads the screen itself** (on-device OCR, no PC or
+internet), you pick where the word starts, and its full entry appears on the top screen over the
+paused game. Conjugated forms are matched (食べられなかった → 食べる). **Save** the word: it goes
+to `SD:/3ds/kotoba3ds/mined.tsv` with the sentence and a screenshot.
 
 **On the PC** (`tools/mine.py`): fetches the saved words over Wi-Fi (ftpd) or from the SD card
 and makes [Lapis](https://github.com/donkuri/lapis) cards through AnkiConnect, with the
@@ -56,7 +50,7 @@ Server = https://thepixellizeross.gitlab.io/packages/x86_64/linux
 SigLevel = Optional
 EOF
 # on Windows use [thepixellizeross-win] with .../packages/x86_64/win instead of -linux
-dkp-pacman -Sy libctrpf 3gxtool 3ds-mbedtls
+dkp-pacman -Sy libctrpf 3gxtool
 make -C plugin            # -> plugin/Kotoba3DS.3gx
 ```
 Keep the project path free of spaces.
@@ -82,7 +76,7 @@ python tools/build_dict.py --jmdict JMdict_e.gz -o dict.bin  # current one from 
 |---|---|
 | `Kotoba3DS.3gx` | `SD:/luma/plugins/default.3gx` (every game), **or** `SD:/luma/plugins/<TitleID>/Kotoba3DS.3gx` for one game |
 | `dict.bin` (~41 MB) | `SD:/3ds/kotoba3ds/dict.bin` |
-| `Kotoba3DS-ocr-model.zip` (optional, offline OCR) | unzip to the root of the SD card: `SD:/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr` |
+| `Kotoba3DS-ocr-model.zip` (the OCR model) | unzip to the root of the SD card: `SD:/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr` |
 
 Then open the Rosalina menu (**L + Down + Select**), set **Plugin loader: [Enabled]**, and
 start a game. After a few seconds the plugin is ready; press **Select** to open it.
@@ -91,116 +85,39 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
 
 ## 3. Use it while playing
 
-**One button:** press the hotkey (default **ZL + ZR**) on a line. It saves the screenshot, pauses
-the game, and opens the lookup on the **bottom screen**, so the game stays visible (slightly
-dimmed) on the top screen for comparison. With the OCR server running, you get the line split
-into words; otherwise, or if the PC can't be reached, you can type the word or pick kanji
-parts. While you type romaji, it turns into kana right in the input box. As you move through
-the results, the highlighted word's **full entry is shown on the top screen** over the darkened
-game; open it to save it, scroll long entries, or hide the definition to see the game. Press B to back out
-and the game continues. The **Select** menu still has everything, plus settings and saved
-words. To make the hotkey only take screenshots, use **Hotkey** in that menu.
+1. A line has a word you don't know → press **ZL + ZR**. The game pauses and the 3DS reads the
+   top screen ("Reading the screen…", about a second).
+2. If several blocks of text were found, pick the line (the longest is preselected).
+3. The line appears split into words on the **bottom screen**. Pick where your word starts.
+4. The results are listed; the highlighted one's **full entry** shows on the top screen over the
+   dimmed game. Open one to save it, scroll a long entry, or hide the definition to see the game.
+5. **Save this word** writes it to `mined.tsv` with the sentence and a screenshot of the paused
+   game (in `SD:/3ds/kotoba3ds/shots/`). Press B to back out; the game continues.
 
+The **Select** menu has: *Last results* (reopen your last lookup), *Saved words* (review or
+delete), *Hotkey* (if ZL + ZR does something in your game), *Anki cards* (see below) and
+*How to use*.
 
-1. A line has a word you don't know → press the **screenshot hotkey** (ZL + ZR). The plugin
-   saves `SD:/3ds/kotoba3ds/shots/shot - NNN.bmp`.
-2. Press **Select** → **Look up word (romaji)** → type it (e.g. `yomenakatta`) → **Start** /
-   Enter.
-   Kanji you can't read → **Look up by kanji parts**: pick the parts you see, then *Show
-   matching kanji*. Pick one, then *Search*, *Add another kanji*, or *Type the rest in romaji*.
-3. Pick a result to read the full entry, then choose **Yes** to save it. The most recent
-   screenshot (taken within 15 min) is attached. Save several words from one screenshot if
-   you like.
-4. **Saved words** lists what you've saved (◎ = has a screenshot), and lets you delete one.
-
-If ZL + ZR does something in your game, change it under **Screenshot hotkey**. The setting
-is remembered.
-
-**Romaji tips:** `nn` or `n'` for ん before a vowel (`kon'ya`), double consonants for っ
-(`gakkou`), `-` for ー (`ra-men`), `xa`/`xtu` for small kana. Long vowels are spelled out
-(`toukyou`).
-
-## 3b. Read screen (OCR from your PC)
-
-1. On the PC (same Wi-Fi as the 3DS): `py -3.12 tools\ocr_server.py`. It loads manga-ocr,
-   prints its address (e.g. `192.168.1.20:7331`), and logs every line it reads. If Windows
-   asks, allow Python on **private networks**.
-2. In-game: press the screenshot hotkey on the line, press **Select**, then choose
-   **Read screen (tap a word)**. The first time, the plugin looks for your PC
-   automatically and remembers it.
-   The 3DS shows "Reading the screen…" while it waits. It sends only the top screen (about
-   190 KB), so most of the wait is your Wi-Fi plus the OCR time shown in the server's log.
-3. The line appears split into words. Pick where your word starts. Conjugations are matched
-   as a whole (食べられなかった → 食べる). Then save it as usual; the sentence is saved with it,
-   and `mine.py` bolds the exact text you picked.
-
-**Set each game's text box once (important).** OCR is reliable only when it sees just the
-text box. Given the whole screen, manga-ocr guesses. After using Read screen once in a game, run
-
-    py -3.12 tools\pick_crop.py
-
-pick the game, drag a rectangle around its text box, type the game's name, and press **Save**.
-Green bars show the lines that will be read; furigana and icons (red) are skipped
-automatically. **Test** shows what the running server reads with that box. The server uses
-the new box immediately, and `mine.py` uses it too.
-
-**Text box that moves around?** Tick **Box moves around (find it by colour)** before saving.
-The picker remembers the box's background colour, and the server then finds the largest
-rectangle of that colour on every screenshot, wherever it is. If the box isn't found (for
-example, a cut-scene with no box), it falls back to the area you drew. If automatic search doesn't
-find the PC, enter the address under **OCR server** in the plugin menu. There you can also
-turn OCR off, which makes Read screen go straight to typing.
-
-**Cards while you play.** While `ocr_server.py` is running (and Anki is open), every word you
-save in-game also becomes a Lapis card right away. The server builds it in the background with
-the same definition, audio, pitch and picture as `mine.py`. The word is always written to the SD
-card first, so if the PC, the server or Anki isn't available, nothing is lost: the "Saved"
-message says so, and `mine.py` (via ftpd) adds those words later, skipping any that already
-became cards. Turn this off under **OCR server** in the plugin menu, or start the server with
-`--no-cards`.
-
-If the PC is off, the server isn't running, or the game won't allow network access, Read
-screen says why and offers the romaji lookup instead. All the other lookups never need the
-network.
-
-## 3c. Reading the screen on the 3DS itself (offline)
-
-With the OCR model on the SD card (`Kotoba3DS-ocr-model.zip` from the release, unzipped to the
-root of the SD card), *Read screen* reads the text **on the 3DS**: no PC, no internet.
-
-- It reads the whole top screen, so there's no text box to set up, and a box that moves around
-  is fine. Furigana is dropped. If there are several blocks of text, pick the one you want (the
-  longest is preselected).
-- The list ends with **[ Wrong? Read it with the PC / Google Lens ]** for the odd misread.
-- Expect a few seconds per text box (the first read also loads the model, ~1 MB). Each read's
-  time goes into `SD:/3ds/kotoba3ds/ocr_log.txt`.
-- Turn it off in *Select → OCR server → Turn off reading on the 3DS*; then the PC is tried
-  first again.
-
-The OCR is VOCR from [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), the recognizer
+**How it reads the screen.** The text box is found by its flat colour (so a box that moves
+around is fine), its lines are read, furigana and stray marks (the "next" arrow) are dropped.
+With no box on screen it reads the whole screen. The OCR is VOCR from
+[vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), the recognizer
 [Rubi](https://github.com/bee-san/Rubi_for_vita) uses on the PS Vita, trained for game dialogue.
 `VOCR5_S_w8.vocr` (smaller, faster) or `VOCR5_L_w8.vocr` (bigger, a bit more accurate) from its
-[releases](https://github.com/bee-san/vita-vn-ocr/releases) also work: put one in the same
-folder (Normal is used when several are there). The weights are for **non-commercial use only**.
+[releases](https://github.com/bee-san/vita-vn-ocr/releases) also work: put one in
+`/3ds/kotoba3ds/ocr/` (Normal is used when several are there). The weights are for
+**non-commercial use only**. Each read's timing goes into `SD:/3ds/kotoba3ds/ocr_log.txt`.
 
-## 3d. No PC? Google Lens
+On a New 3DS / 2DS the plugin runs the CPU at full speed (804 MHz + L2 cache, as Rosalina's
+*New 3DS menu* does) while a lookup is open and reads two lines at once; the game's own
+setting is restored when you close the lookup.
 
-When there's no OCR model on the SD card (or you choose "Wrong?" above), the PC can't be found,
-and the 3DS is on the internet (home Wi-Fi, or your phone's
-hotspot), *Read screen* sends the top screen to **Google Lens** instead:
-
-- The 3DS connects to Google itself over HTTPS. Nothing has to run on your PC.
-- Lens reads everything on screen, so if there are several blocks of text you pick the line
-  first; furigana is dropped. Then pick where the word starts, as usual.
-- After one failed attempt the PC isn't searched again for 2 minutes, so later lookups go
-  straight to Lens.
-- Saved words wait in `mined.tsv` with their sentence; run `mine.py` later to make the cards.
-- Turn it off in *Select → OCR server → Turn off Google Lens*.
-
-Things to know: this uses the unofficial endpoint Chrome's Lens feature talks to (the same one
-[owocr](https://github.com/AuroraWright/owocr) uses). It's against Google's terms of service,
-it can stop working whenever Google changes it, and your screenshots go to Google. If Lens
-stops working, Read screen still offers manual lookup.
+**Cards while you play.** With `py -3.12 tools\ocr_server.py` running on your PC (same Wi-Fi,
+Anki open), every word you save also becomes a Lapis card right away, with the definition,
+audio, pitch and picture. The first time, the plugin looks for your PC automatically; you can
+also enter its address under **Anki cards** in the Select menu, or turn this off there. The word
+is always written to the SD card first, so if the PC isn't reachable nothing is lost: run
+`mine.py` later and it adds those words, skipping any that already became cards.
 
 ## 4. Make the Anki cards on your PC
 
@@ -317,17 +234,19 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
 - **Japanese shows as boxes**: the plugin draws text with the console's system font. Please
   report it, with your console's region.
 - **mine.py can't connect**: ftpd must be open on the 3DS, and the PC and 3DS on the same network.
-- **Read screen can't find the PC**: check `ocr_server.py` is running and that Windows Firewall
-  allows Python on private networks. Then type the address it prints under **OCR server**. The
-  3DS only uses 2.4 GHz Wi-Fi.
+- **"Couldn't read the screen: No OCR model found"**: unzip `Kotoba3DS-ocr-model.zip` to the
+  root of the SD card (the model goes to `SD:/3ds/kotoba3ds/ocr/`).
+- **Cards aren't sent to the PC**: check `ocr_server.py` is running and that Windows Firewall
+  allows Python on private networks. Then type the address it prints under **Anki cards**. The
+  3DS only uses 2.4 GHz Wi-Fi. Saved words are kept either way; `mine.py` adds them later.
 - **"networking needs Luma3DS v13.2 or newer"**: plugins can only use the network on Luma
   v13.2+. Update Luma (the version shows at the top of the Rosalina menu).
 - **"network unavailable in this game"**: some titles don't permit network access from
-  plugins. Use the romaji or kanji-parts lookup there.
+  plugins. Lookups still work; make the cards with `mine.py` later.
 
 ## Developing
 
-- `tests/`: native tests of the plugin core (romaji, conjugation, dictionary search) against
+- `tests/`: native tests of the plugin core (conjugation, dictionary search, OCR plumbing) against
   a real `dict.bin`: `make -C tests run DICT=../dict.bin`. Also `python tests/test_builder.py
   <jamdict.db>` and `python tests/test_mine.py [jitendex-yomitan.zip]` (needs
   `pip install pyftpdlib pillow`).
@@ -351,9 +270,6 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
   [bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr) (GPL-3.0-or-later; the model weights
   are for non-commercial use only, see the `ATTRIBUTION.md` that comes with them), the OCR of
   [Rubi](https://github.com/bee-san/Rubi_for_vita).
-- Google Lens message layout from Chromium's Lens overlay protos (BSD), as used by
-  [owocr](https://github.com/AuroraWright/owocr). HTTPS by [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0);
-  JPEG encoding by [stb_image_write](https://github.com/nothings/stb) (public domain).
 
 ## Licence
 

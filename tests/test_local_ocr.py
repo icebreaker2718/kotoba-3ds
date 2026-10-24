@@ -72,9 +72,9 @@ def cer(ref, hyp):
             prev, d[j] = d[j], min(d[j] + 1, d[j - 1] + 1, prev + (a[i - 1] != b[j - 1]))
     return d[len(b)] / max(1, len(a))
 
-probe = os.path.join(HERE, "test_lens")
+probe = os.path.join(HERE, "test_ocr_core")
 # OCR_PROBE: another command to run instead (e.g. the ARM build under qemu-arm); it gets
-# "model bmp" and prints PARAGRAPH: lines like test_lens --local
+# "model bmp" and prints PARAGRAPH: lines like test_ocr_core --local
 alt = os.environ.get("OCR_PROBE", "").split()
 tmp = tempfile.mkdtemp()
 fails, total = 0, 0.0

@@ -1,18 +1,15 @@
-// Google Lens client, offline parts + HTTPS:
-//   test_lens dict.bin                      protobuf request/reply, furigana, word chunking
-//   test_lens --https host port roots.pem   one POST to a local TLS server (see test_https.py)
-//   test_lens --live shot.bmp [dict.bin]    the real Google Lens (needs internet)
+// On-device OCR plumbing (natively):
+//   test_ocr_core dict.bin                    text blocks, furigana, clean-up, chunking, pixels/BMP
+//   test_ocr_core --local model.vocr shot.bmp the full read (also on 2 threads); see test_local_ocr.py
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
 #include <cstring>
-#include <fstream>
-#include <sstream>
 
 #include "core/bmp.hpp"
 #include "core/dict.hpp"
-#include "core/https.hpp"
-#include "core/lens.hpp"
+#include "core/textbox.hpp"
+#include "core/textlines.hpp"
 #include "core/local_ocr.hpp"
 #include "core/net.hpp"
 #include "core/search.hpp"
@@ -23,12 +20,6 @@ static void check(bool ok, const std::string &what) {
     printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
     if (!ok) fails++;
 }
-static std::string slurp(const std::string &p) {
-    std::ifstream f(p, std::ios::binary);
-    std::stringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
 class FileReader : public Reader {
 public:
     explicit FileReader(const char *p) { f_ = fopen(p, "rb"); if (f_) { fseek(f_, 0, SEEK_END); sz_ = ftell(f_); } }
@@ -38,12 +29,6 @@ public:
 private:
     FILE *f_ = nullptr; uint32_t sz_ = 0;
 };
-static std::string dataDir(const char *argv0) {
-    std::string a = argv0;
-    size_t s = a.rfind('/');
-    return (s == std::string::npos ? std::string(".") : a.substr(0, s)) + "/data/";
-}
-
 // stands in for the 3DS's CTRPF tasks: n threads at once, wait for all
 static void threadRunner(unsigned n, void (*job)(void *), void *arg) {
     std::vector<std::thread> t;
@@ -52,15 +37,6 @@ static void threadRunner(unsigned n, void (*job)(void *), void *arg) {
 }
 
 int main(int argc, char **argv) {
-    if (argc >= 5 && !strcmp(argv[1], "--https")) {
-        std::string pem = slurp(argv[4]), body, err;
-        int status = 0;
-        std::string path = argc > 5 ? argv[5] : "/echo";
-        bool ok = httpsPost(argv[2], path, {"Content-Type: application/x-protobuf"}, "hello lens", 8000,
-                            body, status, err, atoi(argv[3]), pem.c_str());
-        printf("ok=%d status=%d body=[%s] error=[%s]\n", ok, status, body.c_str(), err.c_str());
-        return ok ? 0 : 2;
-    }
     if (argc >= 4 && !strcmp(argv[1], "--local")) {  // --local model.vocr shot.bmp: on-device OCR
         FileReader mf(argv[2]), bmp(argv[3]);
         std::string e;
@@ -84,7 +60,7 @@ int main(int argc, char **argv) {
         free(grey);
         if (!ok) { printf("OCR FAILED: %s\n", e.c_str()); return 3; }
         if (!ok2 || again != paras) { printf("RELOAD FAILED: %s\n", e.c_str()); return 3; }
-        // the same with lines read on 3 threads (as on a New 3DS)
+        // the same with lines read on 2 threads (as on a New 3DS: 2 cores)
         {
             uint8_t *rgb3 = nullptr;
             FileReader bmp3(argv[3]);
@@ -93,7 +69,7 @@ int main(int argc, char **argv) {
             free(rgb3);
             LocalOcr par;
             FileReader mf3(argv[2]);
-            par.setParallel(3, threadRunner);
+            par.setParallel(2, threadRunner);
             std::vector<std::string> threaded;
             bool ok3 = par.load(mf3, e) && localReadScreen(par, grey3, w, h, boxes, threaded, e);
             free(grey3);
@@ -104,72 +80,60 @@ int main(int argc, char **argv) {
         for (auto &p : paras) printf("PARAGRAPH: %s\n", p.c_str());
         return 0;
     }
-    if (argc >= 3 && !strcmp(argv[1], "--live")) {
-        FileReader bmp(argv[2]);
-        std::string jpeg, err;
-        int w = 0, h = 0;
-        if (!topScreenJpeg(bmp, 2, 88, jpeg, w, h, err)) { printf("jpeg: %s\n", err.c_str()); return 1; }
-        printf("jpeg %dx%d, %zu bytes\n", w, h, jpeg.size());
-        std::vector<std::string> paras;
-        std::string e;
-        netStart(e);
-        bool ok = lensOcr(jpeg, w, h, 0x1234567890ull, 20000, paras, e);
-        if (!ok) { printf("LENS FAILED: %s\n", e.c_str()); return 3; }
-        for (auto &p : paras) printf("PARAGRAPH: %s\n", p.c_str());
-        if (argc > 3) {
-            FileReader dr(argv[3]);
-            Dictionary d;
-            std::string de;
-            if (d.open(&dr, de))
-                for (auto &p : paras) {
-                    std::string line;
-                    for (auto &c : chunkText(d, p)) line += c + "|";
-                    printf("CHUNKS: %s\n", line.c_str());
-                }
-        }
-        return 0;
-    }
-
-    std::string dir = dataDir(argv[0]);
-    // request: byte-identical to the one checked against Google's own .proto definitions
-    std::string req = lensRequest(std::string("\xFF\xD8JPEGDATA", 10), 800, 480, 123456789);
-    check(req == slurp(dir + "lens_request.bin"), "request matches the reference (decoded with Lens' protos)");
-
-    // reply: built with Google's protos (furigana line, a 2-line paragraph, a menu, English)
-    std::vector<LensLine> lines;
     std::string err;
-    check(lensParse(slurp(dir + "lens_reply.bin"), lines, err), "reply parses " + err);
-    check(lines.size() == 5, "5 lines");
-    std::vector<std::string> paras = lensParagraphs(lines);
-    check(paras.size() == 3, "3 paragraphs (furigana dropped)");
-    if (paras.size() == 3) {
-        check(paras[0] == "また夢世界へ行く時は声をかけるんじゃぞ！", "lines joined: " + paras[0]);
-        check(paras[1] == "メニュー", "short katakana kept: " + paras[1]);
-        check(paras[2] == "Press A", "word separators kept: " + paras[2]);
-    }
-    check(!lensParse("\x0a\x02\x08\x01", lines, err), "garbage reply rejected: " + err);
-    check(!lensParse(std::string("\x12\x05\x0a\x03\x12\x01", 6), lines, err), "truncated reply rejected");
-    std::string empty;
-    check(!lensParse(empty, lines, err), "empty reply rejected");
-
-    {   // Lens splitting a 2-line text box into 2 paragraphs; a menu elsewhere stays separate
+    {   // a 2-line text box read as 2 blocks; a menu elsewhere stays separate
         auto L = [](const char *t, int p, float cx, float cy, float w, float h) {
-            LensLine l; l.text = t; l.paragraph = p; l.centerX = cx; l.centerY = cy; l.width = w; l.height = h; return l;
+            TextLine l; l.text = t; l.paragraph = p; l.centerX = cx; l.centerY = cy; l.width = w; l.height = h; return l;
         };
-        std::vector<LensLine> ls = {L("メニュー", 0, 0.10f, 0.05f, 0.15f, 0.05f),
+        std::vector<TextLine> ls = {L("メニュー", 0, 0.10f, 0.05f, 0.15f, 0.05f),
                                     L("ゆめせかい", 1, 0.25f, 0.66f, 0.12f, 0.02f),
                                     L("また夢世界へ行く時は", 2, 0.36f, 0.72f, 0.60f, 0.07f),
                                     L("声をかけるんじゃぞ!", 3, 0.35f, 0.83f, 0.58f, 0.07f),
                                     L("はい", 4, 0.85f, 0.95f, 0.08f, 0.07f)};
-        std::vector<std::string> ps = lensParagraphs(ls);
+        std::vector<std::string> ps = textParagraphs(ls);
         check(ps.size() == 3 && ps[1] == "また夢世界へ行く時は声をかけるんじゃぞ!",
               "lines of one text box merged" + (ps.size() > 1 ? ": " + ps[1] : std::string()));
         check(ps.size() == 3 && ps[0] == "メニュー" && ps[2] == "はい", "menu and a far-off choice stay separate");
     }
 
-    std::string chunked;
-    check(dechunk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", chunked) && chunked == "hello world", "chunked body");
-    check(!dechunk("5\r\nhel", chunked), "cut-off chunked body rejected");
+    {   // clean-up of what the OCR read
+        std::vector<std::string> p = {"ご名答！スルドイですね～！ク", "ー", "1AAS", "とにかく探しましょ!子",
+                                      "発見したんです。クる、", "そうです。はい", "お誕生日なら攻撃力が4倍",
+                                      "何かお買い求めでしょうか？"};
+        cleanParagraphs(p);
+        check(p.size() == 6, "near-empty blocks dropped (ー, 1AAS)");
+        if (p.size() == 6) {
+            check(p[0] == "ご名答！スルドイですね～！", "speck after ！ dropped: " + p[0]);
+            check(p[1] == "とにかく探しましょ!", "speck after ! dropped: " + p[1]);
+            check(p[2] == "発見したんです。", "speck + 、 after 。 dropped: " + p[2]);
+            check(p[3] == "そうです。はい", "real words after 。 kept: " + p[3]);
+            check(p[4] == "お誕生日なら攻撃力が4倍" && p[5] == "何かお買い求めでしょうか？", "normal lines untouched");
+        }
+        std::vector<std::string> only = {"長が"};
+        cleanParagraphs(only);
+        check(only.size() == 1, "a lone short block is kept (nothing better to offer)");
+    }
+    {   // framebuffer pixels -> RGB, and the screenshot BMP written from them
+        const uint8_t rgba8[4] = {0xFF, 0x30, 0x20, 0x10}, bgr8[3] = {0x30, 0x20, 0x10};
+        uint8_t o[3];
+        framebufferToRGB(rgba8, 1, 0, 4, o);
+        check(o[0] == 0x10 && o[1] == 0x20 && o[2] == 0x30, "RGBA8 framebuffer pixel");
+        framebufferToRGB(bgr8, 1, 1, 3, o);
+        check(o[0] == 0x10 && o[1] == 0x20 && o[2] == 0x30, "BGR8 framebuffer pixel");
+        const uint16_t c565 = (uint16_t)((0x1F << 11) | (0x00 << 5) | 0x10);
+        uint8_t px[2] = {(uint8_t)(c565 & 0xFF), (uint8_t)(c565 >> 8)};
+        framebufferToRGB(px, 1, 2, 2, o);
+        check(o[0] == 0xF8 && o[1] == 0 && o[2] == 0x80, "RGB565 framebuffer pixel");
+        std::vector<uint8_t> img(400 * 240 * 3);
+        for (size_t i = 0; i < img.size(); i++) img[i] = (uint8_t)(i * 7);
+        std::string bmp = bmpFromRGB(img.data(), 400, 240);
+        MemReader r(bmp);
+        unsigned w = 0, h = 0;
+        std::string e2;
+        uint8_t *back = topScreenRGB888(r, w, h, e2);
+        check(back && w == 400 && h == 240 && !memcmp(back, img.data(), img.size()), "screenshot BMP reads back the same");
+        free(back);
+    }
 
     if (argc > 1) {
         FileReader dr(argv[1]);

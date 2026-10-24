@@ -1,9 +1,10 @@
 // Kotoba3DS - in-game Japanese dictionary + Anki mining log, as a Luma3DS (CTRPF) plugin.
 //
-// While a game runs: press the screenshot hotkey (default ZL+ZR) on a line you want to
-// mine, open the plugin menu (Select), look the word up, and save it. Saved words go to
-// SD:/3ds/kotoba3ds/mined.tsv together with the screenshot name; tools/mine.py on the PC
-// turns them into Anki cards through AnkiConnect.
+// In a game, press the hotkey (default ZL+ZR) on a line with a word you don't know: the game
+// pauses, the 3DS reads the top screen itself (on-device OCR, plugin/Sources/vocr), you pick
+// where the word starts and see its full entry on the top screen. Saved words go to
+// SD:/3ds/kotoba3ds/mined.tsv with a screenshot; tools/mine.py on the PC (or ocr_server.py,
+// right away) turns them into Anki cards through AnkiConnect.
 #include <3ds.h>
 #include <CTRPluginFramework.hpp>
 
@@ -14,15 +15,14 @@
 
 #include <malloc.h>
 
-#include "core/dict.hpp"
 #include "core/bmp.hpp"
-#include "core/kana.hpp"
-#include "core/net.hpp"
-#include "core/lens.hpp"
+#include "core/dict.hpp"
 #include "core/local_ocr.hpp"
-#include "core/textbox.hpp"
-#include "core/wrap.hpp"
+#include "core/net.hpp"
 #include "core/search.hpp"
+#include "core/textbox.hpp"
+#include "core/textlines.hpp"
+#include "core/wrap.hpp"
 
 namespace CTRPluginFramework {
 
@@ -33,9 +33,8 @@ static const char *kRootDir = "/3ds/kotoba3ds";
 static const char *kDictPath = "/3ds/kotoba3ds/dict.bin";
 static const char *kLogPath = "/3ds/kotoba3ds/mined.tsv";
 static const char *kShotDir = "/3ds/kotoba3ds/shots";
-static const char *kShotPrefix = "shot";
 static const char *kSettingsPath = "/3ds/kotoba3ds/settings.txt";
-static const u64 kShotMaxAgeMs = 15 * 60 * 1000;  // link a screenshot taken in the last 15 min
+static const char *kModelDir = "/3ds/kotoba3ds/ocr/";
 
 struct HotkeyChoice { const char *name; u32 keys; };
 static const HotkeyChoice kHotkeys[] = {
@@ -43,7 +42,7 @@ static const HotkeyChoice kHotkeys[] = {
     {"L + R + Down", Key::L | Key::R | Key::DPadDown},
     {"R + Down", Key::R | Key::DPadDown},
     {"Start + Select", Key::Start | Key::Select},
-    {"Off (no screenshots)", 0},
+    {"Off", 0},
 };
 static const int kHotkeyCount = sizeof(kHotkeys) / sizeof(kHotkeys[0]);
 static int g_hotkey = 0;
@@ -139,21 +138,15 @@ static bool WriteWholeFile(const std::string &path, const std::string &data) {
     return ok;
 }
 
-// OCR ("Read screen") settings
-static bool g_ocrEnabled = true;
-static bool g_cardsEnabled = true;  // send saved words to the PC to become Anki cards right away
-static bool g_hotkeyOpens = true;   // the screenshot hotkey also opens the lookup
+// Settings. Saved words can also go straight to the PC (tools/ocr_server.py) as Anki cards.
+static bool g_cardsEnabled = true;
 static u64 g_pcDownUntil = 0;       // after a failed attempt, don't retry for a while
-static bool g_lensEnabled = true;   // no PC? read the screen with Google Lens (needs internet)
-static bool g_localEnabled = true;  // read the screen on the 3DS itself when a model is installed
 static std::string *g_serverPtr = nullptr;  // "192.168.1.20:7331", empty = find automatically
 #define g_server Leaky(g_serverPtr)
-static const int kOcrPort = 7331;
+static const int kPcPort = 7331;
 
 static void SaveSettings() {
-    WriteWholeFile(kSettingsPath, Utils::Format("hotkey=%d\nocr=%d\ncards=%d\nquick=%d\nlens=%d\nlocal=%d\nserver=", g_hotkey,
-                                                g_ocrEnabled ? 1 : 0, g_cardsEnabled ? 1 : 0, g_hotkeyOpens ? 1 : 0,
-                                                g_lensEnabled ? 1 : 0, g_localEnabled ? 1 : 0) +
+    WriteWholeFile(kSettingsPath, Utils::Format("hotkey=%d\ncards=%d\nserver=", g_hotkey, g_cardsEnabled ? 1 : 0) +
                                       g_server + "\n");
 }
 
@@ -169,61 +162,16 @@ static std::string SettingValue(const std::string &s, const char *key) {
 
 static void LoadSettings() {
     std::string s;
-    if (ReadWholeFile(kSettingsPath, s, 4096)) {
-        std::string v = SettingValue(s, "hotkey");
-        if (!v.empty()) {
-            int h = atoi(v.c_str());
-            if (h >= 0 && h < kHotkeyCount) g_hotkey = h;
-        }
-        v = SettingValue(s, "ocr");
-        if (!v.empty()) g_ocrEnabled = v != "0";
-        v = SettingValue(s, "cards");
-        if (!v.empty()) g_cardsEnabled = v != "0";
-        v = SettingValue(s, "quick");
-        if (!v.empty()) g_hotkeyOpens = v != "0";
-        v = SettingValue(s, "lens");
-        if (!v.empty()) g_lensEnabled = v != "0";
-        v = SettingValue(s, "local");
-        if (!v.empty()) g_localEnabled = v != "0";
-        g_server = SettingValue(s, "server");
+    if (!ReadWholeFile(kSettingsPath, s, 4096)) return;
+    std::string v = SettingValue(s, "hotkey");
+    if (!v.empty()) {
+        int h = atoi(v.c_str());
+        if (h >= 0 && h < kHotkeyCount) g_hotkey = h;
     }
+    v = SettingValue(s, "cards");
+    if (!v.empty()) g_cardsEnabled = v != "0";
+    g_server = SettingValue(s, "server");
 }
-
-// ---------------------------------------------------------------------------
-// Screenshots (CTRPF's built-in engine, pointed at our folder)
-// We mirror the engine's file counter so we know each screenshot's file name.
-// ---------------------------------------------------------------------------
-// NOTE: OnScreenshot runs on the *game's* thread (inside the screenshot engine's frame hook).
-// It must not allocate memory or touch std::string: the plugin heap is not safe to use from
-// game threads, and doing so corrupts it (seen as a crash in free() when the game closes).
-// So the callback only bumps a counter and stores a timestamp; names are built later on the
-// plugin thread.
-static u32 g_firstShot = 0;              // engine's file number of the first shot this session
-static volatile u32 g_shotsTaken = 0;    // written on the game thread
-static volatile u64 g_lastShotTime = 0;  // written on the game thread
-
-static std::string ShotName(u32 n) { return std::string(kShotPrefix) + Utils::Format(" - %03d.bmp", (int)n); }
-
-static void InitShotCounter() {
-    // Same algorithm as the engine's Screenshot::UpdateFileCount()
-    Directory dir(kShotDir);
-    std::vector<std::string> files;
-    dir.ListFiles(files, ".bmp");
-    u32 next = 0;
-    std::string name = ShotName(0);
-    for (const std::string &f : files) {
-        if (f == name) {
-            ++next;
-            name = ShotName(next);
-        }
-    }
-    g_firstShot = next;
-    g_shotsTaken = 0;
-}
-
-// Set while a lookup is open. A screenshot then would need ~0.6 MB of plugin memory at a moment
-// the OCR may be using it, and CTRPF's screenshot task crashes when it can't get it.
-static volatile bool g_lookupOpen = false;
 
 // New 3DS: 804 MHz + L2 cache while a lookup is open (the game is paused), then back to what the
 // game had. Old titles run at 268 MHz without L2; this is what Rosalina's "New 3DS menu" sets.
@@ -248,47 +196,8 @@ static int CpuMHz() {
     return R_SUCCEEDED(svcGetSystemInfo(&clk, 0x10001, 0)) ? (int)clk : 0;
 }
 
-static bool OnScreenshot() {
-    // The engine fires while the hotkey is *held*: refuse a second shot within 1.5 s, so one
-    // press = one screenshot. (Returning false cancels it.) No allocation here (see above).
-    if (g_lookupOpen) return false;
-    u64 now = osGetTime();
-    if (g_shotsTaken > 0 && now - g_lastShotTime < 1500) return false;
-    g_lastShotTime = now;
-    g_shotsTaken = g_shotsTaken + 1;
-    return true;
-}
-
-static void ApplyHotkey() {
-    bool *enabled = nullptr;
-    u32 *hotkey = nullptr;
-    PluginMenu::ScreenshotSettings(&enabled, &hotkey);
-    if (enabled && hotkey) {
-        *enabled = kHotkeys[g_hotkey].keys != 0;
-        if (kHotkeys[g_hotkey].keys) *hotkey = kHotkeys[g_hotkey].keys;
-    }
-}
-
-static void InitScreenshots() {
-    PluginMenu::ScreenshotPath() = std::string(kShotDir) + "/";
-    PluginMenu::ScreenshotFilePrefix() = kShotPrefix;
-    PluginMenu::ScreenshotUpdatePaths();
-    PluginMenu::ScreenshotSetcallback(OnScreenshot);
-    InitShotCounter();
-    ApplyHotkey();
-}
-
-static std::string RecentScreenshot() {
-    u32 taken = g_shotsTaken;
-    u64 when = g_lastShotTime;
-    if (taken == 0) return "";
-    if (osGetTime() - when > kShotMaxAgeMs) return "";
-    return ShotName(g_firstShot + taken - 1);
-}
-
 // ---------------------------------------------------------------------------
-// Bottom-screen-only UI: the top screen keeps showing the (paused) game, so the player can
-// compare it with what was read.
+// Bottom-screen-only UI: the top screen keeps showing the (paused) game.
 // ---------------------------------------------------------------------------
 static void ShowBusy(const std::string &line1, const std::string &line2 = "") {
     for (int i = 0; i < 2; i++) {  // draw into both buffers so it stays up
@@ -355,8 +264,13 @@ static void TakeTopSnapshot() {  // call while the game is paused and nothing is
     g_snap.valid = true;
 }
 
-// Gives back what a lookup used (top-screen copy, OCR model), so the next screenshot has room.
-static void ReleaseLookupMemory();
+// The snapshot as R, G, B bytes (malloc'd; free() it), or nullptr.
+static uint8_t *SnapshotRGB() {
+    if (!g_snap.valid) return nullptr;
+    uint8_t *rgb = (uint8_t *)malloc(400 * 240 * 3);
+    if (rgb) kt::framebufferToRGB(g_snap.px.data(), 400 * 240, (int)g_snap.format, g_snap.bpp, rgb);
+    return rgb;
+}
 
 static inline void Darken(u8 *d, const u8 *s, u32 bpp, GSPFormat fmt) {
     if (bpp >= 3) {  // 8 bits per channel: keep ~37%
@@ -419,7 +333,10 @@ static void ShowEntryOnTop(const kt::Result &r, int scroll = 0) {
 
 static void ClearTopPanel() { DrawTopPanel({}, 0, false); }
 
-// Top screen of a saved screenshot, 16-bit: ~190 KB to upload instead of ~570 KB.
+// ---------------------------------------------------------------------------
+// The PC (tools/ocr_server.py): saved words become Anki cards right away
+// ---------------------------------------------------------------------------
+// Top screen of a saved screenshot, 16-bit, for uploading.
 static bool CompactScreenshot(const std::string &shotName, std::string &out, std::string &error) {
     SdReader bmp;
     if (!bmp.open(std::string(kShotDir) + "/" + shotName)) {
@@ -429,18 +346,15 @@ static bool CompactScreenshot(const std::string &shotName, std::string &out, std
     return kt::topScreenRGB565(bmp, out, error);
 }
 
-// ---------------------------------------------------------------------------
-// The PC (tools/ocr_server.py): find it, and send saved words to it
-// ---------------------------------------------------------------------------
 // Saved address first, then automatic search. Call between netStart()/netStop().
 static bool ResolveServer(std::string &host, int &port, std::string &error) {
     std::string pingErr;
-    port = kOcrPort;
+    port = kPcPort;
     if (!g_server.empty() && kt::parseHostPort(g_server, host, port) && kt::netPing(host, port, 1500, pingErr))
         return true;
     std::string found;
-    int foundPort = kOcrPort;
-    if (kt::netDiscover(kOcrPort, 1500, found, foundPort, error)) {
+    int foundPort = kPcPort;
+    if (kt::netDiscover(kPcPort, 1500, found, foundPort, error)) {
         host = found;
         port = foundPort;
         g_server = host + Utils::Format(":%d", port);  // remember it for next time
@@ -454,10 +368,10 @@ static bool ResolveServer(std::string &host, int &port, std::string &error) {
 // Sends one mined.tsv line to the PC, which turns it into an Anki card in the background.
 // Returns a short status for the "Saved" notification.
 static std::string SendCardToPc(const std::string &line, const std::string &shot) {
-    if (!g_ocrEnabled || !g_cardsEnabled) return "";
+    if (!g_cardsEnabled) return "";
     if (g_pcDownUntil && osGetTime() < g_pcDownUntil) return "PC offline, run mine.py later";
     std::string err, host;
-    int port = kOcrPort;
+    int port = kPcPort;
     if (!kt::netStart(err)) return "no network, run mine.py later";
     bool ok = false, sent = false;
     std::string reply;
@@ -505,13 +419,30 @@ static int CountSaved() {
     return n;
 }
 
-// The screenshot the current lookup is about (set by Read screen / the hotkey). Saving uses it,
-// so the word gets the screenshot that was read even if another one was taken since.
+// The screenshot of the current lookup: written from the paused game's picture the first time
+// a word from it is saved (no screenshot is taken for lookups that save nothing).
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
 
+static std::string SaveScreenshot() {
+    if (!g_lookupShot.empty()) return g_lookupShot;
+    uint8_t *rgb = SnapshotRGB();
+    if (!rgb) return "";
+    std::string bmp = kt::bmpFromRGB(rgb, 400, 240);
+    free(rgb);
+    std::string ts = Timestamp();  // "2026-10-24 14:30:05"
+    std::string name;
+    for (char c : ts) name += (c == ' ') ? '_' : (c == ':' ? '-' : c);
+    name += ".bmp";
+    if (!WriteWholeFile(std::string(kShotDir) + "/" + name, bmp)) return "";
+    g_lookupShot = name;
+    return name;
+}
+
 static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string &query,
                      const std::string &sentence) {
+    ShowBusy("Saving...");
+    std::string shot = SaveScreenshot();
     bool fresh = File::Exists(kLogPath) != 1;
     File f;
     if (File::Open(f, kLogPath, File::WRITE | File::CREATE | File::APPEND | File::SYNC) != File::SUCCESS) {
@@ -521,7 +452,6 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
     std::string text;
     if (fresh)
         text += "#time\ttitle_id\texpression\treading\tdefinition\tscreenshot\tquery\tinflection\tentry\tsentence\n";
-    std::string shot = g_lookupShot.empty() ? RecentScreenshot() : g_lookupShot;
     std::string line = kt::mineLogLine(Timestamp(), TitleIdHex(), e, r, shot, query, sentence);
     text += line + "\n";
     bool ok = f.Write(text.data(), text.size()) == File::SUCCESS;
@@ -529,9 +459,7 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
     if (ok) {
         int n = CountSaved();
         std::string status = SendCardToPc(line, shot);  // saved on the SD card first, so nothing is lost
-        OSD::Notify(Utils::Format("Saved (%d word%s)%s", n, n == 1 ? "" : "s",
-                                  shot.empty() ? " - no screenshot" : "") +
-                        (status.empty() ? "" : " - " + status),
+        OSD::Notify(Utils::Format("Saved (%d word%s)", n, n == 1 ? "" : "s") + (status.empty() ? "" : " - " + status),
                     Color::White, status == "card sent to PC" || status.empty() ? Color::ForestGreen : Color::Orange);
     }
     return ok;
@@ -622,191 +550,9 @@ static void ShowResults(const kt::SearchOutput &so, const std::string &sentence 
     }
 }
 
-static void RunSearch(const std::string &raw) {
-    if (!EnsureDict()) return;
-    g_last = kt::search(g_dict, raw);
-    g_lastSentence = "";
-    ShowResults(g_last);
-}
-
 // ---------------------------------------------------------------------------
-// Typing (romaji with live kana preview)
+// Reading the screen on the 3DS (VOCR): no PC, no internet. Needs the model on the SD card.
 // ---------------------------------------------------------------------------
-static std::string *g_typePrefixPtr = nullptr;  // kanji picked before typing (okurigana mode)
-#define g_typePrefix Leaky(g_typePrefixPtr)
-
-// The bottom-screen keyboard shows the input only, so romaji is turned into kana right in the
-// input field: when a syllable completes, the keyboard is reopened with the kana filled in
-// (the keyboard has no API to edit its text and move the cursor). The game stays paused
-// across the reopen so it doesn't advance a frame.
-static std::string *g_kanaPendingPtr = nullptr;
-#define g_kanaPending Leaky(g_kanaPendingPtr)
-
-static void OnTypingEvent(Keyboard &kb, KeyboardEvent &ev) {
-    if (ev.type != KeyboardEvent::CharacterAdded) return;
-    std::string &in = kb.GetInput();
-    std::string conv = kt::romajiToKana(in, false);
-    if (conv != in) {
-        g_kanaPending = conv;
-        kb.Close();
-    }
-}
-
-static bool TypeRomaji(const std::string &prefix, std::string &out) {
-    Process::Pause();
-    std::string text = prefix;
-    int r = -1;
-    std::string input;
-    while (true) {
-        Keyboard kb;
-        kb.DisplayTopScreen = false;
-        kb.OnKeyboardEvent(OnTypingEvent);
-        kb.SetMaxLength(40);
-        g_kanaPending = "";
-        input.clear();
-        r = kb.Open(input, text);
-        if (!g_kanaPending.empty()) {  // a syllable completed: reopen with kana
-            text = g_kanaPending;
-            continue;
-        }
-        break;
-    }
-    Process::Play();
-    if (r < 0) return false;
-    out = kt::romajiToKana(input, true);
-    return !out.empty();
-}
-
-static void LookupTyped(MenuEntry *) {
-    std::string q;
-    if (TypeRomaji("", q) && !q.empty()) RunSearch(q);
-}
-
-// ---------------------------------------------------------------------------
-// Kanji by components (RADKFILE)
-// ---------------------------------------------------------------------------
-static bool PickKanji(std::string &picked) {
-    const std::vector<kt::Radical> &rads = g_dict.radicals();
-    if (rads.empty()) {
-        BottomMessage("This dict.bin has no radical data. Rebuild it with a radkfile.", {"[ Back ]"});
-        return false;
-    }
-    std::vector<int> chosen;
-    int sel = 0;
-    while (true) {
-        std::vector<std::string> kanji;
-        uint32_t total = 0;
-        g_dict.kanjiWithRadicals(chosen, 300, kanji, total);
-
-        std::string parts;
-        for (int i : chosen) parts += rads[i].glyph + " ";
-        std::vector<std::string> labels;
-        int fixed = 0;
-        if (!chosen.empty()) {
-            labels.push_back(Utils::Format("→ Show %u kanji with  ", (unsigned)total) + parts);
-            labels.push_back("× Clear parts");
-            fixed = 2;
-        }
-        for (size_t i = 0; i < rads.size(); i++) {
-            bool on = false;
-            for (int c : chosen) on |= (c == (int)i);
-            std::string l = Utils::Format("%s%2d画  ", on ? "● " : "   ", rads[i].strokes) + rads[i].glyph;
-            if (!rads[i].label.empty()) l += "   (" + rads[i].label + ")";
-            labels.push_back(l);
-        }
-        int c = BottomList(labels, sel);  // parts sorted by stroke count; select again to remove
-        if (c < 0) return false;
-        sel = c;
-        if (fixed && c == 0) {
-            if (kanji.empty()) continue;
-            int k = BottomList(kanji);
-            if (k < 0) continue;
-            picked = kanji[k];
-            return true;
-        }
-        if (fixed && c == 1) { chosen.clear(); sel = 0; continue; }
-        int ri = c - fixed;
-        bool removed = false;
-        for (size_t i = 0; i < chosen.size(); i++)
-            if (chosen[i] == ri) { chosen.erase(chosen.begin() + i); removed = true; break; }
-        if (!removed) {
-            chosen.push_back(ri);
-            sel = 0;  // jump to "Show matching kanji"
-        } else {
-            sel = c - (chosen.empty() ? 2 : 0);
-            if (sel < 0) sel = 0;
-        }
-    }
-}
-
-static void LookupByParts(MenuEntry *) {
-    if (!EnsureDict()) return;
-    std::string word;
-    while (true) {
-        if (word.empty()) {
-            std::string k;
-            if (!PickKanji(k)) return;
-            word += k;
-        }
-        std::vector<std::string> opts = {
-            "Search  " + word,
-            "Add another kanji",
-            "Type the rest in romaji (okurigana)",
-            "Delete last character",
-        };
-        int c = BottomList(opts);
-        if (c < 0) return;
-        if (c == 0) { RunSearch(word); return; }
-        if (c == 1) {
-            std::string k;
-            if (PickKanji(k)) word += k;
-        } else if (c == 2) {
-            std::string q;
-            if (TypeRomaji(word, q)) { RunSearch(q); return; }
-        } else if (c == 3) {
-            kt::utf8PopBack(word);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Read screen: send the last screenshot to tools/ocr_server.py on the PC, then tap a word.
-// Every failure offers the manual (romaji) lookup instead.
-// ---------------------------------------------------------------------------
-struct OcrCache {
-    std::string shot, sentence;
-    std::vector<std::string> chunks;
-};
-static OcrCache *g_ocrPtr = nullptr;
-#define g_ocr Leaky(g_ocrPtr)
-
-// Offered whenever OCR isn't possible. Returns true if a manual lookup was run.
-static bool OfferManual(const std::string &title, const std::string &why) {
-    int c = BottomMessage(title + "\n" + why, {"[ Type the word (romaji) ]", "[ Kanji parts ]", "[ Close ]"});
-    if (c == 0) { LookupTyped(nullptr); return true; }
-    if (c == 1) { LookupByParts(nullptr); return true; }
-    return false;
-}
-
-// Google Lens: the top screen as a JPEG, straight to Google (internet needed, no PC).
-static bool LensRead(const std::string &shotName, std::vector<std::string> &paragraphs, std::string &error) {
-    ShowBusy("Reading the screen...", "Asking Google Lens");
-    SdReader bmp;
-    if (!bmp.open(std::string(kShotDir) + "/" + shotName)) {
-        error = "could not open " + shotName;
-        return false;
-    }
-    std::string jpeg;
-    int w = 0, h = 0;
-    if (!kt::topScreenJpeg(bmp, 2, 88, jpeg, w, h, error)) return false;
-    uint64_t rnd = svcGetSystemTick() ^ ((uint64_t)osGetTime() << 24);
-    return kt::lensOcr(jpeg, w, h, rnd, 20000, paragraphs, error);
-}
-
-// ---------------------------------------------------------------------------
-// On-device OCR (VOCR, plugin/Sources/vocr): no PC, no internet. Needs a model file on the SD.
-// ---------------------------------------------------------------------------
-static const char *kModelDir = "/3ds/kotoba3ds/ocr/";
 static const char *const kModelNames[] = {"VOCR5_N_w8.vocr", "VOCR5_S_w8.vocr", "VOCR5_L_w8.vocr", "model.vocr"};
 static kt::LocalOcr *g_localOcrPtr = nullptr;
 #define g_localOcr Leaky(g_localOcrPtr)
@@ -849,155 +595,75 @@ static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
     for (Task &t : tasks) t.Wait();
 }
 
-static bool LocalRead(const std::string &shotName, std::vector<std::string> &paragraphs, std::string &error) {
+// Reads the paused game's top screen -> text blocks.
+static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &error) {
     u64 t0 = osGetTime();
     std::string name = FindModel();
-    if (name.empty()) { error = "no OCR model on the SD card (see the README)"; return false; }
-    ShowBusy("Reading the screen on the 3DS...");
+    if (name.empty()) {
+        error = "No OCR model found.\nUnzip Kotoba3DS-ocr-model.zip to the root of the SD card\n"
+                "(it goes to /3ds/kotoba3ds/ocr/).";
+        return false;
+    }
+    ShowBusy("Reading the screen...");
     // 1. the picture: find the text box (by its colour), then grey for the OCR
-    SdReader bmp;
-    if (!bmp.open(std::string(kShotDir) + "/" + shotName)) { error = "could not open " + shotName; return false; }
-    unsigned w = 0, h = 0;
-    uint8_t *rgb = kt::topScreenRGB888(bmp, w, h, error);
-    if (!rgb) return false;
-    std::vector<kt::TextBox> boxes = kt::findTextBoxes(rgb, w, h);
-    uint8_t *grey = kt::greyFromRGB(rgb, w, h);
+    uint8_t *rgb = SnapshotRGB();
+    if (!rgb) { error = "could not copy the screen"; return false; }
+    std::vector<kt::TextBox> boxes = kt::findTextBoxes(rgb, 400, 240);
+    uint8_t *grey = kt::greyFromRGB(rgb, 400, 240);
     free(rgb);
     if (!grey) { error = "not enough memory for the picture"; return false; }
     // 2. the model (loaded for this read only: it needs ~1.4 MB of the plugin's memory)
     u64 t1 = osGetTime();
-    ShowBusy("Reading the screen on the 3DS...", "loading " + name);
     SdReader mf;
     if (!mf.open(kModelDir + name)) { free(grey); error = "could not open " + name; return false; }
     if (!g_localOcr.load(mf, error)) { free(grey); return false; }
     g_modelName = name;
     // 3. read the box (or the whole screen)
     u64 t2 = osGetTime();
-    BoostCpu();  // normally on already (the lookup is open); the clock is logged below
     g_localOcr.setParallel(System::IsNew3DS() ? 2 : 1, RunOnCores);
     int used = -1;
-    bool ok = kt::localReadScreen(g_localOcr, grey, w, h, boxes, paragraphs, error, LocalProgress, &used);
+    bool ok = kt::localReadScreen(g_localOcr, grey, 400, 240, boxes, paragraphs, error, LocalProgress, &used);
     free(grey);
+    g_localOcr.unload();  // ~1.4 MB back right away
     u64 t3 = osGetTime();
     struct mallinfo mi = mallinfo();
     LogOcr(Utils::Format("%s: box %lu ms, load %lu ms, read %lu ms (%s, %u threads, %d MHz), heap free %lu KB, %s",
                          name.c_str(), (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned long)(t3 - t2),
                          used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(), CpuMHz(),
-                         (unsigned long)(mi.fordblks / 1024),
-                         ok ? paragraphs[0].c_str() : error.c_str()));
+                         (unsigned long)(mi.fordblks / 1024), ok ? paragraphs[0].c_str() : error.c_str()));
     return ok;
 }
 
-static void ReleaseLookupMemory() {
-    g_snap.valid = false;
-    std::vector<u8>().swap(g_snap.px);
-    if (g_localOcrPtr) g_localOcr.unload();
-}
-
-// Several blocks of text on screen: let the player pick the line. With `offerOther`, a last item
-// lets them read it again with the PC / Google Lens instead. 1 = picked, 0 = cancelled, 2 = other.
-static int PickParagraph(const std::vector<std::string> &paragraphs, std::string &out, bool offerOther = false) {
-    if (paragraphs.size() == 1 && !offerOther) { out = paragraphs[0]; return 1; }
+// Several blocks of text: let the player pick one (the longest is preselected).
+static bool PickParagraph(const std::vector<std::string> &paragraphs, std::string &out) {
+    if (paragraphs.size() == 1) { out = paragraphs[0]; return true; }
     std::vector<std::string> labels;
     size_t best = 0;
     for (size_t i = 0; i < paragraphs.size(); i++) {
         std::vector<std::string> lines = Wrap(paragraphs[i]);
         labels.push_back(lines.empty() ? paragraphs[i] : lines[0] + (lines.size() > 1 ? "…" : ""));
-        if (paragraphs[i].size() > paragraphs[best].size()) best = i;  // the dialogue is usually the longest
+        if (paragraphs[i].size() > paragraphs[best].size()) best = i;
     }
-    if (offerOther) labels.push_back("[ Wrong? Read it with the PC / Google Lens ]");
     if (g_snap.valid) ClearTopPanel();
     int c = BottomList(labels, (int)best);
-    if (c < 0) return 0;
-    if (c >= (int)paragraphs.size()) return 2;
+    if (c < 0) return false;
     out = paragraphs[c];
-    return 1;
+    return true;
 }
 
-// OCRs a saved screenshot: on the 3DS itself when a model is installed (and that's on), else on
-// the PC (tools/ocr_server.py) if it can be reached, else with Google Lens when that's on.
-// `chunks` are the word starts to offer.
-static bool RunOcr(const std::string &shotName, std::string &sentence, std::vector<std::string> &chunks,
-                   std::string &error) {
-    std::string localError;
-    if (g_localEnabled && (g_localOcr.loaded() || !FindModel().empty())) {
-        std::vector<std::string> paragraphs;
-        bool read = LocalRead(shotName, paragraphs, localError);
-        g_localOcr.unload();  // ~1.4 MB back right away (loading it again takes a moment, not a crash)
-        if (read) {
-            int pick = PickParagraph(paragraphs, sentence, true);
-            if (pick == 0) { error = "cancelled"; return false; }
-            if (pick == 1) {
-                ShowBusy("Finding the words...");
-                chunks = kt::chunkText(g_dict, sentence);
-                return true;
-            }
-            localError = "you chose another reader";
-        }
-    }
-    std::string netError;
-    if (!kt::netStart(netError)) {
-        error = localError.empty() ? netError : "On the 3DS: " + localError + "\nNetwork: " + netError;
-        return false;
-    }
-    bool ok = false;
-    std::string pcError;
-    bool tryPc = !(g_pcDownUntil && osGetTime() < g_pcDownUntil);
-    if (tryPc) {
-        ShowBusy("Reading the screen...", "Sending to your PC");
-        std::string compact, host;
-        int port = kOcrPort;
-        if (CompactScreenshot(shotName, compact, pcError) && ResolveServer(host, port, pcError)) {
-            ShowBusy("Reading the screen...", "Waiting for OCR on " + host);
-            std::string body;
-            kt::MemReader upload(compact);
-            std::vector<std::string> headers = {"X-Title-Id: " + TitleIdHex(), "X-Shot-Name: " + shotName};
-            ok = kt::netPost(host, port, "/ocr", headers, upload, 2500, 25000, body, pcError) &&
-                 kt::parseOcrReply(body, sentence, chunks, pcError);
-            if (ok) g_pcDownUntil = 0;
-        }
-    } else {
-        pcError = "PC not reachable a moment ago";
-    }
-    std::string prefix = localError.empty() ? "" : "On the 3DS: " + localError + "\n";
-    std::vector<std::string> paragraphs;
-    bool viaLens = false;
-    if (!ok && g_lensEnabled) {
-        if (tryPc) g_pcDownUntil = osGetTime() + 2 * 60 * 1000;  // don't wait for the PC again for a while
-        std::string lensError;
-        viaLens = LensRead(shotName, paragraphs, lensError);
-        if (!viaLens) error = prefix + "PC: " + pcError + "\nGoogle Lens: " + lensError;
-    } else if (!ok) {
-        error = prefix + (prefix.empty() ? "" : "PC: ") + pcError;
-    }
-    kt::netStop();  // never leave the network running while the game plays
-    if (viaLens) {
-        if (PickParagraph(paragraphs, sentence) != 1) { error = "cancelled"; return false; }
-        ShowBusy("Finding the words...");
-        chunks = kt::chunkText(g_dict, sentence);
-        ok = true;
-    }
-    return ok;
-}
-
+// Pick where the word starts, then the results.
 static void TapWord(const std::string &sentence, const std::vector<std::string> &chunks) {
-    std::vector<std::string> labels;
-    for (const std::string &c : chunks) labels.push_back(c);  // pick where the word starts
-    labels.push_back("[ Type a word instead ]");
-    labels.push_back("[ Kanji parts ]");
     int sel = 0;
     while (true) {
         if (g_snap.valid) ClearTopPanel();  // the plain game picture while picking a word
-        int c = BottomList(labels, sel);
+        int c = BottomList(chunks, sel);
         if (c < 0) return;
         sel = c;
-        if (c == (int)chunks.size()) { LookupTyped(nullptr); continue; }
-        if (c == (int)chunks.size() + 1) { LookupByParts(nullptr); continue; }
         size_t offset = 0;
         for (int i = 0; i < c; i++) offset += chunks[i].size();
         kt::SearchOutput so = kt::scanAt(g_dict, sentence, offset);
         if (so.results.empty()) {
-            OfferManual("No match", "Nothing in the dictionary starts at 「" + chunks[c] + "」.");
+            BottomMessage("Nothing in the dictionary starts at 「" + chunks[c] + "」.", {"[ Back ]"});
             continue;
         }
         g_last = so;
@@ -1006,90 +672,37 @@ static void TapWord(const std::string &sentence, const std::vector<std::string> 
     }
 }
 
-// OCR the given screenshot (or reuse the last result for it), then let the player pick a word.
-static void ReadShot(const std::string &shot) {
-    g_lookupShot = shot;
-    if (g_ocr.shot != shot || g_ocr.sentence.empty()) {
-        std::string sentence, error;
-        std::vector<std::string> chunks;
-        if (!RunOcr(shot, sentence, chunks, error)) {
-            if (error == "cancelled") return;
-            OfferManual("Couldn't read the screen:", error +
-                        (g_lensEnabled ? "" : "\nIs ocr_server.py running on your PC, on the same Wi-Fi?"));
-            return;
-        }
-        g_ocr.shot = shot;
-        g_ocr.sentence = sentence;
-        g_ocr.chunks = chunks;
+static void Lookup() {
+    std::vector<std::string> paragraphs;
+    std::string error, sentence;
+    if (!ReadSnapshot(paragraphs, error)) {
+        BottomMessage("Couldn't read the screen:\n" + error, {"[ Close ]"});
+        return;
     }
-    TapWord(g_ocr.sentence, g_ocr.chunks);
+    if (!PickParagraph(paragraphs, sentence)) return;
+    ShowBusy("Finding the words...");
+    std::vector<std::string> chunks = kt::chunkText(g_dict, sentence);
+    TapWord(sentence, chunks);
 }
 
-static void ReadScreen(MenuEntry *) {
-    if (!EnsureDict()) return;
-    if (!g_ocrEnabled) {
-        LookupTyped(nullptr);
-        return;
-    }
-    std::string shot = RecentScreenshot();
-    if (shot.empty()) {
-        OfferManual("No screenshot yet.", std::string("Close this menu and press ") + kHotkeys[g_hotkey].name +
-                                              " while the line is on screen.");
-        return;
-    }
-    g_lookupOpen = true;
-    BoostCpu();
-    ReadShot(shot);
+static void ReleaseLookupMemory() {
+    g_snap.valid = false;
+    std::vector<u8>().swap(g_snap.px);
+    if (g_localOcrPtr) g_localOcr.unload();
     g_lookupShot = "";
-    ReleaseLookupMemory();
-    RestoreCpu();
-    g_lookupOpen = false;
 }
 
-// ---------------------------------------------------------------------------
-// One-button lookup: the screenshot hotkey also opens the lookup, with the game paused and
-// still visible on the top screen.
-// ---------------------------------------------------------------------------
-static bool WaitForScreenshot(u32 takenBefore, std::string &shot) {
-    const u32 fullSize = 54 + 400 * 480 * 3;  // CTRPF writes both screens, 24-bit
-    for (int i = 0; i < 60; i++) {           // up to ~3 s
-        if (g_shotsTaken > takenBefore) {
-            shot = RecentScreenshot();
-            File f;
-            if (!shot.empty() && File::Open(f, std::string(kShotDir) + "/" + shot, File::READ) == File::SUCCESS) {
-                u64 size = f.GetSize();
-                f.Close();
-                if (size >= fullSize) return true;
-            }
-        }
-        Sleep(Milliseconds(50));
-    }
-    return false;
-}
-
-static void HotkeyWatcher(void) {  // called every frame by the plugin menu while the game runs
+// The hotkey: pause the game, read the screen, look up a word. Called every frame.
+static void HotkeyWatcher(void) {
     u32 keys = kHotkeys[g_hotkey].keys;
-    if (!g_hotkeyOpens || !keys || !Controller::IsKeysPressed(keys)) return;
-    u32 before = g_shotsTaken;
-    std::string shot;
-    bool haveShot = WaitForScreenshot(before, shot);
+    if (!keys || !Controller::IsKeysPressed(keys)) return;
     if (!EnsureDict()) return;
-    g_lookupOpen = true;
     Process::Pause();
     BoostCpu();
-    TakeTopSnapshot();  // the paused game, to draw definitions over
-    g_lookupShot = haveShot ? shot : "";
-    if (!g_ocrEnabled) {
-        LookupTyped(nullptr);
-    } else if (!haveShot) {
-        OfferManual("The screenshot wasn't saved in time.", "Try the hotkey again, or look the word up:");
-    } else {
-        ReadShot(shot);
-    }
-    g_lookupShot = "";
+    TakeTopSnapshot();  // the paused game: read, and drawn under the definitions
+    Lookup();
     ReleaseLookupMemory();
     RestoreCpu();
-    g_lookupOpen = false;
     Process::Play();
 }
 
@@ -1156,68 +769,57 @@ static void SavedWords(MenuEntry *) {
 // ---------------------------------------------------------------------------
 // Menu
 // ---------------------------------------------------------------------------
-static MenuEntry *g_hotkeyEntry = nullptr;
-
-static std::string HotkeyEntryName() {
-    return std::string("Hotkey: ") + kHotkeys[g_hotkey].name + (g_hotkeyOpens ? " (screenshot + lookup)" : " (screenshot)");
-}
+static std::string HotkeyEntryName() { return std::string("Hotkey: ") + kHotkeys[g_hotkey].name; }
 
 static void ChooseHotkey(MenuEntry *entry) {
     std::vector<std::string> opts;
     for (const HotkeyChoice &h : kHotkeys) opts.push_back(h.name);
-    opts.push_back(g_hotkeyOpens ? "[ Hotkey only takes a screenshot ]" : "[ Hotkey takes a screenshot AND opens the lookup ]");
-    Keyboard kb("Hotkey\nPressed in-game on a line: saves a screenshot and (if on) opens the lookup\n"
-                "with the game still visible on the top screen. Pick a combo your game doesn't use.",
+    Keyboard kb("Hotkey\nPressed in-game on a line: pauses the game, reads the screen and opens the\n"
+                "lookup. Pick a combo your game doesn't use.",
                 opts);
     kb.ChangeSelectedEntry(g_hotkey);
     int c = kb.Open();
     if (c < 0) return;
-    if (c == kHotkeyCount) g_hotkeyOpens = !g_hotkeyOpens;
-    else g_hotkey = c;
-    ApplyHotkey();
+    g_hotkey = c;
     SaveSettings();
     entry->Name() = HotkeyEntryName();
 }
 
-static MenuEntry *g_serverEntry = nullptr;
-
-static std::string ServerEntryName() {
-    if (!g_ocrEnabled) return "OCR server: off (manual lookup only)";
-    return "OCR server: " + (g_server.empty() ? std::string("find automatically") : g_server);
+static std::string CardsEntryName() {
+    if (!g_cardsEnabled) return "Anki cards: with mine.py";
+    return "Anki cards: send to PC " + (g_server.empty() ? std::string("(find automatically)") : g_server);
 }
 
-static void ChooseServer(MenuEntry *entry) {
+static void ChooseCards(MenuEntry *entry) {
     std::vector<std::string> opts = {
+        g_cardsEnabled ? "Stop sending saved words to the PC (use mine.py later)" : "Send saved words to the PC right away",
         "Find my PC automatically now",
         "Type the address (shown by ocr_server.py)",
         "Forget the saved address",
-        g_ocrEnabled ? "Turn OCR off (Read screen = typing)" : "Turn OCR on",
-        g_cardsEnabled ? "Stop making Anki cards in-game (use mine.py)" : "Make Anki cards in-game when saving",
-        g_lensEnabled ? "Turn off Google Lens (when the PC isn't found)" : "Use Google Lens when the PC isn't found",
-        g_localEnabled ? "Turn off reading on the 3DS (offline OCR)" : "Read on the 3DS first (offline OCR)",
     };
-    std::string model = FindModel();
-    Keyboard kb("OCR server\nRun tools/ocr_server.py on your PC, on the same Wi-Fi as the 3DS.\n" +
-                    std::string(Color::Gray) + "Now: " + (g_server.empty() ? std::string("not set") : g_server) +
-                    "\nOffline OCR model: " + (model.empty() ? std::string("none in /3ds/kotoba3ds/ocr/") : model),
+    Keyboard kb("Anki cards\nWith tools/ocr_server.py running on your PC (same Wi-Fi), each saved word\n"
+                "becomes an Anki card right away. Otherwise run tools/mine.py later.\n" +
+                    std::string(Color::Gray) + "PC: " + (g_server.empty() ? std::string("not set") : g_server),
                 opts);
     int c = kb.Open();
     if (c < 0) return;
     std::string err;
     if (c == 0) {
+        g_cardsEnabled = !g_cardsEnabled;
+    } else if (c == 1) {
         std::string host;
-        int port = kOcrPort;
-        bool ok = kt::netStart(err) && kt::netDiscover(kOcrPort, 2000, host, port, err);
+        int port = kPcPort;
+        bool ok = kt::netStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
         kt::netStop();
         if (ok) {
             g_server = host + Utils::Format(":%d", port);
-            g_ocrEnabled = true;
+            g_cardsEnabled = true;
             MessageBox("Kotoba3DS", "Found your PC at " + g_server)();
         } else {
             MessageBox("Kotoba3DS", "Couldn't find it automatically:\n" + err +
-                                        "\n\nCheck the server is running, or type its address.")();
+                                        "\n\nCheck ocr_server.py is running, or type its address.")();
         }
-    } else if (c == 1) {
+    } else if (c == 2) {
         Keyboard in("Type the address shown by ocr_server.py, e.g. 192.168.1.20:7331");
         std::string addr = g_server;
         if (in.Open(addr, addr) >= 0) {
@@ -1227,43 +829,30 @@ static void ChooseServer(MenuEntry *entry) {
                 MessageBox("Kotoba3DS", "That doesn't look like an address (example: 192.168.1.20:7331).")();
             } else {
                 g_server = host + Utils::Format(":%d", port);
-                g_ocrEnabled = true;
+                g_cardsEnabled = true;
                 bool ok = kt::netStart(err) && kt::netPing(host, port, 2000, err);
                 kt::netStop();
                 MessageBox("Kotoba3DS", ok ? "Connected to " + g_server
                                            : "Saved " + g_server + ", but it didn't answer:\n" + err)();
             }
         }
-    } else if (c == 2) {
-        g_server = "";
-    } else if (c == 3) {
-        g_ocrEnabled = !g_ocrEnabled;
-    } else if (c == 4) {
-        g_cardsEnabled = !g_cardsEnabled;
-    } else if (c == 5) {
-        g_lensEnabled = !g_lensEnabled;
     } else {
-        g_localEnabled = !g_localEnabled;
+        g_server = "";
     }
     g_pcDownUntil = 0;
     SaveSettings();
-    entry->Name() = ServerEntryName();
+    entry->Name() = CardsEntryName();
 }
 
 static const char *kHelp =
-    "1. In-game, press the hotkey (ZL+ZR) on a line with a word you don't know.\n"
-    "   It saves a screenshot and opens the lookup on the bottom screen, with the\n"
-    "   game still visible on top. (Or press Select later and use this menu.)\n"
-    "2. Settings and saved words are in this menu (Select).\n"
-    "3. 'Read screen': with tools/ocr_server.py running on your PC, the line is\n"
-    "   read for you; pick where the word starts. With an OCR model in\n"
-    "   /3ds/kotoba3ds/ocr/ the 3DS reads it by itself, offline. Otherwise\n"
-    "   Google Lens (internet), or type the word.\n"
-    "   'Look up word': type it in romaji. Conjugated forms work (tabenakatta).\n"
-    "   'Look up by kanji parts': pick the parts of a kanji you can't read.\n"
-    "4. Pick a result, read it, choose Yes to save it.\n"
-    "5. On your PC, run tools/mine.py to turn saved words into Anki cards.\n\n"
-    "Files: SD:/3ds/kotoba3ds/";
+    "1. In a game, press the hotkey (ZL+ZR) when a line with a word you don't\n"
+    "   know is on screen. The game pauses and the 3DS reads the text.\n"
+    "2. On the bottom screen, pick where the word starts. Its entry shows on the\n"
+    "   top screen; move through the results with the D-pad.\n"
+    "3. Choose 'Save this word'. It goes to mined.tsv with a screenshot.\n"
+    "4. Anki cards: with tools/ocr_server.py running on your PC they're made\n"
+    "   right away; otherwise run tools/mine.py later.\n\n"
+    "Needs: /3ds/kotoba3ds/dict.bin and the OCR model in /3ds/kotoba3ds/ocr/.";
 
 void PatchProcess(FwkSettings &settings) {
     settings.AllowActionReplay = false;
@@ -1273,39 +862,32 @@ void PatchProcess(FwkSettings &settings) {
 void OnProcessExit(void) {}
 
 int main(void) {
-    PluginMenu *menu = new PluginMenu("Kotoba3DS", 1, 0, 0,
-                                      "In-game Japanese dictionary that saves words for Anki.\n\n"
-                                      "Press Select in-game to open this menu.");
+    PluginMenu *menu = new PluginMenu("Kotoba3DS", 2, 0, 0,
+                                      "In-game Japanese dictionary that reads the screen and saves words for Anki.\n\n"
+                                      "Press the hotkey (ZL+ZR) in a game to look a word up.");
     menu->SynchronizeWithFrame(true);
 
     Directory::Create(kRootDir);
     Directory::Create(kShotDir);
     LoadSettings();
-    InitScreenshots();
+    {   // CTRPF's own screenshot hotkey stays off: the plugin makes its screenshots itself
+        bool *enabled = nullptr;
+        u32 *hotkey = nullptr;
+        PluginMenu::ScreenshotSettings(&enabled, &hotkey);
+        if (enabled) *enabled = false;
+    }
 
-    *menu += new MenuEntry("Read screen (tap a word)", nullptr, ReadScreen,
-                           "Reads your last screenshot with OCR on your PC (tools/ocr_server.py),\n"
-                           "then you pick the word. Falls back to typing if the PC isn't reachable.");
-    *menu += new MenuEntry("Look up word (romaji)", nullptr, LookupTyped,
-                           "Type a word in romaji; you'll see the kana as you type.\n"
-                           "Conjugated verbs and adjectives are understood.");
-    *menu += new MenuEntry("Look up by kanji parts", nullptr, LookupByParts,
-                           "For kanji you can't read: pick the parts you can see.");
     *menu += new MenuEntry("Last results", nullptr,
                            [](MenuEntry *) {
                                if (g_last.results.empty())
-                                   MessageBox("Kotoba3DS", "No search yet.")();
+                                   MessageBox("Kotoba3DS", "No lookup yet.")();
                                else if (EnsureDict())
                                    ShowResults(g_last, g_lastSentence);
                            },
-                           "Reopen your previous search.");
+                           "Reopen the words from your last lookup.");
     *menu += new MenuEntry("Saved words", nullptr, SavedWords, "Review or delete saved words.");
-    g_hotkeyEntry = new MenuEntry(HotkeyEntryName(), nullptr, ChooseHotkey,
-                                  "Button combo that saves a screenshot to SD:/3ds/kotoba3ds/shots/.");
-    *menu += g_hotkeyEntry;
-    g_serverEntry = new MenuEntry(ServerEntryName(), nullptr, ChooseServer,
-                                  "Where Read screen sends screenshots for OCR.");
-    *menu += g_serverEntry;
+    *menu += new MenuEntry(HotkeyEntryName(), nullptr, ChooseHotkey, "The button combo that reads the screen.");
+    *menu += new MenuEntry(CardsEntryName(), nullptr, ChooseCards, "Make Anki cards right away with your PC.");
     *menu += new MenuEntry("How to use", nullptr, [](MenuEntry *) { MessageBox("Kotoba3DS", kHelp)(); });
 
     *menu += HotkeyWatcher;  // runs every frame while the game plays
