@@ -480,6 +480,15 @@ static kt::LookupView &View() {
     return *g_viewPtr;
 }
 
+// Frees the lookup screens and their caches (glyphs, matches) when they close: left in place,
+// their many small blocks would split the free memory the next OCR model load needs whole.
+static void DropView() {
+    delete g_viewPtr;
+    g_viewPtr = nullptr;
+    delete g_textPtr;
+    g_textPtr = nullptr;
+}
+
 // Draws both screens once and shows them. Returns the milliseconds it took.
 static u32 DrawLookup(kt::LookupView &v) {
     u64 t0 = osGetTime();
@@ -616,6 +625,18 @@ static void FixLine(std::string &text, const std::vector<kt::OcrAlt> &alts, void
     g_fixedChars += kt::fixOcrLine(g_dict, text, alts);
 }
 
+// The biggest block malloc can hand out right now (for the log: what the next OCR model load
+// will find). Probes by halving; everything is freed again.
+static u32 LargestFreeBlock() {
+    u32 lo = 0, hi = 8 * 1024 * 1024;
+    while (hi - lo > 16 * 1024) {
+        u32 mid = lo + (hi - lo) / 2;
+        void *p = malloc(mid);
+        if (p) { free(p); lo = mid; } else hi = mid;
+    }
+    return lo;
+}
+
 static void LogOcr(const std::string &line) {  // timings, to see how fast this console is
     File f;
     if (File::Open(f, "/3ds/kotoba3ds/ocr_log.txt", File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
@@ -652,21 +673,27 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
         return false;
     }
     ShowBusy("Reading the screen...");
-    // 1. the picture: find the text box (by its colour), then grey for the OCR
+    // 1. the model first, while the plugin's memory is in one piece (it needs ~1.55 MB in a few
+    //    big blocks; it is loaded for this read only)
+    u64 t1 = osGetTime();
+    SdReader mf;
+    if (!mf.open(kModelDir + name)) { error = "could not open " + name; return false; }
+    if (!g_localOcr.load(mf, error)) {
+        LogOcr(Utils::Format("%s: load failed (%s), largest free block %lu KB", name.c_str(), error.c_str(),
+                             (unsigned long)(LargestFreeBlock() / 1024)));
+        return false;
+    }
+    g_modelName = name;
+    u64 t2 = osGetTime();
+    // 2. the picture: find the text box (by its colour), then grey for the OCR
     uint8_t *rgb = SnapshotRGB();
-    if (!rgb) { error = "could not copy the screen"; return false; }
+    if (!rgb) { g_localOcr.unload(); error = "not enough memory to copy the screen"; return false; }
     std::vector<kt::TextBox> boxes = kt::findTextBoxes(rgb, 400, 240);
     uint8_t *grey = kt::greyFromRGB(rgb, 400, 240);
     free(rgb);
-    if (!grey) { error = "not enough memory for the picture"; return false; }
-    // 2. the model (loaded for this read only: it needs ~1.4 MB of the plugin's memory)
-    u64 t1 = osGetTime();
-    SdReader mf;
-    if (!mf.open(kModelDir + name)) { free(grey); error = "could not open " + name; return false; }
-    if (!g_localOcr.load(mf, error)) { free(grey); return false; }
-    g_modelName = name;
+    if (!grey) { g_localOcr.unload(); error = "not enough memory for the picture"; return false; }
     // 3. read the box (or the whole screen)
-    u64 t2 = osGetTime();
+    u64 t2b = osGetTime();
     g_localOcr.setParallel(System::IsNew3DS() ? 2 : 1, RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
     g_fixedChars = 0;
@@ -675,11 +702,11 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
     free(grey);
     g_localOcr.unload();  // ~1.4 MB back right away
     u64 t3 = osGetTime();
-    struct mallinfo mi = mallinfo();
-    LogOcr(Utils::Format("%s: box %lu ms, load %lu ms, read %lu ms (%s, %u threads, %d MHz, %u fixed), heap free %lu KB, %s",
-                         name.c_str(), (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned long)(t3 - t2),
-                         used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
-                         (unsigned long)(mi.fordblks / 1024), ok ? paragraphs[0].c_str() : error.c_str()));
+    LogOcr(Utils::Format("%s: load %lu ms, box %lu ms, read %lu ms (%s, %u threads, %d MHz, %u fixed), largest free block %lu KB, %s",
+                         name.c_str(), (unsigned long)(t2 - t1 + (t1 - t0)), (unsigned long)(t2b - t2),
+                         (unsigned long)(t3 - t2b), used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(),
+                         CpuMHz(), g_fixedChars, (unsigned long)(LargestFreeBlock() / 1024),
+                         ok ? paragraphs[0].c_str() : error.c_str()));
     return ok;
 }
 
@@ -700,6 +727,7 @@ static void Lookup() {
     kt::LookupView &v = View();
     v.setText(paragraphs);
     RunLookupView(v);
+    DropView();
 }
 
 static void ReleaseLookupMemory() {
@@ -903,6 +931,7 @@ int main(void) {
                                    kt::LookupView &v = View();
                                    v.setText(g_lastBlocks);
                                    RunLookupView(v);
+                                   DropView();
                                }
                            },
                            "Reopen the text of your last lookup.");

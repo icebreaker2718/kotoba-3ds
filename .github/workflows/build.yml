@@ -27,6 +27,13 @@ jobs:
           fi
           cat build.log
 
+      - name: Build a test copy that asks Luma for 2 MiB instead of 5 (games short of memory)
+        run: |
+          export PATH="$DEVKITPRO/tools/bin:$PATH"
+          sed 's/^MemorySize: .*/MemorySize: 2MiB/' plugin/Kotoba3DS.plgInfo > plugin/test2mib.plgInfo
+          3gxtool -s plugin/Kotoba3DS.elf plugin/test2mib.plgInfo plugin/Kotoba3DS-2MiB-test.3gx
+          ls -la plugin/*.3gx
+
       - name: Symbolize crash addresses
         if: hashFiles('.github/crash-addresses.txt') != ''
         continue-on-error: true
@@ -48,7 +55,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Kotoba3DS-plugin
-          path: plugin/Kotoba3DS.3gx
+          path: |
+            plugin/Kotoba3DS.3gx
+            plugin/Kotoba3DS-2MiB-test.3gx
 
   dictionary:
     runs-on: ubuntu-latest
@@ -151,7 +160,7 @@ jobs:
         run: |
           ls -la out
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest out/Kotoba3DS.3gx out/dict.bin out/Kotoba3DS-ocr-model.zip \
+          gh release create latest out/Kotoba3DS.3gx out/dict.bin out/Kotoba3DS-ocr-model.zip out/Kotoba3DS-2MiB-test.3gx \
             --target "$GITHUB_SHA" --latest \
             --title "Kotoba3DS (latest build)" \
             --notes "Built automatically from ${GITHUB_SHA::7} on $(date -u +%Y-%m-%d).
@@ -159,5 +168,7 @@ jobs:
           1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\` (every game), or \`/luma/plugins/<TitleID>/Kotoba3DS.3gx\` for one game.
           2. Copy **dict.bin** to \`/3ds/kotoba3ds/dict.bin\`.
           3. Unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card (the on-device OCR model). The model is [VOCR5 by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only.
+
+          **Kotoba3DS-2MiB-test.3gx** is a test copy for games that crash at start with the plugin: it asks Luma for 2 MiB of the game's memory instead of 5. Reading the screen doesn't fit in 2 MiB, so it only shows whether the game starts.
 
           See the README for the PC tools (OCR server, Anki cards)."

@@ -18,6 +18,7 @@ bool Dictionary::open(Reader *r, std::string &error) {
     size_ = r->size();
     cache_.assign(kBlocks, Block());
     memoPool_.clear();
+    memoPool_.reserve(64 * 1024);  // grows as the search visits the tree: reserved once, so it never moves
     memoOff_.clear();
     memoLen_.clear();
     uint8_t h[64];
