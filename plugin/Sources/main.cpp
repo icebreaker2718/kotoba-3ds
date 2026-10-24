@@ -841,7 +841,7 @@ static s32 CoreTask(void *a) {
     return 0;
 }
 static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
-    static const s32 kAffinity[] = {Task::NewAppCore, Task::NewSysCore, Task::AppCore};
+    static const s32 kAffinity[] = {Task::NewAppCore, -1, Task::AppCore};  // core 2, any free core, core 0
     CoreJob cj = {job, arg};
     std::vector<Task> tasks;
     for (unsigned i = 0; i < n && i < 3; i++) tasks.emplace_back(CoreTask, &cj, kAffinity[i]);
