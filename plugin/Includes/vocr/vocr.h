@@ -80,6 +80,7 @@ typedef struct {             /* a parsed blob; points into it, so keep the blob 
     unsigned height, max_width, stride, n_ops, n_classes, int8, params;
     const uint16_t *vocab_off;   /* n_classes + 1 offsets into vocab */
     const char *vocab;           /* UTF-8; class c is vocab[off[c] .. off[c+1]) */
+    unsigned packed;             /* Kotoba3DS: weights reordered by vocr_pack_simd32() */
     vocr_op op[VOCR_MAX_OPS];
 } vocr_model;
 
@@ -146,6 +147,10 @@ typedef struct {             /* a planned arena; private apart from the first fi
 
 /* Parse and validate a blob already in memory. Nothing is copied. */
 int vocr_load(vocr_model *m, const void *blob, size_t bytes);
+/* Kotoba3DS addition: reorder the int8 weights for the ARMv6 SIMD kernel (in place; the
+ * blob must be writable). 1 = done, 0 = not available in this build. */
+int vocr_pack_simd32(vocr_model *m);
+
 /* Check the blob's CRC-32 (optional; vocr_load checks structure, not content). */
 int vocr_check_crc(const void *blob, size_t bytes);
 /* Exact arena bytes for lines up to o->max_width (0 if the options are invalid). */

@@ -118,6 +118,12 @@ jobs:
       - name: Test on-device OCR on rendered 3DS screens
         run: python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr
 
+      - name: Test on-device OCR built for the 3DS CPU (ARMv6 SIMD kernel, under qemu-arm)
+        run: |
+          sudo apt-get install -y -q gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user
+          tests/build_arm_cli.sh
+          OCR_PROBE="qemu-arm -cpu cortex-a15 $PWD/tests/ocr_cli_arm" python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr
+
       - name: Google Lens live test (real request; a failure here is a warning)
         continue-on-error: true
         run: python tests/test_lens_live.py dict.bin

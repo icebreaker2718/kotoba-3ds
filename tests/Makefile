@@ -4,7 +4,7 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -fsanitize=address,undefined -fno-sanitize=shift
 CORE := $(wildcard ../plugin/Sources/core/*.cpp)
 DICT ?= ../dict.bin
-LDLIBS := libvocr.a -lmbedtls -lmbedx509 -lmbedcrypto -lm   # apt install libmbedtls-dev
+LDLIBS := libvocr.a -lmbedtls -lmbedx509 -lmbedcrypto -lm -lpthread   # apt install libmbedtls-dev
 CFLAGS_VOCR := -std=c99 -O2 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize=shift
 CXXFLAGS += -I../plugin/Includes/vocr
 VOCR_SRC := $(wildcard ../plugin/Sources/vocr/*.c)

@@ -73,12 +73,16 @@ def cer(ref, hyp):
     return d[len(b)] / max(1, len(a))
 
 probe = os.path.join(HERE, "test_lens")
+# OCR_PROBE: another command to run instead (e.g. the ARM build under qemu-arm); it gets
+# "model bmp" and prints PARAGRAPH: lines like test_lens --local
+alt = os.environ.get("OCR_PROBE", "").split()
 tmp = tempfile.mkdtemp()
 fails, total = 0, 0.0
 for name, lines, kw in cases:
     bmp = os.path.join(tmp, "shot.bmp")
     screen(lines, **kw).save(bmp)
-    r = subprocess.run([probe, "--local", model, bmp], capture_output=True, text=True, timeout=120)
+    cmd = alt + [model, bmp] if alt else [probe, "--local", model, bmp]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     paras = [l[len("PARAGRAPH: "):] for l in r.stdout.splitlines() if l.startswith("PARAGRAPH: ")]
     want = "".join(lines)
     best = min((cer(want, p) for p in paras), default=1.0)
@@ -90,6 +94,7 @@ for name, lines, kw in cases:
         print("FAIL furigana was not dropped"); fails += 1
 
 summary = f"{len(cases) - fails}/{len(cases)} screens read, mean CER {total / len(cases):.1%}"
-print(("::notice" if not fails else "::warning") + f" title=On-device OCR ({os.path.basename(model)})::{summary}")
+label = os.path.basename(model) + (" on " + os.path.basename(alt[-1]) if alt else "")
+print(("::notice" if not fails else "::warning") + f" title=On-device OCR ({label})::{summary}")
 print("\nALL PASSED" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

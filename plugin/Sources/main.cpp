@@ -225,6 +225,29 @@ static void InitShotCounter() {
 // the OCR may be using it, and CTRPF's screenshot task crashes when it can't get it.
 static volatile bool g_lookupOpen = false;
 
+// New 3DS: 804 MHz + L2 cache while a lookup is open (the game is paused), then back to what the
+// game had. Old titles run at 268 MHz without L2; this is what Rosalina's "New 3DS menu" sets.
+static s64 g_cpuBefore = -1;  // svcKernelSetState(10) bits: 1 = 804 MHz, 2 = L2 cache
+
+static void BoostCpu() {
+    if (!System::IsNew3DS() || g_cpuBefore >= 0) return;
+    s64 clk = 0, l2 = 0;
+    if (R_FAILED(svcGetSystemInfo(&clk, 0x10001, 0)) || R_FAILED(svcGetSystemInfo(&l2, 0x10001, 2))) return;
+    g_cpuBefore = (l2 ? 2 : 0) | (clk > 268 ? 1 : 0);
+    if (g_cpuBefore != 3) svcKernelSetState(10, 3u);
+}
+
+static void RestoreCpu() {
+    if (g_cpuBefore < 0) return;
+    if (g_cpuBefore != 3) svcKernelSetState(10, (u32)g_cpuBefore);
+    g_cpuBefore = -1;
+}
+
+static int CpuMHz() {
+    s64 clk = 0;
+    return R_SUCCEEDED(svcGetSystemInfo(&clk, 0x10001, 0)) ? (int)clk : 0;
+}
+
 static bool OnScreenshot() {
     // The engine fires while the hotkey is *held*: refuse a second shot within 1.5 s, so one
     // press = one screenshot. (Returning false cancels it.) No allocation here (see above).
@@ -809,6 +832,23 @@ static void LogOcr(const std::string &line) {  // timings, to see how fast this 
     }
 }
 
+// Runs job(arg) on n CPU cores at once (CTRPF tasks: New 3DS cores 2 and 3, then core 0, where
+// the paused game leaves room) and waits for all of them.
+struct CoreJob { void (*job)(void *); void *arg; };
+static s32 CoreTask(void *a) {
+    CoreJob *j = (CoreJob *)a;
+    j->job(j->arg);
+    return 0;
+}
+static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
+    static const s32 kAffinity[] = {Task::NewAppCore, Task::NewSysCore, Task::AppCore};
+    CoreJob cj = {job, arg};
+    std::vector<Task> tasks;
+    for (unsigned i = 0; i < n && i < 3; i++) tasks.emplace_back(CoreTask, &cj, kAffinity[i]);
+    for (Task &t : tasks) t.Start();
+    for (Task &t : tasks) t.Wait();
+}
+
 static bool LocalRead(const std::string &shotName, std::vector<std::string> &paragraphs, std::string &error) {
     u64 t0 = osGetTime();
     std::string name = FindModel();
@@ -833,15 +873,17 @@ static bool LocalRead(const std::string &shotName, std::vector<std::string> &par
     g_modelName = name;
     // 3. read the box (or the whole screen)
     u64 t2 = osGetTime();
-    osSetSpeedupEnable(true);  // New 3DS: full CPU speed while reading (ignored where not allowed)
+    BoostCpu();  // normally on already (the lookup is open); the clock is logged below
+    g_localOcr.setParallel(System::IsNew3DS() ? 3 : 1, RunOnCores);
     int used = -1;
     bool ok = kt::localReadScreen(g_localOcr, grey, w, h, boxes, paragraphs, error, LocalProgress, &used);
     free(grey);
     u64 t3 = osGetTime();
     struct mallinfo mi = mallinfo();
-    LogOcr(Utils::Format("%s: box %lu ms, load %lu ms, read %lu ms (%s), heap free %lu KB, %s", name.c_str(),
-                         (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned long)(t3 - t2),
-                         used >= 0 ? "text box" : "whole screen", (unsigned long)(mi.fordblks / 1024),
+    LogOcr(Utils::Format("%s: box %lu ms, load %lu ms, read %lu ms (%s, %u threads, %d MHz), heap free %lu KB, %s",
+                         name.c_str(), (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned long)(t3 - t2),
+                         used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(), CpuMHz(),
+                         (unsigned long)(mi.fordblks / 1024),
                          ok ? paragraphs[0].c_str() : error.c_str()));
     return ok;
 }
@@ -996,9 +1038,11 @@ static void ReadScreen(MenuEntry *) {
         return;
     }
     g_lookupOpen = true;
+    BoostCpu();
     ReadShot(shot);
     g_lookupShot = "";
     ReleaseLookupMemory();
+    RestoreCpu();
     g_lookupOpen = false;
 }
 
@@ -1032,6 +1076,7 @@ static void HotkeyWatcher(void) {  // called every frame by the plugin menu whil
     if (!EnsureDict()) return;
     g_lookupOpen = true;
     Process::Pause();
+    BoostCpu();
     TakeTopSnapshot();  // the paused game, to draw definitions over
     g_lookupShot = haveShot ? shot : "";
     if (!g_ocrEnabled) {
@@ -1043,6 +1088,7 @@ static void HotkeyWatcher(void) {  // called every frame by the plugin menu whil
     }
     g_lookupShot = "";
     ReleaseLookupMemory();
+    RestoreCpu();
     g_lookupOpen = false;
     Process::Play();
 }

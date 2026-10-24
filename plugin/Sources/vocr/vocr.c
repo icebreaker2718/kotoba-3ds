@@ -52,6 +52,34 @@ enum { DST_RING = 1, DST_TRANS = 2, DST_ACC = 3 };
 #define HEADER_BYTES 64u
 #define OP_BYTES 64u
 #define MIN_WIDTH 8u
+/* Kotoba3DS addition: ARMv6 SIMD (the 3DS's ARM11 has no NEON). vocr_pack_simd32() reorders
+ * each int8 weight block so that one 32-bit load holds two outputs' weights for two k, and
+ * SMLAD does two multiply-accumulates at once. Integer sums are exact, so the text is
+ * bit-identical to the scalar path. VOCR_SIMD32_EMULATE builds the same path with C
+ * stand-ins for the instructions, to test it on a PC. */
+#if !defined(VOCR_NEON) && !defined(VOCR_NO_SIMD32) && \
+    (defined(__ARM_FEATURE_SIMD32) || defined(VOCR_SIMD32_EMULATE))
+#define VOCR_SIMD32 1
+#if defined(__ARM_FEATURE_SIMD32) && !defined(VOCR_SIMD32_EMULATE)
+#include <arm_acle.h>
+#define vocr_sxtb16(x) __sxtb16(x)
+#define vocr_ror8(x) (((uint32_t)(x) >> 8) | ((uint32_t)(x) << 24))
+#define vocr_smlad(a, b, acc) __smlad((a), (b), (acc))
+#else
+static uint32_t vocr_sxtb16(uint32_t x)
+{
+    return (uint32_t)(uint16_t)(int16_t)(int8_t)(x & 0xFF) | ((uint32_t)(uint16_t)(int16_t)(int8_t)((x >> 16) & 0xFF) << 16);
+}
+static uint32_t vocr_ror8(uint32_t x) { return (x >> 8) | (x << 24); }
+static int32_t vocr_smlad(uint32_t a, uint32_t b, int32_t acc)
+{
+    int32_t p0 = (int32_t)(int16_t)(a & 0xFFFF) * (int32_t)(int16_t)(b & 0xFFFF);
+    int32_t p1 = (int32_t)(int16_t)(a >> 16) * (int32_t)(int16_t)(b >> 16);
+    return (int32_t)((uint32_t)acc + (uint32_t)p0 + (uint32_t)p1);
+}
+#endif
+#endif
+
 #define W8I_CHUNK 512u /* int32 sums of at most 512 int8 x int16 products: 512 * 127 * 32767 < 2^31 */
 #ifdef VOCR_NEON
 #define VOCR_HEAD_CHUNK 32u /* head frames per mm_i16 call on the NEON W8I path (1 KB of stack) */
@@ -1087,6 +1115,110 @@ static void quant16(const float *x, size_t xs, unsigned K, unsigned P, int16_t *
  * S = 0 + float(c_0) + float(c_1) + ... (float adds, in order) and c_i is the exact int32
  * sum of q[k][j] * qx[p][k] over k in [512 i, 512 i + 512). 512 * 127 * 32767 < 2^31, so
  * no chunk can overflow, and for K <= 512 S is just float(sum). */
+#ifdef VOCR_SIMD32
+/* mm_i16 for packed weights (vocr_pack_simd32): for each pair of k, 16 bytes hold
+ * [w(k,j) w(k,j+1) w(k+1,j) w(k+1,j+1)] for j = 0, 2, 4, 6; an odd last k is unpacked. */
+static void mm_i16_simd32(const int8_t *qw, const float *scale, const float *bias, const int16_t *qx,
+                          const float *sx, unsigned K, unsigned P, float *y, size_t ys, const float *res,
+                          size_t rs, int relu)
+{
+    unsigned p, j, k, k0;
+    for (p = 0; p < P; p++) {
+        const int16_t *xp = qx + (size_t)p * K;
+        float fs[8];
+        for (j = 0; j < 8; j++) fs[j] = 0.0f;
+        for (k0 = 0; k0 < K; k0 += W8I_CHUNK) { /* W8I_CHUNK is even: pairs never straddle */
+            const unsigned k1 = umin(K, k0 + W8I_CHUNK);
+            int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0, c5 = 0, c6 = 0, c7 = 0;
+            const uint32_t *w = (const uint32_t *)(const void *)(qw + (size_t)k0 * 8);
+#if defined(__ARM_FEATURE_SIMD32) && defined(__arm__) && !defined(__thumb__) && !defined(VOCR_SIMD32_EMULATE)
+            /* the same loop in ARM assembly: SXTB16's built-in ROR #8, no register spills */
+            {
+                const int16_t *xk = xp + k0;
+                const int16_t *xe = xp + k0 + ((k1 - k0) & ~1u);
+                while (xk < xe) {
+                    uint32_t t0, t1, t2;
+                    __asm__ volatile(
+                        "ldrh   %[t0], [%[x]], #2\n\t"
+                        "ldrh   %[t1], [%[x]], #2\n\t"
+                        "pkhbt  %[t0], %[t0], %[t1], lsl #16\n\t"
+                        "ldr    %[t1], [%[w]], #4\n\t"
+                        "sxtb16 %[t2], %[t1]\n\t"
+                        "smlad  %[c0], %[t2], %[t0], %[c0]\n\t"
+                        "sxtb16 %[t2], %[t1], ror #8\n\t"
+                        "smlad  %[c1], %[t2], %[t0], %[c1]\n\t"
+                        "ldr    %[t1], [%[w]], #4\n\t"
+                        "sxtb16 %[t2], %[t1]\n\t"
+                        "smlad  %[c2], %[t2], %[t0], %[c2]\n\t"
+                        "sxtb16 %[t2], %[t1], ror #8\n\t"
+                        "smlad  %[c3], %[t2], %[t0], %[c3]\n\t"
+                        "ldr    %[t1], [%[w]], #4\n\t"
+                        "sxtb16 %[t2], %[t1]\n\t"
+                        "smlad  %[c4], %[t2], %[t0], %[c4]\n\t"
+                        "sxtb16 %[t2], %[t1], ror #8\n\t"
+                        "smlad  %[c5], %[t2], %[t0], %[c5]\n\t"
+                        "ldr    %[t1], [%[w]], #4\n\t"
+                        "sxtb16 %[t2], %[t1]\n\t"
+                        "smlad  %[c6], %[t2], %[t0], %[c6]\n\t"
+                        "sxtb16 %[t2], %[t1], ror #8\n\t"
+                        "smlad  %[c7], %[t2], %[t0], %[c7]\n\t"
+                        : [c0] "+r"(c0), [c1] "+r"(c1), [c2] "+r"(c2), [c3] "+r"(c3), [c4] "+r"(c4),
+                          [c5] "+r"(c5), [c6] "+r"(c6), [c7] "+r"(c7), [x] "+r"(xk), [w] "+r"(w),
+                          [t0] "=&r"(t0), [t1] "=&r"(t1), [t2] "=&r"(t2)
+                        :
+                        : "memory");
+                }
+                k = k0 + ((k1 - k0) & ~1u);
+            }
+#else
+            for (k = k0; k + 2 <= k1; k += 2, w += 4) {
+                const uint32_t xv = (uint32_t)(uint16_t)xp[k] | ((uint32_t)(uint16_t)xp[k + 1] << 16);
+                const uint32_t a = w[0], b = w[1], c = w[2], d = w[3];
+                c0 = vocr_smlad(vocr_sxtb16(a), xv, c0);
+                c1 = vocr_smlad(vocr_sxtb16(vocr_ror8(a)), xv, c1);
+                c2 = vocr_smlad(vocr_sxtb16(b), xv, c2);
+                c3 = vocr_smlad(vocr_sxtb16(vocr_ror8(b)), xv, c3);
+                c4 = vocr_smlad(vocr_sxtb16(c), xv, c4);
+                c5 = vocr_smlad(vocr_sxtb16(vocr_ror8(c)), xv, c5);
+                c6 = vocr_smlad(vocr_sxtb16(d), xv, c6);
+                c7 = vocr_smlad(vocr_sxtb16(vocr_ror8(d)), xv, c7);
+            }
+#endif
+            if (k < k1) { /* odd K: the last k as it was */
+                const int8_t *wk = qw + (size_t)k * 8;
+                const int32_t xv = xp[k];
+                c0 += (int32_t)wk[0] * xv;
+                c1 += (int32_t)wk[1] * xv;
+                c2 += (int32_t)wk[2] * xv;
+                c3 += (int32_t)wk[3] * xv;
+                c4 += (int32_t)wk[4] * xv;
+                c5 += (int32_t)wk[5] * xv;
+                c6 += (int32_t)wk[6] * xv;
+                c7 += (int32_t)wk[7] * xv;
+            }
+            fs[0] = fs[0] + (float)c0;
+            fs[1] = fs[1] + (float)c1;
+            fs[2] = fs[2] + (float)c2;
+            fs[3] = fs[3] + (float)c3;
+            fs[4] = fs[4] + (float)c4;
+            fs[5] = fs[5] + (float)c5;
+            fs[6] = fs[6] + (float)c6;
+            fs[7] = fs[7] + (float)c7;
+        }
+        for (j = 0; j < 8; j++) {
+            float v = fs[j] * (scale[j] * sx[p]);
+            if (bias) v = v + bias[j];
+            if (relu) v = relu_f(v);
+            if (res) v = v + res[p * rs + j];
+            y[p * ys + j] = v;
+        }
+    }
+}
+#define VOCR_MM_I16(m, ...) ((m)->packed ? mm_i16_simd32(__VA_ARGS__) : mm_i16(__VA_ARGS__))
+#else
+#define VOCR_MM_I16(m, ...) mm_i16(__VA_ARGS__)
+#endif
+
 static void mm_i16(const int8_t *qw, const float *scale, const float *bias, const int16_t *qx,
                    const float *sx, unsigned K, unsigned P, float *y, size_t ys, const float *res,
                    size_t rs, int relu)
@@ -1395,7 +1527,7 @@ static void run_pw(const vocr_ctx *c, unsigned i, const float *x, unsigned P, fl
             dequant8(op->q + wo, op->scale + nb * 8, K, wf);
             mm_f32(wf, b, x, K, K, P, y + nb * 8, N, rb, N, relu);
         } else {
-            mm_i16(op->q + wo, op->scale + nb * 8, b, qx, sx, K, P, y + nb * 8, N, rb, N, relu);
+            VOCR_MM_I16(c->model, op->q + wo, op->scale + nb * 8, b, qx, sx, K, P, y + nb * 8, N, rb, N, relu);
         }
     }
 }
@@ -1551,8 +1683,8 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
             else if (c->mode == VOCR_MODE_W8F)
                 mm_f32(wf, b, x + (size_t)f0 * K, K, K, pn, tmp, 8, NULL, 0, 0);
             else
-                mm_i16(op->q + wo, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn, tmp,
-                       8, NULL, 0, 0);
+                VOCR_MM_I16(c->model, op->q + wo, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn,
+                            tmp, 8, NULL, 0, 0);
 #ifdef VOCR_NEON
             if (nb < n_lanes) {
                 const uint32x4_t vnb = vdupq_n_u32(nb);
@@ -1822,4 +1954,39 @@ void vocr_sizes(size_t *model_bytes, size_t *ctx_bytes)
 {
     if (model_bytes) *model_bytes = sizeof(vocr_model);
     if (ctx_bytes) *ctx_bytes = sizeof(vocr_ctx);
+}
+
+/* Kotoba3DS addition (see VOCR_SIMD32 above). Reorders the int8 weights in place, once; the
+ * blob's CRC no longer matches afterwards (check it first). Returns 1 if packed, 0 if this
+ * build has no SIMD32 path (the weights are then left alone). */
+int vocr_pack_simd32(vocr_model *m)
+{
+#ifdef VOCR_SIMD32
+    unsigned i, nb, k, j;
+    if (!m || !m->blob) return 0;
+    if (m->packed) return 1;
+    for (i = 0; i < m->n_ops; i++) {
+        const vocr_op *op = &m->op[i];
+        const unsigned K = op->k;
+        if (!op->q) continue;
+        for (nb = 0; nb < op->cout_pad / 8u; nb++) {
+            int8_t *w = (int8_t *)(void *)(uintptr_t)(op->q + (size_t)nb * K * 8);
+            for (k = 0; k + 2 <= K; k += 2) {
+                int8_t t[16];
+                for (j = 0; j < 8; j += 2) {
+                    t[2 * j + 0] = w[k * 8 + j];
+                    t[2 * j + 1] = w[k * 8 + j + 1];
+                    t[2 * j + 2] = w[(k + 1) * 8 + j];
+                    t[2 * j + 3] = w[(k + 1) * 8 + j + 1];
+                }
+                memcpy(w + (size_t)k * 8, t, 16);
+            }
+        }
+    }
+    m->packed = 1;
+    return 1;
+#else
+    (void)m;
+    return 0;
+#endif
 }

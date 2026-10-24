@@ -17,6 +17,9 @@ bool Dictionary::open(Reader *r, std::string &error) {
     reader_ = r;
     size_ = r->size();
     cache_.assign(kBlocks, Block());
+    memoPool_.clear();
+    memoOff_.clear();
+    memoLen_.clear();
     uint8_t h[64];
     if (size_ < 64 || !r->read(0, h, 64)) { error = "dict.bin is missing or too small"; reader_ = nullptr; return false; }
     if (memcmp(h, "KTB1", 4) != 0) { error = "dict.bin has the wrong format (rebuild it)"; reader_ = nullptr; return false; }
@@ -102,12 +105,37 @@ static int cmpBytes(const std::string &a, const std::string &b) {
     return a.size() < b.size() ? -1 : (a.size() > b.size() ? 1 : 0);
 }
 
+// Compares the key at `index` (node `node` of the search tree: 1 = root, children 2n, 2n + 1)
+// with `key`. The first kMemoLevels levels are remembered after their first read.
+int Dictionary::cmpProbe(uint32_t node, uint32_t index, const std::string &key) {
+    if (node < memoOff_.size()) {
+        if (!memoOff_[node]) {
+            std::string k = keyAt(index, nullptr);
+            memoOff_[node] = (uint32_t)memoPool_.size() + 1;
+            memoLen_[node] = (uint16_t)std::min<size_t>(k.size(), 0xFFFF);
+            memoPool_ += k;
+        }
+        const char *p = memoPool_.data() + memoOff_[node] - 1;
+        size_t len = memoLen_[node], n = std::min(len, key.size());
+        int c = memcmp(p, key.data(), n);
+        if (c) return c;
+        return len < key.size() ? -1 : (len > key.size() ? 1 : 0);
+    }
+    return cmpBytes(keyAt(index, nullptr), key);
+}
+
 uint32_t Dictionary::lowerBound(const std::string &key) {
-    uint32_t lo = 0, hi = keyCount_;
+    if (memoOff_.empty()) {
+        memoOff_.assign(1u << kMemoLevels, 0);
+        memoLen_.assign(1u << kMemoLevels, 0);
+    }
+    // mid depends only on (lo, hi), so every search walks the same tree: left = 2n, right = 2n + 1
+    uint32_t lo = 0, hi = keyCount_, node = 1;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
-        if (cmpBytes(keyAt(mid, nullptr), key) < 0) lo = mid + 1;
-        else hi = mid;
+        if (cmpProbe(node, mid, key) < 0) { lo = mid + 1; node = 2 * node + 1; }
+        else { hi = mid; node = 2 * node; }
+        if (node >= (1u << 30)) node = 1u << 30;  // deep levels are never remembered
     }
     return lo;
 }

@@ -4,6 +4,7 @@
 //   test_lens --live shot.bmp [dict.bin]    the real Google Lens (needs internet)
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -43,6 +44,13 @@ static std::string dataDir(const char *argv0) {
     return (s == std::string::npos ? std::string(".") : a.substr(0, s)) + "/data/";
 }
 
+// stands in for the 3DS's CTRPF tasks: n threads at once, wait for all
+static void threadRunner(unsigned n, void (*job)(void *), void *arg) {
+    std::vector<std::thread> t;
+    for (unsigned i = 0; i < n; i++) t.emplace_back(job, arg);
+    for (auto &x : t) x.join();
+}
+
 int main(int argc, char **argv) {
     if (argc >= 5 && !strcmp(argv[1], "--https")) {
         std::string pem = slurp(argv[4]), body, err;
@@ -76,6 +84,22 @@ int main(int argc, char **argv) {
         free(grey);
         if (!ok) { printf("OCR FAILED: %s\n", e.c_str()); return 3; }
         if (!ok2 || again != paras) { printf("RELOAD FAILED: %s\n", e.c_str()); return 3; }
+        // the same with lines read on 3 threads (as on a New 3DS)
+        {
+            uint8_t *rgb3 = nullptr;
+            FileReader bmp3(argv[3]);
+            rgb3 = topScreenRGB888(bmp3, w, h, e);
+            uint8_t *grey3 = greyFromRGB(rgb3, w, h);
+            free(rgb3);
+            LocalOcr par;
+            FileReader mf3(argv[2]);
+            par.setParallel(3, threadRunner);
+            std::vector<std::string> threaded;
+            bool ok3 = par.load(mf3, e) && localReadScreen(par, grey3, w, h, boxes, threaded, e);
+            free(grey3);
+            if (!ok3 || threaded != paras) { printf("PARALLEL DIFFERS: %s\n", e.c_str()); return 3; }
+            printf("WORKERS: %u\n", par.lastWorkers());
+        }
         printf("READ: %s\n", used >= 0 ? "text box" : "whole screen");
         for (auto &p : paras) printf("PARAGRAPH: %s\n", p.c_str());
         return 0;

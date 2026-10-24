@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <atomic>
 
 #include "core/kana.hpp"
 #include "vocr.h"
@@ -24,6 +26,7 @@ void LocalOcr::unload() {
     std::vector<void *>().swap(raw_);
     blob_ = arena_ = nullptr;
     model_ = ctx_ = nullptr;
+    ctxs_.clear();
     info_.clear();
 }
 
@@ -50,7 +53,13 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     vocr_ctx *c = (vocr_ctx *)alignedAlloc(sizeof(vocr_ctx));
     if (!m || !c) { error = "not enough memory for the OCR model"; return false; }
     int r = vocr_load(m, blob, n);
-    if (r == VOCR_OK && vocr_check_crc(blob, n) != VOCR_OK) r = VOCR_E_FORMAT;
+    // the CRC pass costs ~0.1 s on the 3DS: once per file per session is enough
+    static uint32_t checkedSize = 0;
+    if (r == VOCR_OK && checkedSize != n) {
+        if (vocr_check_crc(blob, n) != VOCR_OK) r = VOCR_E_FORMAT;
+        else checkedSize = n;
+    }
+    if (r == VOCR_OK) vocr_pack_simd32(m);  // ARM11: weights reordered for 2-at-a-time multiplies
     if (r != VOCR_OK) {
         char b[96];
         snprintf(b, sizeof(b), "the OCR model file is damaged or not a VOCR model (%d)", r);
@@ -65,6 +74,9 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     if (!arena) { error = "not enough memory for the OCR"; return false; }
     r = vocr_init(c, m, &o, arena, need);
     if (r != VOCR_OK) { error = "could not start the OCR"; return false; }
+    arenaBytes_ = need;
+    mode_ = o.mode;
+    ctxs_.assign(1, c);
     blob_ = blob;
     arena_ = arena;
     model_ = m;
@@ -75,16 +87,18 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     return true;
 }
 
-// Recognizes one line; a line too long for the model is read in pieces.
+// Recognizes one line into out (cap bytes, NUL-terminated); a line too long for the model is read
+// in pieces. Runs on worker threads: no allocation, little stack.
 static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsigned stride, const VocrLine &L,
-                   std::string &out) {
-    out.clear();
+                   char *out, size_t cap) {
+    out[0] = 0;
+    size_t used = 0;
     int fmt = VOCR_GREY8 | (L.dark ? VOCR_INVERT : 0);
     unsigned pieces = 1;
     // the model squeezes anything wider than max_width after scaling to its height: split instead
     while ((unsigned long)((L.w + pieces - 1) / pieces) * m->height > (unsigned long)m->max_width * L.h && pieces < 8)
         pieces++;
-    for (unsigned p = 0; p < pieces; p++) {
+    for (unsigned p = 0; p < pieces && used + 1 < cap; p++) {
         unsigned x0 = L.x + L.w * p / pieces, x1 = L.x + L.w * (p + 1) / pieces;
         vocr_image im;
         im.pixels = grey + (size_t)L.y * stride + x0;
@@ -92,13 +106,34 @@ static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsign
         im.height = L.h;
         im.stride = stride;
         im.format = fmt;
-        char text[512];
-        int r = vocr_run(c, &im, text, sizeof(text), nullptr);
+        int r = vocr_run(c, &im, out + used, cap - used, nullptr);
         if (r != VOCR_OK && r != VOCR_E_TEXT) return r;
-        out += text;
+        used += strlen(out + used);
     }
     return VOCR_OK;
 }
+
+namespace {
+enum { kLineCap = 512 };
+struct LineJob {
+    const vocr_model *model = nullptr;
+    void **ctxs = nullptr;
+    const uint8_t *grey = nullptr;
+    unsigned stride = 0;
+    const VocrLine *lines = nullptr;
+    unsigned count = 0;
+    char *text = nullptr;   // count x kLineCap
+    int *rc = nullptr;
+    std::atomic<unsigned> next{0}, worker{0};
+};
+
+void lineWorker(void *arg) {
+    LineJob *j = (LineJob *)arg;
+    vocr_ctx *c = (vocr_ctx *)j->ctxs[j->worker.fetch_add(1)];
+    for (unsigned i; (i = j->next.fetch_add(1)) < j->count;)
+        j->rc[i] = runLine(c, j->model, j->grey, j->stride, j->lines[i], j->text + (size_t)i * kLineCap, kLineCap);
+}
+}  // namespace
 
 bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<LensLine> &lines, std::string &error,
                     void (*progress)(unsigned, unsigned), unsigned rx, unsigned ry, unsigned rw, unsigned rh) {
@@ -132,22 +167,58 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Len
 #ifndef __3DS__
     if (getenv("LO_DEBUG")) for (unsigned i = 0; i < set.count; i++) fprintf(stderr, "found %u,%u %ux%u dark=%u\n", set.lines[i].x, set.lines[i].y, set.lines[i].w, set.lines[i].h, set.lines[i].dark);
 #endif
-    vocr_ctx *c = (vocr_ctx *)ctx_;
     const vocr_model *m = (const vocr_model *)model_;
-    for (size_t k = 0; k < todo.size(); k++) {
-        if (progress) progress((unsigned)k, (unsigned)todo.size());
-        VocrLine L = set.lines[todo[k]];
+    std::vector<VocrLine> todoLines;
+    for (unsigned i : todo) {
+        VocrLine L = set.lines[i];
         L.x += rx;  // region -> whole image
         L.y += ry;
-        std::string text;
-        r = runLine(c, m, grey, w, L, text);
+        todoLines.push_back(L);
+    }
+    unsigned n = (unsigned)todoLines.size();
+    // workers: one per line up to workers_, each with its own context (made once per load)
+    unsigned workers = runner_ ? std::min<unsigned>(workers_, n) : 1;
+    while (ctxs_.size() < workers) {
+        vocr_ctx *c2 = (vocr_ctx *)alignedAlloc(sizeof(vocr_ctx));
+        unsigned char *a2 = (unsigned char *)alignedAlloc(arenaBytes_);
+        vocr_opts o;
+        memset(&o, 0, sizeof(o));
+        o.mode = mode_;
+        if (!c2 || !a2 || vocr_init(c2, m, &o, a2, arenaBytes_) != VOCR_OK) break;  // fewer workers then
+        ctxs_.push_back(c2);
+    }
+    if (workers > ctxs_.size()) workers = (unsigned)ctxs_.size();
+    if (workers < 1) workers = 1;
+    lastWorkers_ = workers;
+    std::vector<char> text((size_t)std::max(n, 1u) * kLineCap, 0);
+    std::vector<int> rc(std::max(n, 1u), VOCR_E_ARG);
+    LineJob job;
+    job.model = m;
+    job.ctxs = ctxs_.data();
+    job.grey = grey;
+    job.stride = w;
+    job.lines = todoLines.data();
+    job.count = n;
+    job.text = text.data();
+    job.rc = rc.data();
+    if (workers > 1) {
+        if (progress) progress(0, 1);
+        runner_(workers, lineWorker, &job);
+    } else {
+        for (unsigned k = 0; k < n; k++) {  // one at a time, with progress
+            if (progress) progress(k, n);
+            job.rc[k] = runLine((vocr_ctx *)ctxs_[0], m, grey, w, todoLines[k], job.text + (size_t)k * kLineCap, kLineCap);
+        }
+    }
+    for (unsigned k = 0; k < n; k++) {
+        const VocrLine &L = todoLines[k];
+        const char *t = job.text + (size_t)k * kLineCap;
 #ifndef __3DS__
-        if (getenv("LO_DEBUG")) fprintf(stderr, "run r=%d [%s]\n", r, text.c_str());
+        if (getenv("LO_DEBUG")) fprintf(stderr, "run r=%d [%s]\n", rc[k], t);
 #endif
-        if (r != VOCR_OK) continue;
-        if (text.empty()) continue;
+        if (rc[k] != VOCR_OK || !t[0]) continue;
         LensLine line;
-        line.text = text;
+        line.text = t;
         line.paragraph = (int)k;  // each line its own block; lensParagraphs() joins a text box's lines
         line.centerX = (L.x + L.w / 2.0f) / w;
         line.centerY = (L.y + L.h / 2.0f) / h;

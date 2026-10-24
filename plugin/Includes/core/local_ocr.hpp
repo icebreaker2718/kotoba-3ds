@@ -24,6 +24,12 @@ public:
     bool loaded() const { return blob_ != nullptr; }
     // Frees the model and its working memory (load() again to use it).
     void unload();
+
+    // Lines can be read in parallel: runner(n, job, arg) must run job(arg) on n threads at once
+    // and return when all have finished. Each extra worker needs its own ~180 KB of memory.
+    typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
+    void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
+    unsigned lastWorkers() const { return lastWorkers_; }  // how many the last read used
     const std::string &modelInfo() const { return info_; }
 
     // grey: w*h bytes (row-major), grey = (77 R + 150 G + 29 B) >> 8 as the model expects.
@@ -40,6 +46,11 @@ private:
     void *ctx_ = nullptr;             // vocr_ctx
     std::string info_;
     std::vector<void *> raw_;  // every allocation, for the destructor
+    std::vector<void *> ctxs_; // vocr_ctx per worker (the first is ctx_)
+    size_t arenaBytes_ = 0;
+    int mode_ = 0;
+    unsigned workers_ = 1, lastWorkers_ = 1;
+    Runner runner_ = nullptr;
     void *alignedAlloc(size_t bytes);
     bool loadInner(Reader &file, std::string &error);
 };

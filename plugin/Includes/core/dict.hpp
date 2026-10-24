@@ -70,8 +70,16 @@ private:
     std::string keyAt(uint32_t i, uint32_t *entryId);
     uint32_t lowerBound(const std::string &key);
 
+    // The first levels of the binary search over the keys are the same for every lookup: their
+    // keys are kept in memory once read (about 30 KB), so a lookup reads ~3 blocks instead of ~20.
+    enum : uint32_t { kMemoLevels = 12 };
+    std::string memoPool_;            // the remembered keys, back to back
+    std::vector<uint32_t> memoOff_;   // per tree node (heap order): offset into memoPool_ + 1, 0 = not read
+    std::vector<uint16_t> memoLen_;
+    int cmpProbe(uint32_t node, uint32_t index, const std::string &key);
+
     // block cache
-    enum : uint32_t { kBlock = 2048, kBlocks = 32 };
+    enum : uint32_t { kBlock = 2048, kBlocks = 48 };
     struct Block { uint32_t base = 0xFFFFFFFF; uint32_t stamp = 0; uint32_t len = 0; uint8_t data[kBlock]; };
     std::vector<Block> cache_;
     uint32_t clock_ = 0;
