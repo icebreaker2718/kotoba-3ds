@@ -177,8 +177,9 @@ Cards go to your deck **Mining Deck** with the **Lapis** note type by default.
 1. **Anki**: install the **AnkiConnect** add-on (code `2055492159`) and restart Anki. The Lapis
    note type must exist (it does if you already mine into Lapis; otherwise import the `.apkg`
    from [Lapis' releases](https://github.com/donkuri/lapis/releases)).
-2. **Python packages**: `pip install pillow`, plus `pip install manga-ocr` for sentence OCR
-   (needs Python 3.12 or older; the first run downloads a ~400 MB model).
+2. **Python packages**: `pip install pillow`. (No OCR is needed on the PC: the 3DS reads the
+   screen and saves the sentence with each word. `pip install manga-ocr` only matters for words
+   saved by old plugin versions, which didn't keep the sentence.)
 3. **Dictionaries**: make a folder `tools/dictionaries/` and put Yomitan `.zip` dictionaries
    in it. The script works out what each one is:
    - definitions: `jitendex-yomitan.zip` from [jitendex.org](https://jitendex.org). Other term
@@ -199,9 +200,8 @@ Cards go to your deck **Mining Deck** with the **Lapis** note type by default.
      rather use an SD card reader, set `source.sd_root` to the card's drive (e.g. `E:/`).
    - `games`: title ID → game name. It goes into `MiscInfo` and becomes the card's tag. The
      title ID shows in the `MiscInfo` field of your first card.
-   - `ocr.crop`: the box `[left, top, right, bottom]` on the 400×240 top screen that holds the
-     game's text. OCR is much better when it only sees the text box. Per-game boxes go in
-     `ocr.game_crops`.
+   - `ocr.crop` / `ocr.game_crops`: only for those old words without a sentence: the box
+     `[left, top, right, bottom]` on the top screen that manga-ocr reads.
 
 ### Each time
 1. Close the game, open **ftpd** on the 3DS, and keep Anki open on the PC.

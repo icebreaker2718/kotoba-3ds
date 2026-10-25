@@ -3,16 +3,18 @@
 mine.py - turns the words you saved with Kotoba3DS into Anki cards.
 
 It reads SD:/3ds/kotoba3ds/mined.tsv (over FTP from the ftpd homebrew app, or from the SD
-card in a card reader), crops each word's screenshot to the top screen, optionally OCRs the
-sentence with manga-ocr, and adds a note per word through AnkiConnect.
+card in a card reader), takes each word's sentence (read on the 3DS) and screenshot, and adds a
+note per word through AnkiConnect.
 
   python mine.py setup            create config.json, check the note type/deck, index dictionaries
   python mine.py                  import new words (Anki must be open)
   python mine.py --dry-run        show what would be added
   python mine.py --clear          after importing, remove imported words from the 3DS log
+  python mine.py known            put the words of your Anki cards on the 3DS (green there)
 
 Needs: Anki with the AnkiConnect add-on (2055492159), `pip install pillow`.
-Optional: `pip install manga-ocr` for sentence OCR.
+Optional: `pip install manga-ocr`, only for words saved by old plugin versions, which didn't
+keep the sentence (it is then read off the screenshot).
 """
 import argparse
 import base64

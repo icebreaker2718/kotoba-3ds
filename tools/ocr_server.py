@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-ocr_server.py - reads Japanese text off 3DS screenshots for the Kotoba3DS plugin.
+ocr_server.py - the PC side of the Kotoba3DS plugin: makes Anki cards of the words you saved
+(Select > Make Anki cards) and sends the words of your Anki cards (Select > Known words).
 
-Run it on your PC while you play:
+Run it on your PC with Anki open, on the same Wi-Fi as the 3DS:
 
     py -3.12 tools\\ocr_server.py
 
-The plugin finds it automatically on your home network (or you can type the address shown
-below into the plugin's "OCR server" setting). In-game: press the screenshot hotkey, open
-the plugin menu, choose "Read screen", then tap the word you want.
+The plugin finds it automatically on your home network (or type the address shown below under
+"PC" in the plugin's menu). The 3DS reads the screen itself: no OCR runs here. (The old
+/ocr request, for plugin versions that sent screenshots to read, still works when manga-ocr
+is installed: it is loaded then, at the first such request.)
 
-Uses the same config.json as mine.py (ocr.crop / ocr.game_crops pick the text box).
-Needs: pip install pillow manga-ocr   (Python 3.12 or older)
+Uses the same config.json as mine.py. Needs: pip install pillow
 """
 import argparse
 import io
@@ -140,7 +141,13 @@ class Reader:
 
     def load(self):
         if self.engine == "manga-ocr" and self.model is None:
-            from manga_ocr import MangaOcr
+            try:
+                from manga_ocr import MangaOcr
+            except ImportError:
+                print("A screenshot came to be read, but manga-ocr isn't installed: update the plugin "
+                      "(it reads the screen itself), or pip install manga-ocr.")
+                self.engine = "none"
+                return
             print("Loading manga-ocr (first start downloads the model)...")
             self.model = MangaOcr()
 
@@ -389,7 +396,7 @@ def local_ips():
     return sorted(ip for ip in ips if not ip.startswith("127."))
 
 
-def serve(cfg, port=PORT, engine="manga-ocr", preload=True, log=print, ready=None, stop=None, model=None,
+def serve(cfg, port=PORT, engine="manga-ocr", preload=False, log=print, ready=None, stop=None, model=None,
           config_path=None, cards=True):
     reader = Reader(cfg, engine, model, config_path)
     maker = CardMaker(reader, log) if cards else None
@@ -436,8 +443,6 @@ def main():
         serve(cfg, a.port, config_path=a.config, cards=not a.no_cards)
     except KeyboardInterrupt:
         print("stopped")
-    except ImportError as e:
-        sys.exit(f"{e}\nInstall the OCR model with: py -3.12 -m pip install manga-ocr")
 
 
 if __name__ == "__main__":
