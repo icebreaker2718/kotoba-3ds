@@ -113,8 +113,26 @@ void LookupView::setText(const std::vector<std::string> &blocks) {
     entry_.clear();
     cache_.clear();
     layout();
+    // where words start is worked out later (stops(), from prefetch() while the player reads):
+    // splitting all the text takes ~100 dictionary reads, and only the first word is needed now
     stops_.assign(blocks_.size(), {});
-    for (size_t b = 0; b < blocks_.size(); b++) {
+    stopsReady_.assign(blocks_.size(), 0);
+    // start on the first word that has a dictionary entry (looking a few characters in)
+    int first = -1, tries = 0;
+    for (size_t i = 0; i < cells_.size() && tries < 6; i++) {
+        if (!isWordChar(cells_[i].cp)) continue;
+        if (first < 0) first = (int)i;
+        tries++;
+        selectAt(cells_[i].block, cells_[i].byte);
+        if (hasResult()) break;
+    }
+    if (!hasResult() && first >= 0) selectAt(cells_[first].block, cells_[first].byte);
+}
+
+// Where words start in block b (greedy longest dictionary match, as chunkText splits it).
+const std::vector<size_t> &LookupView::stops(size_t b) const {
+    if (!stopsReady_[b]) {
+        stopsReady_[b] = 1;
         size_t at = 0;
         for (const std::string &w : chunkText(dict_, blocks_[b])) {
             size_t i = 0;
@@ -122,13 +140,7 @@ void LookupView::setText(const std::vector<std::string> &blocks) {
             at += w.size();
         }
     }
-    // start on the first word that has a dictionary entry
-    for (size_t b = 0; b < blocks_.size() && selBlock_ < 0; b++)
-        for (size_t s : stops_[b]) {
-            selectAt((int)b, s);
-            if (hasResult()) break;
-        }
-    if (!hasResult() && !stops_.empty() && !stops_[0].empty()) selectAt(0, stops_[0][0]);
+    return stops_[b];
 }
 
 const std::string &LookupView::sentence() const {
@@ -369,11 +381,11 @@ bool LookupView::wordTarget(int dir, int &block, size_t &byte) const {
     if (dir > 0) {
         size_t from = selByte_ + std::max<size_t>(selLen_, 1);
         for (size_t b = selBlock_; b < blocks_.size(); b++)
-            for (size_t s : stops_[b])
+            for (size_t s : stops(b))
                 if (b > (size_t)selBlock_ || s >= from) { block = (int)b; byte = s; return true; }
     } else {
         for (int b = selBlock_; b >= 0; b--)
-            for (size_t k = stops_[b].size(); k-- > 0;)
+            for (size_t k = stops(b).size(); k-- > 0;)
                 if (b < selBlock_ || stops_[b][k] < selByte_) { block = b; byte = stops_[b][k]; return true; }
     }
     return false;
@@ -414,6 +426,7 @@ bool LookupView::moveRow(int dir) {
 
 bool LookupView::prefetch() {
     if (selBlock_ < 0) return false;
+    if (!stopsReady_[selBlock_]) { stops(selBlock_); return true; }  // split this text into words
     int b;
     size_t at;
     // where the next press goes: the next and previous words, the rows below and above
@@ -424,7 +437,7 @@ bool LookupView::prefetch() {
     // then a few words further on
     int ahead = 0;
     for (size_t bl = selBlock_; bl < blocks_.size(); bl++)
-        for (size_t st : stops_[bl]) {
+        for (size_t st : stops(bl)) {
             if (bl == (size_t)selBlock_ && st <= selByte_) continue;
             if (++ahead > 6) return false;
             if (!isCached((int)bl, st)) { lookup((int)bl, st); return true; }

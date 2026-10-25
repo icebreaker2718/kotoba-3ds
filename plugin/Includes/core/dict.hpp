@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace kt {
@@ -74,6 +75,8 @@ private:
     // The first levels of the binary search over the keys are the same for every lookup: their
     // keys are kept in memory once read (about 30 KB), so a lookup reads ~3 blocks instead of ~20.
     enum : uint32_t { kMemoLevels = 12 };
+    std::unordered_map<std::string, std::vector<uint32_t>> exactMemo_;  // recent exact() answers
+    void exactUncached(const std::string &key, std::vector<uint32_t> &ids);
     std::string memoPool_;            // the remembered keys, back to back
     std::vector<uint32_t> memoOff_;   // per tree node (heap order): offset into memoPool_ + 1, 0 = not read
     std::vector<uint16_t> memoLen_;

@@ -35,6 +35,7 @@ bool Dictionary::open(Reader *r, std::string &error) {
     radOff_ = le32(h + 28);
     kanjiCount_ = le32(h + 32);
     kanjiOff_ = le32(h + 36);
+    exactMemo_.clear();
     if ((uint64_t)keyIdxOff_ + (uint64_t)keyCount_ * 8 > size_ ||
         (uint64_t)entryIdxOff_ + (uint64_t)(entryCount_ + 1) * 8 > size_) {
         error = "dict.bin is truncated (copy it again)";
@@ -145,6 +146,23 @@ uint32_t Dictionary::lowerBound(const std::string &key) {
 
 void Dictionary::exact(const std::string &key, std::vector<uint32_t> &ids) {
     if (!reader_ || key.empty()) return;
+    // the same keys come up again and again (each spot is looked up at several lengths, then
+    // again when the cursor gets there): remember the last few hundred answers
+    auto memo = exactMemo_.find(key);
+    if (memo != exactMemo_.end()) {
+        for (uint32_t eid : memo->second)
+            if (std::find(ids.begin(), ids.end(), eid) == ids.end()) ids.push_back(eid);
+        return;
+    }
+    std::vector<uint32_t> found;
+    exactUncached(key, found);
+    if (exactMemo_.size() >= 512) exactMemo_.clear();
+    exactMemo_[key] = found;
+    for (uint32_t eid : found)
+        if (std::find(ids.begin(), ids.end(), eid) == ids.end()) ids.push_back(eid);
+}
+
+void Dictionary::exactUncached(const std::string &key, std::vector<uint32_t> &ids) {
     for (uint32_t i = lowerBound(key); i < keyCount_; i++) {
         uint32_t eid;
         if (keyAt(i, &eid) != key) break;

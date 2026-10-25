@@ -19,6 +19,13 @@ uint8_t *topScreenRGB888(Reader &bmp, unsigned &w, unsigned &h, std::string &err
 void framebufferToRGB(const uint8_t *px, unsigned count, int format, unsigned bpp, uint8_t *rgb);
 
 // A 24-bit BMP file (bottom-up rows) of w x h R, G, B pixels.
+// A framebuffer copy stored the screen's way (w columns of h pixels, each column bottom to top)
+// -> R, G, B rows from the top (w*h*3 bytes). The format test is done once, not per pixel.
+void framebufferColumnsToRGB(const uint8_t *px, unsigned w, unsigned h, int format, unsigned bpp, uint8_t *rgb);
+
+// The 54-byte header of a 24-bit bottom-up BMP (rows padded to 4 bytes), for writing one in pieces.
+std::string bmpHeader(unsigned w, unsigned h);
+
 // One R, G, B pixel -> framebuffer bytes (the inverse of framebufferToRGB, opaque).
 void rgbToFramebuffer(const uint8_t *rgb, int format, uint8_t *px);
 

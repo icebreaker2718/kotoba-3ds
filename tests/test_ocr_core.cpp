@@ -134,6 +134,19 @@ int main(int argc, char **argv) {
         uint8_t *back = topScreenRGB888(r, w, h, e2);
         check(back && w == 400 && h == 240 && !memcmp(back, img.data(), img.size()), "screenshot BMP reads back the same");
         free(back);
+        check(bmpHeader(400, 240) == bmp.substr(0, 54), "BMP header written alone = the whole file's");
+        // the snapshot's layout (columns bottom to top) -> RGB rows, every format, = pixel by pixel
+        const unsigned W = 7, H = 5;
+        for (int fmt = 0; fmt < 5; fmt++) {
+            unsigned bpp = fmt == 0 ? 4 : (fmt == 1 ? 3 : 2);
+            std::vector<uint8_t> cols(W * H * bpp), fast(W * H * 3), slow(W * H * 3);
+            for (size_t i = 0; i < cols.size(); i++) cols[i] = (uint8_t)(i * 37 + fmt);
+            framebufferColumnsToRGB(cols.data(), W, H, fmt, bpp, fast.data());
+            for (unsigned x = 0; x < W; x++)
+                for (unsigned k = 0; k < H; k++)
+                    framebufferToRGB(&cols[(x * H + k) * bpp], 1, fmt, bpp, &slow[((H - 1 - k) * W + x) * 3]);
+            check(fast == slow, "framebuffer columns -> rows, format " + std::to_string(fmt));
+        }
     }
 
     if (argc > 1) {

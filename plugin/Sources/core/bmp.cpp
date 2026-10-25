@@ -136,6 +136,53 @@ void framebufferToRGB(const uint8_t *px, unsigned count, int format, unsigned bp
     }
 }
 
+template <int F>
+static inline void pixelToRGB(const uint8_t *px, uint8_t *o) {
+    if (F == 0) { o[0] = px[3]; o[1] = px[2]; o[2] = px[1]; return; }  // RGBA8: A, B, G, R
+    if (F == 1) { o[0] = px[2]; o[1] = px[1]; o[2] = px[0]; return; }  // BGR8
+    uint16_t v = (uint16_t)(px[0] | (px[1] << 8));
+    if (F == 2) { o[0] = (uint8_t)((v >> 8) & 0xF8); o[1] = (uint8_t)((v >> 3) & 0xFC); o[2] = (uint8_t)((v << 3) & 0xF8); }
+    else if (F == 3) { o[0] = (uint8_t)((v >> 8) & 0xF8); o[1] = (uint8_t)((v >> 3) & 0xF8); o[2] = (uint8_t)((v << 2) & 0xF8); }
+    else { o[0] = (uint8_t)((v >> 8) & 0xF0); o[1] = (uint8_t)((v >> 4) & 0xF0); o[2] = (uint8_t)(v & 0xF0); }
+}
+
+template <int F>
+static void columnsToRGB(const uint8_t *px, unsigned w, unsigned h, unsigned bpp, uint8_t *rgb) {
+    const size_t rowBytes = (size_t)w * 3;
+    for (unsigned x = 0; x < w; x++) {
+        const uint8_t *src = px + (size_t)x * h * bpp;
+        uint8_t *dst = rgb + (size_t)(h - 1) * rowBytes + x * 3;  // the column starts at the bottom
+        for (unsigned k = 0; k < h; k++, src += bpp, dst -= rowBytes) pixelToRGB<F>(src, dst);
+    }
+}
+
+void framebufferColumnsToRGB(const uint8_t *px, unsigned w, unsigned h, int format, unsigned bpp, uint8_t *rgb) {
+    switch (format) {
+    case 0: columnsToRGB<0>(px, w, h, bpp, rgb); break;
+    case 1: columnsToRGB<1>(px, w, h, bpp, rgb); break;
+    case 2: columnsToRGB<2>(px, w, h, bpp, rgb); break;
+    case 3: columnsToRGB<3>(px, w, h, bpp, rgb); break;
+    default: columnsToRGB<4>(px, w, h, bpp, rgb); break;
+    }
+}
+
+std::string bmpHeader(unsigned w, unsigned h) {
+    const unsigned stride = (w * 3 + 3) & ~3u, dataSize = stride * h;
+    std::string out(54, '\0');
+    auto put32 = [&](size_t at, uint32_t v) { for (int i = 0; i < 4; i++) out[at + i] = (char)((v >> (8 * i)) & 0xFF); };
+    out[0] = 'B';
+    out[1] = 'M';
+    put32(2, 54 + dataSize);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, w);
+    put32(22, h);
+    out[26] = 1;
+    out[28] = 24;
+    put32(34, dataSize);
+    return out;
+}
+
 void rgbToFramebuffer(const uint8_t *rgb, int format, uint8_t *px) {
     uint8_t r = rgb[0], g = rgb[1], b = rgb[2];
     uint16_t v;

@@ -75,7 +75,9 @@ private:
     std::vector<std::string> blocks_;
     std::vector<Cell> cells_;
     std::vector<Row> rows_;
-    std::vector<std::vector<size_t>> stops_;  // per block: byte offsets where words start
+    mutable std::vector<std::vector<size_t>> stops_;  // per block: byte offsets where words start
+    mutable std::vector<char> stopsReady_;            // per block: stops_ worked out yet
+    const std::vector<size_t> &stops(size_t block) const;
     int contentH_ = 0, scrollY_ = 0;
     // selection
     int selBlock_ = -1;

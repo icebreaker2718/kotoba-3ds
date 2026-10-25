@@ -207,15 +207,14 @@ static int CpuMHz() {
 // ---------------------------------------------------------------------------
 // Bottom-screen-only UI: the top screen keeps showing the (paused) game.
 // ---------------------------------------------------------------------------
+static void Present();
 static void ShowBusy(const std::string &line1, const std::string &line2 = "") {
-    for (int i = 0; i < 2; i++) {  // draw into both buffers so it stays up
-        const Screen &bottom = OSD::GetBottomScreen();
-        bottom.DrawRect(16, 88, 288, 60, Color::Black, true);
-        bottom.DrawRect(16, 88, 288, 60, Color::SkyBlue, false);
-        bottom.DrawSysfont(line1, 28, 98, Color::White);
-        if (!line2.empty()) bottom.DrawSysfont(line2, 28, 120, Color::Gray);
-        OSD::SwapBuffers();
-    }
+    const Screen &bottom = OSD::GetBottomScreen();
+    bottom.DrawRect(16, 88, 288, 60, Color::Black, true);
+    bottom.DrawRect(16, 88, 288, 60, Color::SkyBlue, false);
+    bottom.DrawSysfont(line1, 28, 98, Color::White);
+    if (!line2.empty()) bottom.DrawSysfont(line2, 28, 120, Color::Gray);
+    Present();  // shown, and copied to the other buffer (one wait for the screen, not two)
 }
 
 // A list on the bottom screen only. Returns the chosen index, or < 0 for B / close.
@@ -277,11 +276,7 @@ static void TakeTopSnapshot() {  // call while the game is paused and nothing is
 static uint8_t *SnapshotRGB() {
     if (!g_snap.valid) return nullptr;
     uint8_t *rgb = (uint8_t *)malloc(400 * 240 * 3);
-    if (!rgb) return nullptr;
-    for (u32 x = 0; x < 400; x++)
-        for (u32 k = 0; k < 240; k++)  // k-th pixel of the column = y 239 - k
-            kt::framebufferToRGB(&g_snap.px[(x * 240 + k) * g_snap.bpp], 1, (int)g_snap.format, g_snap.bpp,
-                                 rgb + ((239 - k) * 400 + x) * 3);
+    if (rgb) kt::framebufferColumnsToRGB(g_snap.px.data(), 400, 240, (int)g_snap.format, g_snap.bpp, rgb);
     return rgb;
 }
 
@@ -305,11 +300,26 @@ static bool PaintGame(bool dim) {
     const Screen &top = OSD::GetTopScreen();
     if (!g_snap.valid || top.BytesPerPixel != g_snap.bpp) return false;
     const u32 bpp = g_snap.bpp, col = 240 * bpp;
+    // 8 bits a channel: 4 bytes at a time, each byte to ~19% (alpha kept for RGBA8). Columns are
+    // 720 or 960 bytes and start word-aligned, in the framebuffer and in the snapshot.
+    const bool words = bpp >= 3 && ((uintptr_t)Column(top, 0) & 3) == 0 && ((uintptr_t)g_snap.px.data() & 3) == 0;
+    const u32 keep = g_snap.format == GSP_RGBA8_OES ? 0x000000FFu : 0u;  // byte 0 of each pixel = alpha
     for (u32 x = 0; x < 400; x++) {
         u8 *d = Column(top, x);
         const u8 *src = &g_snap.px[x * col];
-        if (!dim) memcpy(d, src, col);
-        else for (u32 k = 0; k < col; k += bpp) Darken(d + k, src + k, bpp, g_snap.format);
+        if (!dim) {
+            memcpy(d, src, col);
+        } else if (words) {
+            const u32 *s4 = (const u32 *)src;
+            u32 *d4 = (u32 *)d;
+            for (u32 k = 0; k < col / 4; k++) {
+                u32 w = s4[k];
+                u32 v = ((w >> 3) & 0x1F1F1F1Fu) + ((w >> 4) & 0x0F0F0F0Fu);
+                d4[k] = (v & ~keep) | (w & keep);
+            }
+        } else {
+            for (u32 k = 0; k < col; k += bpp) Darken(d + k, src + k, bpp, g_snap.format);
+        }
     }
     return true;
 }
@@ -424,17 +434,37 @@ static int CountSaved() {
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
 
+// Written straight from the snapshot, 16 rows at a time (no 288 KB picture in memory). A BMP
+// stores its rows bottom first, and the snapshot's columns run bottom to top, so file row r is
+// pixel r of every column.
 static std::string SaveScreenshot() {
     if (!g_lookupShot.empty()) return g_lookupShot;
-    uint8_t *rgb = SnapshotRGB();
-    if (!rgb) return "";
-    std::string bmp = kt::bmpFromRGB(rgb, 400, 240);
-    free(rgb);
+    if (!g_snap.valid) return "";
     std::string ts = Timestamp();  // "2026-10-24 14:30:05"
     std::string name;
     for (char c : ts) name += (c == ' ') ? '_' : (c == ':' ? '-' : c);
     name += ".bmp";
-    if (!WriteWholeFile(std::string(kShotDir) + "/" + name, bmp)) return "";
+    File f;
+    if (File::Open(f, std::string(kShotDir) + "/" + name, File::WRITE | File::CREATE | File::TRUNCATE) != File::SUCCESS)
+        return "";
+    std::string header = kt::bmpHeader(400, 240);
+    bool ok = f.Write(header.data(), header.size()) == File::SUCCESS;
+    const u32 bpp = g_snap.bpp, rowBytes = 400 * 3;  // 1200: already a multiple of 4
+    std::vector<u8> chunk(16 * rowBytes);
+    for (u32 r0 = 0; ok && r0 < 240; r0 += 16) {
+        for (u32 r = r0; r < r0 + 16; r++)
+            for (u32 x = 0; x < 400; x++) {
+                uint8_t rgb[3];
+                kt::framebufferToRGB(&g_snap.px[(x * 240 + r) * bpp], 1, (int)g_snap.format, bpp, rgb);
+                u8 *o = &chunk[(r - r0) * rowBytes + x * 3];
+                o[0] = rgb[2];  // B, G, R
+                o[1] = rgb[1];
+                o[2] = rgb[0];
+            }
+        ok = f.Write(chunk.data(), chunk.size()) == File::SUCCESS;
+    }
+    f.Close();
+    if (!ok) return "";
     g_lookupShot = name;
     return name;
 }
@@ -527,10 +557,13 @@ struct ViewStats {
 
 // Runs the lookup screens until B / Close. Tap a character; D-pad or Circle Pad: words and rows;
 // L/R: matches; C-stick: scroll; A save, X hide.
+static u64 g_viewOpenedAt = 0;  // when the read finished (Lookup), for the log
 static void RunLookupView(kt::LookupView &v) {
     ViewStats st;
     OSD::SwapBuffers();  // let CTRPF finish any pending redraw of its own first
     DrawLookup(v);
+    u64 openMs = g_viewOpenedAt ? osGetTime() - g_viewOpenedAt : 0;
+    g_viewOpenedAt = 0;
     bool touchWas = true;  // a touch held from before doesn't count
     u32 repeatKey = 0;
     u64 repeatAt = 0;
@@ -597,8 +630,8 @@ static void RunLookupView(kt::LookupView &v) {
     }
     ClearTopPanel();  // the game as it was
     if (st.draws)
-        LogOcr(Utils::Format("view: %lu moves, look-up avg %lu ms (max %lu), draw avg %lu ms (max %lu), %lu looked up ahead",
-                             (unsigned long)st.moves, (unsigned long)(st.moves ? st.lookSum / st.moves : 0),
+        LogOcr(Utils::Format("view: opened in %lu ms, %lu moves, look-up avg %lu ms (max %lu), draw avg %lu ms (max %lu), %lu looked up ahead",
+                             (unsigned long)openMs, (unsigned long)st.moves, (unsigned long)(st.moves ? st.lookSum / st.moves : 0),
                              (unsigned long)st.lookMax, (unsigned long)(st.drawSum / st.draws), (unsigned long)st.drawMax,
                              (unsigned long)st.prefetched));
 }
@@ -663,6 +696,19 @@ static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
     for (Task &t : tasks) t.Wait();
 }
 
+static bool LoadModel(const std::string &name, std::string &error) {
+    g_localOcr.unload();
+    SdReader mf;
+    if (!mf.open(kModelDir + name)) { error = "could not open " + name; return false; }
+    if (!g_localOcr.load(mf, error)) {
+        LogOcr(Utils::Format("%s: load failed (%s), heap free %lu KB", name.c_str(), error.c_str(),
+                             (unsigned long)(HeapFree() / 1024)));
+        return false;
+    }
+    g_modelName = name;
+    return true;
+}
+
 // Reads the paused game's top screen -> text blocks.
 static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &error) {
     u64 t0 = osGetTime();
@@ -673,25 +719,24 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
         return false;
     }
     ShowBusy("Reading the screen...");
-    // 1. the model first, while the plugin's memory is in one piece (it needs ~1.55 MB in a few
-    //    big blocks; it is loaded for this read only)
+    // 1. the model: loaded at the first read and kept (1.2 MB from the SD card each time was
+    //    150-250 ms); loaded first, while the plugin's memory is still in one piece
     u64 t1 = osGetTime();
-    SdReader mf;
-    if (!mf.open(kModelDir + name)) { error = "could not open " + name; return false; }
-    if (!g_localOcr.load(mf, error)) {
-        LogOcr(Utils::Format("%s: load failed (%s), heap free %lu KB", name.c_str(), error.c_str(),
-                             (unsigned long)(HeapFree() / 1024)));
-        return false;
-    }
-    g_modelName = name;
+    if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     u64 t2 = osGetTime();
-    // 2. the picture: find the text box (by its colour), then grey for the OCR
+    // 2. the picture: find the text box (by its colour), then grey for the OCR. Short of memory
+    //    with the model kept? Free it and try once more (it is loaded again next time).
     uint8_t *rgb = SnapshotRGB();
-    if (!rgb) { g_localOcr.unload(); error = "not enough memory to copy the screen"; return false; }
+    if (!rgb) {
+        g_localOcr.unload();
+        rgb = SnapshotRGB();
+        if (!rgb) { error = "not enough memory to copy the screen"; return false; }
+        if (!LoadModel(name, error)) { free(rgb); return false; }
+    }
     std::vector<kt::TextBox> boxes = kt::findTextBoxes(rgb, 400, 240);
     uint8_t *grey = kt::greyFromRGB(rgb, 400, 240);
     free(rgb);
-    if (!grey) { g_localOcr.unload(); error = "not enough memory for the picture"; return false; }
+    if (!grey) { error = "not enough memory for the picture"; return false; }
     // 3. read the box (or the whole screen)
     u64 t2b = osGetTime();
     g_localOcr.setParallel(System::IsNew3DS() ? 2 : 1, RunOnCores);
@@ -699,8 +744,7 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
     g_fixedChars = 0;
     int used = -1;
     bool ok = kt::localReadScreen(g_localOcr, grey, 400, 240, boxes, paragraphs, error, LocalProgress, &used);
-    free(grey);
-    g_localOcr.unload();  // ~1.4 MB back right away
+    free(grey);  // the model stays loaded for the next read
     u64 t3 = osGetTime();
     LogOcr(Utils::Format("%s: load %lu ms, box %lu ms, read %lu ms (%s, %u threads, %d MHz, %u fixed), heap free %lu KB, %s",
                          name.c_str(), (unsigned long)(t2 - t1 + (t1 - t0)), (unsigned long)(t2b - t2),
@@ -720,6 +764,7 @@ static void Lookup() {
     // the longest block first (the dialogue, usually)
     std::stable_sort(paragraphs.begin(), paragraphs.end(),
                      [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
+    g_viewOpenedAt = osGetTime();
     ShowBusy("Finding the words...");
     g_lastBlocks = paragraphs;
     static bool fontLogged = false;
@@ -733,7 +778,6 @@ static void Lookup() {
 static void ReleaseLookupMemory() {
     g_snap.valid = false;
     std::vector<u8>().swap(g_snap.px);
-    if (g_localOcrPtr) g_localOcr.unload();
     g_lookupShot = "";
 }
 
