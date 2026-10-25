@@ -118,6 +118,7 @@ A = f"http://127.0.0.1:{audio_srv.server_port}"
 
 # ---- fake AnkiConnect with Lapis ----
 calls, notes, media, flags = [], [], {}, {}
+editor_open = False  # Anki refusing writes to a note open in an editor
 other_notes = [{"fields": {"Front": "飲[の]み 物[もの]", "Back": "drink"}},   # an older deck's cards
                {"fields": {"Front": "dog", "Back": "犬"}},
                {"fields": {"Vocab": "<b>猫</b>&nbsp;", "Front": "x"}}]
@@ -135,8 +136,11 @@ class Anki(BaseHTTPRequestHandler):
         elif a == "storeMediaFile": media[p["filename"]] = base64.b64decode(p["data"]); res = p["filename"]
         elif a == "findCards": res = [int(p["query"].split(":")[1]) * 10]
         elif a == "setSpecificValueOfCard":  # like Anki: a flag must be a number
-            flags[p["card"]] = (p["keys"], p["newValues"], p.get("warning_check"))
-            res = [True if isinstance(v, int) else [False, "flags must be an int"] for v in p["newValues"]]
+            if editor_open:
+                err = "Close the affected editor before this API write, even if its content is saved."
+            else:
+                flags[p["card"]] = (p["keys"], p["newValues"], p.get("warning_check"))
+                res = [True if isinstance(v, int) else [False, "flags must be an int"] for v in p["newValues"]]
         elif a == "findNotes": res = list(range(1, len(notes) + len(other_notes) + 1))
         elif a == "notesInfo":
             alln = notes + other_notes
@@ -247,6 +251,15 @@ cfg["dictionaries"] = {"folder": dfolder, "glossary": [], "pitch": [], "frequenc
 json.dump(cfg, open(cfgp, "w"))
 enr = mine.Enricher(mine.load_config(cfgp), log=lambda *a: None)
 check([len(enr.glossaries), len(enr.pitches), len(enr.freqs)] == [1, 1, 1], "dictionaries auto-detected by kind")
+
+# a card Anki has open in an editor: flagged once the editor is closed
+editor_open = True
+pending_before = len(mine.PENDING_FLAGS)
+mine.flag_note(mine.load_config(cfgp), 2, log=lambda *a: None, word="宝箱")
+check(mine.PENDING_FLAGS.get(2) == "宝箱", "a card Anki has open waits for its flag")
+editor_open = False
+check(mine.retry_flags(mine.load_config(cfgp), log=lambda *a: None) == 0 and flags.get(20) == (["flags"], [1], True),
+      "...and gets it once the editor is closed")
 
 # the words of the Anki cards, for the 3DS's green words
 check(mine.clean_known_word("<ruby>食<rt>た</rt></ruby>べる") == "食べる" and mine.clean_known_word("dog") == "",

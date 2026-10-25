@@ -241,9 +241,17 @@ class CardMaker:
 
     def _run(self):
         import mine
+        import queue
         self._prepare()
         while True:
-            row, img = self.jobs.get()
+            try:  # while idle, cards Anki wouldn't let be flagged (open in an editor) are tried again
+                row, img = self.jobs.get(timeout=15 if mine.PENDING_FLAGS else None)
+            except queue.Empty:
+                try:
+                    mine.retry_flags(self.reader.cfg, log=self.log)
+                except Exception:
+                    pass
+                continue
             try:
                 cfg = self.reader.cfg
                 if self.enricher is None:
