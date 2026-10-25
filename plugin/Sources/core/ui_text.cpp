@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "core/kana.hpp"
 #include "core/wrap.hpp"
@@ -28,14 +29,31 @@ int TextRenderer::width(const std::string &text, int size) {
     return w;
 }
 
+TextRenderer::~TextRenderer() {
+    free(slots_);
+    free(slab_);
+}
+
+bool TextRenderer::reserve() {
+    if (slab_) return true;
+    if (!slots_) slots_ = (Slot *)malloc(kSlots * sizeof(Slot));
+    if (!slots_) return false;
+    std::fill(slots_, slots_ + kSlots, Slot());
+    for (size_t bytes : {(size_t)96 * 1024, (size_t)48 * 1024, (size_t)16 * 1024})  // as much as fits
+        if ((slab_ = (uint8_t *)malloc(bytes)) != nullptr) {
+            slabBytes_ = bytes;
+            break;
+        }
+    slabUsed_ = 0;
+    count_ = 0;
+    return slab_ != nullptr;
+}
+
 // The glyph scaled to `size` (made once, then kept: the same characters are drawn on every redraw).
 const TextRenderer::Scaled *TextRenderer::scaled(uint32_t cp, int size) {
     if (size <= 0 || size > 255) return nullptr;
     const uint32_t key = (cp << 8) | (uint32_t)size;
-    if (slots_.empty()) {  // the first glyph: the cache's two blocks
-        slots_.resize(kSlots);
-        slab_.resize(kCacheBytes);
-    }
+    if (!slab_ && !reserve()) return nullptr;
     unsigned at = (key * 2654435761u) >> 22;  // 10 bits: kSlots
     while (slots_[at].key && slots_[at].key != key) at = (at + 1) & (kSlots - 1);
     if (slots_[at].key == key) {
@@ -44,7 +62,7 @@ const TextRenderer::Scaled *TextRenderer::scaled(uint32_t cp, int size) {
         found_.ox = sl.ox;
         found_.w = sl.w;
         found_.h = sl.h;
-        found_.alpha = slab_.data() + sl.off;
+        found_.alpha = slab_ + sl.off;
         return &found_;
     }
     GlyphInfo gi;
@@ -58,15 +76,15 @@ const TextRenderer::Scaled *TextRenderer::scaled(uint32_t cp, int size) {
     int w = (gi.width > 0 && cp != ' ' && cp != 0x3000) ? (int)std::ceil(gi.width * s) : 0;
     g.h = (uint16_t)size;
     const size_t bytes = (size_t)(w > 0 ? w : 0) * size;
-    if (bytes > slab_.size()) w = 0;
-    if (slabUsed_ + bytes > slab_.size() || count_ + 1 > kSlots * 3 / 4) {  // full: start over
-        std::fill(slots_.begin(), slots_.end(), Slot());
+    if (bytes > slabBytes_) w = 0;
+    if (slabUsed_ + bytes > slabBytes_ || count_ + 1 > kSlots * 3 / 4) {  // full: start over
+        std::fill(slots_, slots_ + kSlots, Slot());
         slabUsed_ = 0;
         count_ = 0;
         at = (key * 2654435761u) >> 22;
     }
     cell_.resize((size_t)cw * ch);
-    uint8_t *alpha = slab_.data() + slabUsed_;
+    uint8_t *alpha = slab_ + slabUsed_;
     if (w > 0 && font_.pixels(cp, cell_.data())) {
         // area-weighted resampling: each destination pixel averages the source area it covers;
         // the cell holds the glyph's pixels from column 0

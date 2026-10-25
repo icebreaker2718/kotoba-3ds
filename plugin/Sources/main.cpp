@@ -765,19 +765,17 @@ static void SpeedTest(const std::string &model, const uint8_t *grey, const std::
         const char *name;
         unsigned workers;  // 0 = the usual
         bool pairs, profile;
-        unsigned tile, head;
     };
+    // (VOCR's other batch sizes were within 2% of its defaults on the console, and loading the
+    // model again with them split up the memory: no longer tried)
     static const Config kConfigs[] = {
-        {"usual", 0, true, false, 0, 0},
-        {"usual again", 0, true, false, 0, 0},
-        {"old kernel", 0, false, false, 0, 0},
-        {"1 worker", 1, true, true, 0, 0},
-        {"1 worker, old kernel", 1, false, false, 0, 0},
-        {"2 workers", 2, true, false, 0, 0},
-        {"3 workers", 3, true, false, 0, 0},
-        {"tile 8", 0, true, false, 8, 0},
-        {"head 32", 0, true, false, 0, 32},
-        {"tile 8, head 64", 0, true, false, 8, 64},
+        {"usual", 0, true, false},
+        {"usual again", 0, true, false},
+        {"old kernel", 0, false, false},
+        {"1 worker", 1, true, true},
+        {"1 worker, old kernel", 1, false, false},
+        {"2 workers", 2, true, false},
+        {"3 workers", 3, true, false},
     };
     LogOcr(Utils::Format("speed test: %d MHz, core 3 %s, heap free %lu KB", CpuMHz(),
                          g_core3 > 0 ? "usable" : "not usable", (unsigned long)(HeapFree() / 1024)));
@@ -795,20 +793,11 @@ static void SpeedTest(const std::string &model, const uint8_t *grey, const std::
             LogOcr("speed: screen -> RGB " + Ms(t1 - t0) + " ms, text box " + Ms(t2 - t1) + " ms, grey " + Ms(t3 - t2) + " ms");
         }
     }
-    unsigned tile = 0, head = 0;
     std::string e;
+    (void)model;
     for (const Config &c : kConfigs) {
         if (c.workers == 3 && g_core3 <= 0) continue;
         if (c.workers > 1 && !System::IsNew3DS()) continue;
-        if (c.tile != tile || c.head != head) {  // other batch sizes: load the model again with them
-            g_localOcr.setOptions(c.tile, c.head);
-            tile = c.tile;
-            head = c.head;
-            if (!LoadModel(model, e)) {
-                LogOcr(std::string("speed: ") + c.name + ": not enough memory");
-                continue;
-            }
-        }
         ShowBusy("Speed test...", c.name);
         kt::ocrUsePairKernel(c.pairs);
         g_localOcr.setParallel(c.workers ? c.workers : OcrWorkers(), RunOnCores);
@@ -833,10 +822,6 @@ static void SpeedTest(const std::string &model, const uint8_t *grey, const std::
     }
     kt::ocrUsePairKernel(true);
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
-    if (tile || head) {
-        g_localOcr.setOptions(0, 0);
-        LoadModel(model, e);
-    }
 }
 
 // Reads the paused game's top screen -> text blocks.
@@ -849,8 +834,14 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
         return false;
     }
     ShowBusy("Reading the screen...");
-    // 1. the model: loaded at the first read and kept (1.2 MB from the SD card each time was
-    //    150-250 ms); loaded first, while the plugin's memory is still in one piece
+    // What stays for the whole session goes first, while the plugin's memory is still in one
+    // piece, side by side: the lookup screens' glyph cache, then the model with the workers'
+    // working memory (loaded at the first read and kept: 1.2 MB from the SD card each time was
+    // 150-250 ms). A read's pictures then come and go above them.
+    if (!g_textPtr) g_textPtr = new kt::TextRenderer(g_font);
+    g_textPtr->reserve();
+    g_localOcr.setParallel(OcrWorkers(), RunOnCores);
+    g_localOcr.setFixer(FixLine, nullptr);
     u64 t1 = osGetTime();
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     u64 t2 = osGetTime();
@@ -869,8 +860,6 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
     if (!grey) { error = "not enough memory for the picture"; return false; }
     // 3. read the box (or the whole screen)
     u64 t2b = osGetTime();
-    g_localOcr.setParallel(OcrWorkers(), RunOnCores);
-    g_localOcr.setFixer(FixLine, nullptr);
     g_fixedChars = 0;
     int used = -1;
     bool ok = kt::localReadScreen(g_localOcr, grey, 400, 240, boxes, paragraphs, error, LocalProgress, &used);

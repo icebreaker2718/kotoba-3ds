@@ -117,7 +117,34 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     char b[96];
     snprintf(b, sizeof(b), "%u characters, %u KB", m->n_classes, (unsigned)(n / 1024));
     info_ = b;
+    if (runner_) ensureWorkers(workers_);
     return true;
+}
+
+// A context (and top-K buffers) for each of n workers, as far as memory allows. Made right after
+// the model, so they sit next to it instead of in the gaps a read's pictures leave.
+void LocalOcr::ensureWorkers(unsigned n) {
+    const vocr_model *m = (const vocr_model *)model_;
+    if (!m) return;
+    while (ctxs_.size() < n) {
+        vocr_ctx *c2 = (vocr_ctx *)alignedAlloc(sizeof(vocr_ctx));
+        unsigned char *a2 = c2 ? (unsigned char *)alignedAlloc(arenaBytes_) : nullptr;
+        vocr_opts o;
+        memset(&o, 0, sizeof(o));
+        o.mode = mode_;
+        o.tile_frames = tileFrames_;
+        o.head_frames = headFrames_;
+        if (!c2 || !a2 || vocr_init(c2, m, &o, a2, arenaBytes_) != VOCR_OK) break;  // fewer workers then
+        ctxs_.push_back(c2);
+    }
+    while (topk_.size() < ctxs_.size()) {  // a few KB each
+        TopK t;
+        t.cap = m->max_width / m->stride + 8;
+        t.logit = (float *)alignedAlloc((size_t)t.cap * kTopK * sizeof(float));
+        t.cls = (uint16_t *)alignedAlloc((size_t)t.cap * kTopK * sizeof(uint16_t));
+        if (!t.logit || !t.cls) t = TopK();
+        topk_.push_back(t);
+    }
 }
 
 // Recognizes one line into out (cap bytes, NUL-terminated); a line too long for the model is read
@@ -259,28 +286,9 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
         todoLines.push_back(L);
     }
     unsigned n = (unsigned)todoLines.size();
-    // workers: one per line up to workers_, each with its own context (made once per load)
+    // workers: one per line up to workers_, each with its own context (made at the load)
     unsigned workers = runner_ ? std::min<unsigned>(workers_, n) : 1;
-    while (ctxs_.size() < workers) {
-        vocr_ctx *c2 = (vocr_ctx *)alignedAlloc(sizeof(vocr_ctx));
-        unsigned char *a2 = (unsigned char *)alignedAlloc(arenaBytes_);
-        vocr_opts o;
-        memset(&o, 0, sizeof(o));
-        o.mode = mode_;
-        o.tile_frames = tileFrames_;
-        o.head_frames = headFrames_;
-        if (!c2 || !a2 || vocr_init(c2, m, &o, a2, arenaBytes_) != VOCR_OK) break;  // fewer workers then
-        ctxs_.push_back(c2);
-    }
-    // top-K buffers per worker (a few KB): only when someone will use the alternatives
-    while (fixer_ && topk_.size() < ctxs_.size()) {
-        TopK t;
-        t.cap = m->max_width / m->stride + 8;
-        t.logit = (float *)alignedAlloc((size_t)t.cap * kTopK * sizeof(float));
-        t.cls = (uint16_t *)alignedAlloc((size_t)t.cap * kTopK * sizeof(uint16_t));
-        if (!t.logit || !t.cls) t = TopK();
-        topk_.push_back(t);
-    }
+    ensureWorkers(workers);
     if (workers > ctxs_.size()) workers = (unsigned)ctxs_.size();
     if (workers < 1) workers = 1;
     lastWorkers_ = workers;
@@ -297,7 +305,9 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
     job.count = n;
     job.text = text.data();
     job.rc = rc.data();
-    job.tk = fixer_ && topk_.size() >= workers ? (const TopK *)topk_.data() : nullptr;
+    bool tkOk = fixer_ && topk_.size() >= workers;
+    for (unsigned k = 0; tkOk && k < workers; k++) tkOk = topk_[k].logit != nullptr;
+    job.tk = tkOk ? (const TopK *)topk_.data() : nullptr;
     job.alts = rawAlts.data();
     job.nAlts = nAlts.data();
     // the longest lines first: the last one handed out is then a short one, and the workers finish

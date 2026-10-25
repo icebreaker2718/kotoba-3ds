@@ -60,7 +60,14 @@ public:
 class TextRenderer {
 public:
     explicit TextRenderer(GlyphSource &font) : font_(font) {}
+    ~TextRenderer();
+    TextRenderer(const TextRenderer &) = delete;
+    TextRenderer &operator=(const TextRenderer &) = delete;
     GlyphSource &font() { return font_; }
+    // Allocates the glyph cache now (else at the first glyph): the plugin does it before the OCR
+    // model, so the cache's block sits at the bottom of the free memory. False if not even a
+    // small one fits (glyphs are then not drawn).
+    bool reserve();
 
     // `size` is the line's height in pixels (the font's cell scaled to it).
     int advance(uint32_t cp, int size);
@@ -87,10 +94,10 @@ private:
         int advance = 0, ox = 0, w = 0, h = 0;
         const uint8_t *alpha = nullptr;  // w x h
     };
-    static const size_t kCacheBytes = 144 * 1024;
     static const unsigned kSlots = 1024;  // a power of 2
-    std::vector<Slot> slots_;
-    std::vector<uint8_t> slab_;
+    Slot *slots_ = nullptr;  // malloc'd: running short of memory must not abort the plugin
+    uint8_t *slab_ = nullptr;
+    size_t slabBytes_ = 0;
     size_t slabUsed_ = 0;
     unsigned count_ = 0;
     Scaled found_;

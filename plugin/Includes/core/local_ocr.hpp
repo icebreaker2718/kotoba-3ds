@@ -49,7 +49,8 @@ public:
     void unload();
 
     // Lines can be read in parallel: runner(n, job, arg) must run job(arg) on n threads at once
-    // and return when all have finished. Each extra worker needs its own ~180 KB of memory.
+    // and return when all have finished. Each extra worker needs its own ~180 KB of memory, taken
+    // at the next load() (call this first) or else at the first read that uses it.
     typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
     void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
     unsigned lastWorkers() const { return lastWorkers_; }
@@ -85,6 +86,7 @@ private:
     std::vector<TopK> topk_;
     void *alignedAlloc(size_t bytes);
     bool loadInner(Reader &file, std::string &error);
+    void ensureWorkers(unsigned n);
 };
 
 // Per-layer timing of recognition, for the speed test. While on, time between VOCR's phase marks

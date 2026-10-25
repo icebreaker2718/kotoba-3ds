@@ -13,26 +13,75 @@ namespace kt {
 static const int kTolerance = 20;        // per channel, around the box colour
 static const unsigned kMinArea = 1500;   // pixels of box colour
 static const unsigned kColours = 8;      // most common colours tried
+static const unsigned kSpanCap = 8192;   // fill stack entries (32 KB); a whole screen of one colour needs ~500
+
+namespace {
+// Working memory, from malloc so that running short gives "no box" (the whole screen is read
+// then) instead of the abort a failed std::vector allocation is in the plugin.
+struct Buf {
+    void *p = nullptr;
+    explicit Buf(size_t bytes) : p(malloc(bytes ? bytes : 1)) {}
+    ~Buf() { free(p); }
+    Buf(const Buf &) = delete;
+    Buf &operator=(const Buf &) = delete;
+};
+
+// Scanline flood fill from (sx, sy) over the pixels ok(x, y) accepts: mark(x0, x1, y) gets each
+// run of them (which ok must then refuse). The same pixels as a pixel-by-pixel fill, with a small
+// stack: one entry per run start, (y << 16 | x). False if the stack ran out.
+template <class Ok, class Mark>
+bool scanFill(unsigned sx, unsigned sy, unsigned W, unsigned H, uint32_t *stk, Ok ok, Mark mark) {
+    unsigned top = 0;
+    stk[top++] = (sy << 16) | sx;
+    while (top) {
+        const uint32_t v = stk[--top];
+        const unsigned y = v >> 16;
+        unsigned x0 = v & 0xFFFF, x1 = x0;
+        if (!ok(x0, y)) continue;
+        while (x0 > 0 && ok(x0 - 1, y)) x0--;
+        while (x1 + 1 < W && ok(x1 + 1, y)) x1++;
+        mark(x0, x1, y);
+        for (int d = -1; d <= 1; d += 2) {  // the rows above and below: each run under this one
+            if ((d < 0 && y == 0) || (d > 0 && y + 1 >= H)) continue;
+            const unsigned ny = y + d;
+            bool in = false;
+            for (unsigned x = x0; x <= x1; x++) {
+                const bool o = ok(x, ny);
+                if (o && !in) {
+                    if (top == kSpanCap) return false;
+                    stk[top++] = (ny << 16) | x;
+                }
+                in = o;
+            }
+        }
+    }
+    return true;
+}
+}  // namespace
 
 std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, unsigned maxBoxes) {
     std::vector<TextBox> out;
     const unsigned n = w * h;
-    if (!rgb || n == 0) return out;
-    // 1. the most common colours (5 bits per channel)
-    std::vector<uint32_t> hist(32768, 0);
-    {
-        uint32_t *H = hist.data();
-        const uint8_t *p = rgb;
-        for (unsigned i = 0; i < n; i++, p += 3) H[((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3)]++;
-    }
-    // the most common colours, in one pass over the histogram (ties: the lower key first, as a
-    // repeated "largest not yet taken" scan picks them)
+    if (!rgb || n == 0 || w > 0xFFFF || h > 0xFFFF) return out;
+    // 1. the most common colours (5 bits per channel). 16-bit counts, held at 65535: at most one
+    //    colour of a screen can get there, and it is the most common either way.
     std::vector<uint32_t> top;
     {
+        Buf hb(32768 * sizeof(uint16_t));
+        uint16_t *H = (uint16_t *)hb.p;
+        if (!H) return out;
+        memset(H, 0, 32768 * sizeof(uint16_t));
+        const uint8_t *p = rgb;
+        for (unsigned i = 0; i < n; i++, p += 3) {
+            uint16_t &c = H[((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3)];
+            if (c != 0xFFFF) c++;
+        }
+        // the most common colours, in one pass over the histogram (ties: the lower key first, as
+        // a repeated "largest not yet taken" scan picks them)
         uint32_t cnt[kColours], keys[kColours];
         unsigned m = 0;
         for (uint32_t key = 0; key < 32768; key++) {
-            uint32_t c = hist[key];
+            uint32_t c = H[key];
             if (!c || (m == kColours && c <= cnt[m - 1])) continue;
             unsigned at = m < kColours ? m++ : kColours - 1;
             while (at > 0 && cnt[at - 1] < c) { cnt[at] = cnt[at - 1]; keys[at] = keys[at - 1]; at--; }
@@ -45,7 +94,11 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
         }
     }
     // which of those colours each pixel is close to: one bit per colour, all in one pass
-    std::vector<uint8_t> near(n, 0);
+    Buf nearBuf(n), labelBuf((size_t)n * sizeof(uint16_t)), stackBuf(kSpanCap * sizeof(uint32_t));
+    uint8_t *near = (uint8_t *)nearBuf.p;
+    uint16_t *label = (uint16_t *)labelBuf.p;
+    uint32_t *stk = (uint32_t *)stackBuf.p;
+    if (!near || !label || !stk) return out;
     int cr[kColours], cg[kColours], cb[kColours];
     for (size_t k = 0; k < top.size(); k++) {
         cr[k] = (int)((top[k] >> 10) & 31) * 8 + 4;
@@ -54,65 +107,63 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
     }
     // per channel and value: the colours within the tolerance on that channel; a pixel is near the
     // colours all three of its channels are
-    std::vector<uint8_t> lut(3 * 256, 0);  // R, G, B (on the heap: gcc then keeps its address in a register)
-    for (int v = 0; v < 256; v++)
-        for (size_t k = 0; k < top.size(); k++) {
-            const uint8_t bit = (uint8_t)(1u << k);
-            if (abs(v - cr[k]) <= kTolerance) lut[v] |= bit;
-            if (abs(v - cg[k]) <= kTolerance) lut[256 + v] |= bit;
-            if (abs(v - cb[k]) <= kTolerance) lut[512 + v] |= bit;
-        }
     {
-        const uint8_t *L = lut.data(), *p = rgb;
-        uint8_t *o = near.data();
-        for (unsigned i = 0; i < n; i++, p += 3) o[i] = (uint8_t)(L[p[0]] & L[256 + p[1]] & L[512 + p[2]]);
+        Buf lb(3 * 256);  // R, G, B (on the heap: gcc then keeps its address in a register)
+        uint8_t *L = (uint8_t *)lb.p;
+        if (!L) return out;
+        memset(L, 0, 3 * 256);
+        for (int v = 0; v < 256; v++)
+            for (size_t k = 0; k < top.size(); k++) {
+                const uint8_t bit = (uint8_t)(1u << k);
+                if (abs(v - cr[k]) <= kTolerance) L[v] |= bit;
+                if (abs(v - cg[k]) <= kTolerance) L[256 + v] |= bit;
+                if (abs(v - cb[k]) <= kTolerance) L[512 + v] |= bit;
+            }
+        const uint8_t *p = rgb;
+        for (unsigned i = 0; i < n; i++, p += 3) near[i] = (uint8_t)(L[p[0]] & L[256 + p[1]] & L[512 + p[2]]);
     }
     // Component numbers: a colour's components are numbered above `base`, so the label array is
-    // cleared only when the numbers run out, not once per colour. Positions on the fill stacks are
-    // packed (y << 16 | x): no division per pixel (the 3DS's CPU has no divide instruction).
-    std::vector<uint16_t> label(n, 0);
+    // cleared only when the numbers run out, not once per colour.
+    memset(label, 0, (size_t)n * sizeof(uint16_t));
     unsigned last = 0;
-    std::vector<uint32_t> stack;
-    std::vector<uint8_t> outside;
     for (size_t ki = 0; ki < top.size(); ki++) {
         const uint8_t bit = (uint8_t)(1u << ki);
         if (last > 65535 - 60000) {  // not enough numbers left for this colour: start over
-            std::fill(label.begin(), label.end(), 0);
+            memset(label, 0, (size_t)n * sizeof(uint16_t));
             last = 0;
         }
         const unsigned base = last;
         unsigned next = base;
         // 2. connected areas of that colour
-        const uint8_t *nb = near.data();
         const uint32_t bit4 = bit * 0x01010101u;
         for (unsigned start = 0; start < n && next - base < 60000; start++) {
             // most pixels aren't this colour: past them 4 at a time
             for (uint32_t q; start + 4 <= n; start += 4) {
-                memcpy(&q, nb + start, 4);
+                memcpy(&q, near + start, 4);
                 if (q & bit4) break;
             }
             if (start >= n) break;
-            if (!(nb[start] & bit) || label[start] > base) continue;
+            if (!(near[start] & bit) || label[start] > base) continue;
             ++next;
+            const uint16_t me = (uint16_t)next;
             unsigned area = 0, l = w, t = h, r = 0, b = 0;
-            stack.clear();
-            stack.push_back(((start / w) << 16) | (start % w));
-            label[start] = (uint16_t)next;
-            while (!stack.empty()) {
-                uint32_t v = stack.back();
-                stack.pop_back();
-                area++;
-                unsigned x = v & 0xFFFF, y = v >> 16;
-                if (x < l) l = x;
-                if (x > r) r = x;
-                if (y < t) t = y;
-                if (y > b) b = y;
-                uint32_t i = y * w + x;
-                if (x > 0 && (near[i - 1] & bit) && label[i - 1] <= base) { label[i - 1] = (uint16_t)next; stack.push_back(v - 1); }
-                if (x + 1 < w && (near[i + 1] & bit) && label[i + 1] <= base) { label[i + 1] = (uint16_t)next; stack.push_back(v + 1); }
-                if (y > 0 && (near[i - w] & bit) && label[i - w] <= base) { label[i - w] = (uint16_t)next; stack.push_back(v - 0x10000); }
-                if (y + 1 < h && (near[i + w] & bit) && label[i + w] <= base) { label[i + w] = (uint16_t)next; stack.push_back(v + 0x10000); }
-            }
+            const unsigned sy = start / w, sx = start - sy * w;  // one division per area
+            bool filled = scanFill(
+                sx, sy, w, h, stk,
+                [&](unsigned x, unsigned y) {
+                    const unsigned i = y * w + x;
+                    return (near[i] & bit) && label[i] <= base;
+                },
+                [&](unsigned x0, unsigned x1, unsigned y) {
+                    uint16_t *row = label + y * w;
+                    for (unsigned x = x0; x <= x1; x++) row[x] = me;
+                    area += x1 - x0 + 1;
+                    if (x0 < l) l = x0;
+                    if (x1 > r) r = x1;
+                    if (y < t) t = y;
+                    if (y > b) b = y;
+                });
+            if (!filled) return std::vector<TextBox>();  // a screen this odd: no box, read it all
             if (area < kMinArea) continue;
             unsigned bw = r - l + 1, bh = b - t + 1;
             float fill = (float)area / (bw * bh);
@@ -120,24 +171,22 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
             if (fill < 0.45f || bw < 80 || bh < 24 || (bw >= w - 20 && bh >= h * 5 / 6)) continue;
             // 3. the letters: pixels inside the box that aren't its colour and aren't connected to
             //    the outside of the box (a flood fill from the edge of its rectangle)
-            outside.assign(bw * bh, 0);
-            stack.clear();
-            const uint16_t me = (uint16_t)next;
+            Buf ob((size_t)bw * bh);
+            uint8_t *outside = (uint8_t *)ob.p;
+            if (!outside) return std::vector<TextBox>();
+            memset(outside, 0, (size_t)bw * bh);
             auto inBox = [&](unsigned x, unsigned y) { return label[(t + y) * w + l + x] == me; };
-            auto seed = [&](unsigned x, unsigned y) {
-                if (!inBox(x, y) && !outside[y * bw + x]) { outside[y * bw + x] = 1; stack.push_back((y << 16) | x); }
-            };
-            for (unsigned x = 0; x < bw; x++) { seed(x, 0); seed(x, bh - 1); }
-            for (unsigned y = 0; y < bh; y++) { seed(0, y); seed(bw - 1, y); }
-            while (!stack.empty()) {
-                uint32_t v = stack.back();
-                stack.pop_back();
-                unsigned x = v & 0xFFFF, y = v >> 16;
-                if (x > 0) seed(x - 1, y);
-                if (x + 1 < bw) seed(x + 1, y);
-                if (y > 0) seed(x, y - 1);
-                if (y + 1 < bh) seed(x, y + 1);
+            auto okOut = [&](unsigned x, unsigned y) { return !inBox(x, y) && !outside[y * bw + x]; };
+            auto markOut = [&](unsigned x0, unsigned x1, unsigned y) { memset(outside + y * bw + x0, 1, x1 - x0 + 1); };
+            for (unsigned x = 0; x < bw && filled; x++) {
+                if (okOut(x, 0)) filled = scanFill(x, 0, bw, bh, stk, okOut, markOut);
+                if (filled && okOut(x, bh - 1)) filled = scanFill(x, bh - 1, bw, bh, stk, okOut, markOut);
             }
+            for (unsigned y = 0; y < bh && filled; y++) {
+                if (okOut(0, y)) filled = scanFill(0, y, bw, bh, stk, okOut, markOut);
+                if (filled && okOut(bw - 1, y)) filled = scanFill(bw - 1, y, bw, bh, stk, okOut, markOut);
+            }
+            if (!filled) return std::vector<TextBox>();
             unsigned ink = 0;
             for (unsigned y = 0; y < bh; y++)
                 for (unsigned x = 0; x < bw; x++)
