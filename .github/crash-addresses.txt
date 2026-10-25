@@ -1,0 +1,7 @@
+# crash 13 (game exit, core 2): pc, stack
+0x70904c0
+0x70398b8
+0x70398dc
+0x705b574
+0x705b4a4
+0x70c9568
