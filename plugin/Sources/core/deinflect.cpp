@@ -171,6 +171,16 @@ void buildRules() {
     // honorific godan verbs (-aru class) have an imperative in い: ください, なさい, いらっしゃい
     add("さい", "さる", 0, V5, "imperative (honorific)");
     add("ゃい", "ゃる", 0, V5, "imperative (honorific)");
+    // ... and their polite forms on い too: いらっしゃいました, なさいます, くださいません
+    static const Aux politeAru[] = {
+        {"ます", 0, "polite"}, {"ません", 0, "polite negative"}, {"ました", 0, "polite past"},
+        {"ませんでした", 0, "polite past negative"}, {"ましょう", 0, "polite volitional"},
+        {"まして", 0, "polite te-form"}, {"ませ", 0, "polite imperative"},
+    };
+    for (const Aux &x : politeAru) {
+        add(std::string("さい") + x.suffix, "さる", x.in, V5, x.reason);
+        add(std::string("ゃい") + x.suffix, "ゃる", x.in, V5, x.reason);
+    }
 
     // na-adjectives (copula / particles)
     static const char *naSuffix[] = {"な", "に", "だ", "で", "です", "だった", "でした",

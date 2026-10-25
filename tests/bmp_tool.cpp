@@ -1,6 +1,10 @@
 // bmp_tool in.bmp out.k3 - runs the plugin's screenshot converter natively (for test_bmp.py)
+// bmp_tool --qoi in.rgb w h out.qoi - the plugin's QOI encoder on raw R, G, B bytes
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
+#include <vector>
 #include "core/bmp.hpp"
 using namespace kt;
 class FileReader : public Reader {
@@ -12,7 +16,21 @@ public:
 private:
     FILE *f_ = nullptr; uint32_t sz_ = 0;
 };
+static bool toFile(const uint8_t *d, size_t n, void *f) { return fwrite(d, 1, n, (FILE *)f) == n; }
 int main(int, char **argv) {
+    if (!strcmp(argv[1], "--qoi")) {
+        unsigned w = atoi(argv[3]), h = atoi(argv[4]);
+        std::vector<uint8_t> rgb((size_t)w * h * 3);
+        FILE *in = fopen(argv[2], "rb");
+        if (!in || fread(rgb.data(), 1, rgb.size(), in) != rgb.size()) return 1;
+        fclose(in);
+        FILE *f = fopen(argv[5], "wb");
+        QoiEncoder q(w, h, toFile, f);
+        for (size_t i = 0; i < (size_t)w * h; i++) q.push(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+        bool ok = q.finish();
+        fclose(f);
+        return ok ? 0 : 1;
+    }
     FileReader r(argv[1]);
     std::string out, err;
     if (!screenshotRGB565(r, out, err)) { printf("error: %s\n", err.c_str()); return 1; }

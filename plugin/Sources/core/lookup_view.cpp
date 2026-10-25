@@ -210,9 +210,13 @@ const std::vector<size_t> &LookupView::stops(size_t b) const {
     if (!stopsReady_[b]) {
         stopsReady_[b] = 1;
         size_t at = 0;
+        std::vector<size_t> lens;
         for (const std::string &w : chunkText(dict_, blocks_[b])) {
             size_t i = 0;
-            if (isWordChar(utf8Next(w, i))) stops_[b].push_back(at);
+            if (isWordChar(utf8Next(w, i))) {
+                stops_[b].push_back(at);
+                lens.push_back(w.size());
+            }
             at += w.size();
         }
         // known words are looked for at every character, not only where the split starts words:
@@ -225,6 +229,7 @@ const std::vector<size_t> &LookupView::stops(size_t b) const {
             bool word = isWordChar(utf8Next(t, i));
             while (k < stops_[b].size() && stops_[b][k] < m.byte) k++;
             m.stop = k < stops_[b].size() && stops_[b][k] == m.byte;
+            if (m.stop) m.word = lens[k];
             m.first = i - m.byte;
             if (word) marks_[b].push_back(m);
         }
@@ -535,22 +540,62 @@ bool LookupView::prefetch() {
     return checkKnown();
 }
 
-// The spellings a word could be on a card under (the kanji form, the form on the screen, the
-// dictionary form it came from), for the longest match at a spot; len = its length.
-void LookupView::formsOf(const SearchOutput &so, std::vector<std::string> &forms, size_t &len) {
+static bool hasKanji(const std::string &s) {
+    for (size_t i = 0; i < s.size();)
+        if (isKanjiCp(utf8Next(s, i))) return true;
+    return false;
+}
+
+static bool hasKatakana(const std::string &s) {
+    for (size_t i = 0; i < s.size();) {
+        uint32_t cp = utf8Next(s, i);
+        if (cp >= 0x30A1 && cp <= 0x30FA) return true;
+    }
+    return false;
+}
+
+static std::string toKatakana(const std::string &s) {
+    std::string out;
+    for (size_t i = 0; i < s.size();) {
+        uint32_t cp = utf8Next(s, i);
+        utf8Append(out, cp >= 0x3041 && cp <= 0x3096 ? cp + 0x60 : cp);
+    }
+    return out;
+}
+
+// The spellings the word at a spot could have on a card, for the match a lookup there shows
+// first (the others are mostly other words that happen to share the kana); len = its length.
+// Written in kanji: the kanji spellings. Written in kana: the kana (a card for 帰る doesn't make
+// every かえる green), and, for hiragana of two characters or more, the word's kanji spelling.
+void LookupView::formsOf(const SearchOutput &so, std::vector<std::string> &forms, size_t &len, bool *kanjiSurface,
+                         size_t word) {
     forms.clear();
     len = 0;
-    for (const Result &r : so.results)
-        if (!r.prefixOnly) len = std::max(len, r.surface.size());
-    if (!len) return;
-    int n = 0;
-    for (const Result &r : so.results) {
-        if (r.prefixOnly || r.surface.size() != len || ++n > 4) continue;
-        Entry e;
-        if (!dict_.entry(r.entryId, e)) continue;
-        for (const std::string &f : {cardExpressionFor(e, r.matchedKey), expressionFor(e, r.matchedKey), r.matchedKey})
-            if (!f.empty() && std::find(forms.begin(), forms.end(), f) == forms.end()) forms.push_back(f);
+    const Result *r = nullptr;
+    for (const Result &x : so.results)
+        if (!x.prefixOnly && (word ? x.surface.size() == word && !r : !r || x.surface.size() > r->surface.size())) r = &x;
+    if (kanjiSurface) *kanjiSurface = false;
+    if (!r) return;
+    len = r->surface.size();
+    auto put = [&](const std::string &f) {
+        if (!f.empty() && std::find(forms.begin(), forms.end(), f) == forms.end()) forms.push_back(f);
+    };
+    Entry e;
+    const bool haveEntry = dict_.entry(r->entryId, e);
+    if (hasKanji(r->surface)) {
+        if (kanjiSurface) *kanjiSurface = true;
+        if (haveEntry) {
+            put(cardExpressionFor(e, r->matchedKey));
+            put(expressionFor(e, r->matchedKey));
+        }
+        return;
     }
+    put(r->matchedKey);  // the dictionary form in hiragana
+    put(toKatakana(r->matchedKey));
+    if (haveEntry && !hasKanji(e.expression)) put(e.expression);
+    size_t i = 0, chars = 0;
+    while (i < r->surface.size()) { utf8Next(r->surface, i); chars++; }
+    if (haveEntry && chars >= 2 && !hasKatakana(r->surface)) put(cardExpressionFor(e, r->matchedKey));
 }
 
 // Checks one more word stop against the known words. False when all are checked.
@@ -568,10 +613,12 @@ bool LookupView::checkKnown() {
                 so = scanAt(dict_, blocks_[b], m.byte);
                 trimResults(so);
             }
-            formsOf(so, m.forms, m.len);
+            bool kanji = false;
+            formsOf(so, m.forms, m.len, &kanji, m.stop ? m.word : 0);  // at a word: the word as split
             m.state = 1;
-            // a one-character word only where the split starts a word (not 気 inside 天気)
-            if (m.stop || m.len > m.first)
+            // inside a word the split found, only words in kanji (天気 in いい天気, not した in 倒した)
+            m.counts = m.stop || (kanji && m.len > m.first);
+            if (m.counts)
                 for (const std::string &f : m.forms)
                     if (known_->has(f)) { m.state = 2; redraw_ = true; break; }
             return true;
@@ -624,10 +671,10 @@ void LookupView::markSaved() {
     size_t len;
     formsOf(so_, forms, len);
     if (forms.empty()) return;
-    known_->add(forms[0]);
+    for (const std::string &f : forms) known_->add(f);
     for (std::vector<Mark> &ms : marks_)
         for (Mark &m : ms)
-            if (m.state == 1 && (m.stop || m.len > m.first))
+            if (m.state == 1 && m.counts)
                 for (const std::string &f : m.forms)
                     if (std::find(forms.begin(), forms.end(), f) != forms.end()) { m.state = 2; break; }
 }

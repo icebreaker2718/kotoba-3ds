@@ -31,7 +31,7 @@ SearchOutput scanAt(Dictionary &dict, const std::string &text, size_t start, uin
 
 // Splits text into words for the "tap a word" list without a PC: greedy longest dictionary
 // match from each position, one character where nothing matches. The pieces join back to `text`.
-std::vector<std::string> chunkText(Dictionary &dict, const std::string &text, uint32_t maxChars = 8);
+std::vector<std::string> chunkText(Dictionary &dict, const std::string &text, uint32_t maxChars = 12);
 
 // Picks the spelling the player actually saw: if the matched key is one of the entry's
 // kanji forms, use that form instead of the default headword.

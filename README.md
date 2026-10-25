@@ -115,7 +115,8 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    touchscreen was read, its text can also go on the top screen and the entry on the touchscreen
    (*Touchscreen text shows on*).
 3. **Save** writes the word to `mined.tsv` with the sentence and a screenshot of the screen(s)
-   that were read (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green.
+   that were read (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green. The screenshot is
+   written once the lookup closes, while the game goes on, so saving is instant.
 4. **Words you know are green**: the words you saved before, and the words of your Anki cards
    once *Known words* has their list (below), wherever they are in the text.
 
@@ -266,8 +267,9 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
 /luma/plugins/default.3gx      the plugin
 /3ds/kotoba3ds/dict.bin        dictionary
 /3ds/kotoba3ds/mined.tsv       saved words (tab-separated, UTF-8)
-/3ds/kotoba3ds/shots/          screenshots of the screen(s) read (400x240, 320x240, or both 400x480 BMP)
+/3ds/kotoba3ds/shots/          screenshots of the screen(s) read (400x240, 320x240, or both 400x480; QOI images, a third of a BMP)
 /3ds/kotoba3ds/settings.txt    hotkeys and the menu's choices
+/3ds/kotoba3ds/known.txt       words of your Anki cards (green in lookups; from Known words or mine.py known)
 ```
 
 ## Troubleshooting

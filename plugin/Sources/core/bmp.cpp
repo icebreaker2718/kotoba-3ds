@@ -292,4 +292,56 @@ void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picByte
     }
 }
 
+// ---------------------------------------------------------------------------
+// QOI
+// ---------------------------------------------------------------------------
+QoiEncoder::QoiEncoder(unsigned w, unsigned h, Sink sink, void *user) : sink_(sink), user_(user) {
+    const uint8_t head[14] = {'q', 'o', 'i', 'f', (uint8_t)(w >> 24), (uint8_t)(w >> 16), (uint8_t)(w >> 8), (uint8_t)w,
+                              (uint8_t)(h >> 24), (uint8_t)(h >> 16), (uint8_t)(h >> 8), (uint8_t)h, 3, 0};
+    for (uint8_t b : head) put(b);
+}
+
+void QoiEncoder::flush() {
+    if (n_ && ok_) ok_ = sink_(buf_, n_, user_);
+    n_ = 0;
+}
+
+void QoiEncoder::push(uint8_t r, uint8_t g, uint8_t b) {
+    const uint32_t px = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | 0xFF;
+    if (px == prev_) {
+        if (++run_ == 62) { put(0xC0 | 61); run_ = 0; }
+        return;
+    }
+    if (run_) { put((uint8_t)(0xC0 | (run_ - 1))); run_ = 0; }
+    const unsigned idx = (r * 3 + g * 5 + b * 7 + 255 * 11) % 64;
+    if (index_[idx] == px) {
+        put((uint8_t)idx);
+    } else {
+        index_[idx] = px;
+        const int dr = (int)r - (int)(prev_ >> 24), dg = (int)g - (int)((prev_ >> 16) & 0xFF),
+                  db = (int)b - (int)((prev_ >> 8) & 0xFF);
+        const int dr_dg = dr - dg, db_dg = db - dg;
+        if (dr >= -2 && dr <= 1 && dg >= -2 && dg <= 1 && db >= -2 && db <= 1) {
+            put((uint8_t)(0x40 | ((dr + 2) << 4) | ((dg + 2) << 2) | (db + 2)));
+        } else if (dg >= -32 && dg <= 31 && dr_dg >= -8 && dr_dg <= 7 && db_dg >= -8 && db_dg <= 7) {
+            put((uint8_t)(0x80 | (dg + 32)));
+            put((uint8_t)(((dr_dg + 8) << 4) | (db_dg + 8)));
+        } else {
+            put(0xFE);
+            put(r);
+            put(g);
+            put(b);
+        }
+    }
+    prev_ = px;
+}
+
+bool QoiEncoder::finish() {
+    if (run_) { put((uint8_t)(0xC0 | (run_ - 1))); run_ = 0; }
+    for (int i = 0; i < 7; i++) put(0);
+    put(1);
+    flush();
+    return ok_;
+}
+
 }  // namespace kt

@@ -504,10 +504,52 @@ def pos_codes_of(definition):
 # ---------------------------------------------------------------------------
 # screenshots + OCR
 # ---------------------------------------------------------------------------
-def top_screen(bmp_bytes):
+def _decode_qoi(data):
+    """A QOI image (the plugin's screenshots) -> RGB image, for Pillow versions that can't read QOI."""
     from PIL import Image
-    # the screen(s) the plugin read: top 400x240, touchscreen 320x240, or both 400x480
-    return Image.open(io.BytesIO(bmp_bytes)).convert("RGB")
+    w, h = int.from_bytes(data[4:8], "big"), int.from_bytes(data[8:12], "big")
+    out = bytearray(w * h * 3)
+    index = [(0, 0, 0, 0)] * 64
+    r, g, b, a = 0, 0, 0, 255
+    p, o, n = 14, 0, w * h * 3
+    while o < n:
+        op = data[p]; p += 1
+        if op == 0xFE:
+            r, g, b = data[p], data[p + 1], data[p + 2]; p += 3
+        elif op == 0xFF:
+            r, g, b, a = data[p], data[p + 1], data[p + 2], data[p + 3]; p += 4
+        elif op >> 6 == 0:
+            r, g, b, a = index[op]
+        elif op >> 6 == 1:
+            r = (r + ((op >> 4) & 3) - 2) & 255; g = (g + ((op >> 2) & 3) - 2) & 255; b = (b + (op & 3) - 2) & 255
+        elif op >> 6 == 2:
+            dg = (op & 63) - 32; x = data[p]; p += 1
+            r = (r + dg + (x >> 4) - 8) & 255; g = (g + dg) & 255; b = (b + dg + (x & 15) - 8) & 255
+        else:
+            for _ in range((op & 63) + 1):
+                if o >= n:
+                    break
+                out[o:o + 3] = bytes((r, g, b)); o += 3
+            continue
+        index[(r * 3 + g * 5 + b * 7 + a * 11) % 64] = (r, g, b, a)
+        out[o:o + 3] = bytes((r, g, b)); o += 3
+    return Image.frombytes("RGB", (w, h), bytes(out))
+
+
+def open_screenshot(data):
+    """A screenshot the plugin saved (QOI, or BMP from older versions) as an RGB image: the
+    screen(s) it read: top 400x240, touchscreen 320x240, or both 400x480."""
+    from PIL import Image
+    try:
+        return Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        if data[:4] == b"qoif":
+            return _decode_qoi(data)
+        raise
+
+
+def top_screen(bmp_bytes):
+    return open_screenshot(bmp_bytes)
 
 
 def encode_picture(img, cfg):

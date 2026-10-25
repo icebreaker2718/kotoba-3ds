@@ -423,6 +423,8 @@ uint8_t *topScreenGrey(Reader &bmp, unsigned &outW, unsigned &outH, std::string 
     return grey;
 }
 
+static const unsigned kMinScreenChars = 4;  // a line read without a text box: this much Japanese at least
+
 static unsigned japaneseChars(const std::vector<std::string> &paragraphs) {
     unsigned n = 0;
     for (const std::string &p : paragraphs)
@@ -488,6 +490,10 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
     if (!ocr.read(grey, w, h, lines, error, progress)) return false;  // the whole screen
     paragraphs = textParagraphs(lines, true);
     cleanParagraphs(paragraphs);
+    // with no text box, the scenery can look like a few kana (「ンりツ」 in a face): only real lines
+    paragraphs.erase(std::remove_if(paragraphs.begin(), paragraphs.end(),
+                                    [](const std::string &p) { return japaneseChars({p}) < kMinScreenChars; }),
+                     paragraphs.end());
     if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
     return true;
 }

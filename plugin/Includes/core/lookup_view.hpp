@@ -136,12 +136,15 @@ private:
     // known words: per block, per word character
     // a word character: whether the longest word starting there is known (state 0 not checked
     // yet, 1 no, 2 yes); len its bytes, first the first character's; stop: a word starts there
-    struct Mark { size_t byte = 0, len = 0, first = 0; uint8_t state = 0; bool stop = false; std::vector<std::string> forms; };
+    // (word: its length as the text is split)
+    struct Mark { size_t byte = 0, len = 0, first = 0, word = 0; uint8_t state = 0; bool stop = false, counts = false; std::vector<std::string> forms; };
     mutable std::vector<std::vector<Mark>> marks_;  // filled in with stops()
     KnownWords *known_ = nullptr;
     bool redraw_ = false;
     bool checkKnown();
-    void formsOf(const SearchOutput &so, std::vector<std::string> &forms, size_t &len);
+    // word: the length of the match to take (0: the longest)
+    void formsOf(const SearchOutput &so, std::vector<std::string> &forms, size_t &len, bool *kanjiSurface = nullptr,
+                 size_t word = 0);
     bool isKnown(const Cell &c) const;
 
     void layout();

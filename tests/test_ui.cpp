@@ -363,6 +363,19 @@ int main(int argc, char **argv) {
         check(v.cellKnown(cellOf(v, "天")) && v.cellKnown(cellOf(v, "気")) && !v.cellKnown(cellOf(v, "今")), "a known word is green");
         check(v.cellKnown(cellOf(v, "食")), "a known word conjugated (食べた: 食べる) is green");
         check(v.takeRedraw() && !v.takeRedraw(), "the screens are redrawn once for it");
+        {   // only what is written: a kanji word known doesn't make kana that share its reading green
+            KnownWords k2;
+            const char l2[] = "外\n弟子\nいらっしゃる\n幅\n";
+            k2.load(l2, sizeof(l2) - 1);
+            LookupView f(dict, tr);
+            f.setKnown(&k2);
+            f.setText({"デシーズを倒した挑戦者がいらっしゃいましたのよ"});
+            guard = 0;
+            while (f.prefetch() && guard++ < 1000) {}
+            check(!f.cellKnown(cellOf(f, "デ")) && !f.cellKnown(cellOf(f, "が")) && !f.cellKnown(cellOf(f, "の")),
+                  "kana that only sound like known kanji words stay white");
+            check(f.cellKnown(cellOf(f, "ら")) && f.cellKnown(cellOf(f, "ま")), "いらっしゃいました: いらっしゃる is known");
+        }
         LookupView s(dict, tr);
         s.setKnown(&kw);
         s.setText({"ケーキとケーキ"});

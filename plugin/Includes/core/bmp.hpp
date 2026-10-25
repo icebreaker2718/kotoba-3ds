@@ -42,4 +42,25 @@ void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picByte
 // One picture pixel -> R, G, B.
 void picturePixelRGB(const uint8_t *pic, unsigned picBytes, uint8_t *rgb);
 
+// A QOI image (qoiformat.org: lossless, about a third of a BMP's size for game screens), written
+// a pixel at a time, rows from the top; the bytes come out through `sink` in pieces.
+class QoiEncoder {
+public:
+    using Sink = bool (*)(const uint8_t *data, size_t n, void *user);  // false: stop (write failed)
+    QoiEncoder(unsigned w, unsigned h, Sink sink, void *user);
+    void push(uint8_t r, uint8_t g, uint8_t b);
+    bool finish();  // the end marker, and what is still buffered; false if the sink failed
+private:
+    Sink sink_;
+    void *user_;
+    bool ok_ = true;
+    uint8_t buf_[8192];
+    size_t n_ = 0;
+    uint32_t index_[64] = {};
+    uint32_t prev_ = 0xFF;  // 0xRRGGBBAA: opaque black
+    unsigned run_ = 0;
+    void put(uint8_t b) { buf_[n_++] = b; if (n_ == sizeof(buf_)) flush(); }
+    void flush();
+};
+
 }  // namespace kt

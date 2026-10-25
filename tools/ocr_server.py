@@ -124,7 +124,8 @@ def decode_screen(data):
         nl = data.index(b"\n")
         w, h = (int(v) for v in data[9:nl].split())
         return Image.frombytes("RGB", (w, h), data[nl + 1:nl + 1 + w * h * 2], "raw", "BGR;16")
-    return Image.open(io.BytesIO(data)).convert("RGB")
+    import mine
+    return mine.open_screenshot(data)
 
 
 class Reader:

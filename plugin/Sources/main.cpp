@@ -522,72 +522,75 @@ static void LoadKnown() {
 }
 
 // The screenshot of the current lookup: the screen(s) that were read (top 400x240, touchscreen
-// 320x240, both 400x480 with the touchscreen centred under the top screen), written from the
-// kept pictures the first time a word of the lookup is saved. Written on another CPU core while
-// the lookup goes on (the SD card takes a while): FinishScreenshot() waits for it.
+// 320x240, both 400x480 with the touchscreen centred under the top screen), as a QOI image (a
+// third of a BMP). Saving a word only picks its name; the file is written from the kept pictures
+// once the lookup closes, on another CPU core while the game plays (the SD card is slow to write
+// to, and the lookup's dictionary reads would wait behind it). FinishScreenshot() waits for it.
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
 
 struct ShotJob {
     char path[96];
     bool top, bottom, ok;
-    u32 ms;
+    u32 ms, bytes;
+    Picture pic[2];  // handed over by the lookup: freed when written
+    File *file;
 };
 static ShotJob g_shotJob;
 static Task *g_shotTask = nullptr;
 
+static bool ShotSink(const uint8_t *data, size_t n, void *) {
+    g_shotJob.bytes += n;
+    return g_shotJob.file->Write(data, n) == File::SUCCESS;
+}
+
 static s32 WriteShot(void *) {
     ShotJob &j = g_shotJob;
     const u64 t0 = osGetTime();
-    j.ok = false;
     const bool top = j.top, bottom = j.bottom;
     const u32 W = top ? 400 : 320, H = top && bottom ? 480 : 240;
-    const std::string header = kt::bmpHeader(W, H);
-    const u32 rowBytes = W * 3;  // 1200 or 960: already a multiple of 4
-    // the file made at its full size first: growing it write by write is what takes the SD card long
-    FSUSER_CreateFile(_sdmcArchive, fsMakePath(PATH_ASCII, j.path), 0, header.size() + (u64)rowBytes * H);
     File f;
-    if (File::Open(f, j.path, File::WRITE | File::CREATE) != File::SUCCESS) return 0;
-    bool ok = f.Write(header.data(), header.size()) == File::SUCCESS;
-    const u32 kRows = 48;
-    u8 *chunk = (u8 *)malloc(kRows * rowBytes);
-    ok = ok && chunk;
-    // A BMP stores its rows bottom first, and a picture's columns run bottom to top: file row r
-    // is pixel r of every column (of the touchscreen first, when both are in it).
-    for (u32 r0 = 0; ok && r0 < H; r0 += kRows) {
-        memset(chunk, 0, kRows * rowBytes);
-        for (u32 r = r0; r < r0 + kRows; r++) {
-            const bool fromBottom = bottom && (!top || r < 240);
-            const Picture &p = Pic(fromBottom ? 1 : 0);
-            const u32 k = r % 240, x0 = (fromBottom && top) ? 40 : 0;
-            u8 *o = &chunk[(r - r0) * rowBytes + x0 * 3];
-            for (u32 x = 0; x < p.w; x++, o += 3) {
-                uint8_t rgb[3];
-                kt::picturePixelRGB(p.px + ((size_t)x * 240 + k) * p.bytes, p.bytes, rgb);
-                o[0] = rgb[2];  // B, G, R
-                o[1] = rgb[1];
-                o[2] = rgb[0];
+    j.ok = File::Open(f, j.path, File::WRITE | File::CREATE | File::TRUNCATE) == File::SUCCESS;
+    if (j.ok) {
+        j.file = &f;
+        kt::QoiEncoder q(W, H, ShotSink, nullptr);
+        for (u32 y = 0; y < H; y++) {
+            // rows from the top: the top screen's, then the touchscreen's (centred, black beside it)
+            const bool fromBottom = bottom && (!top || y >= 240);
+            const Picture &p = j.pic[fromBottom ? 1 : 0];
+            const u32 k = 239 - y % 240, x0 = (fromBottom && top) ? 40 : 0;
+            for (u32 x = 0; x < W; x++) {
+                uint8_t rgb[3] = {0, 0, 0};
+                if (x >= x0 && x - x0 < p.w) kt::picturePixelRGB(p.px + ((size_t)(x - x0) * 240 + k) * p.bytes, p.bytes, rgb);
+                q.push(rgb[0], rgb[1], rgb[2]);
             }
         }
-        ok = f.Write(chunk, kRows * rowBytes) == File::SUCCESS;  // 240 and 480 are multiples of 48
+        j.ok = q.finish();
+        f.Close();
     }
-    free(chunk);
-    f.Close();
-    j.ok = ok;
+    for (Picture &p : j.pic) {
+        free(p.px);
+        p.px = nullptr;
+        p.valid = false;
+    }
     j.ms = (u32)(osGetTime() - t0);
     return 0;
 }
 
-// Waits for the screenshot being written (if any). Call before the pictures go.
+// Waits for the screenshot being written (if any).
 static void FinishScreenshot() {
     if (!g_shotTask) return;
+    const u64 t0 = osGetTime();
     g_shotTask->Wait();
     delete g_shotTask;
     g_shotTask = nullptr;
     if (!g_shotJob.ok) File::Remove(g_shotJob.path);  // a half-written file is no use to anyone
-    LogOcr(Utils::Format("screenshot %s in %lu ms", g_shotJob.ok ? "written" : "FAILED", (unsigned long)g_shotJob.ms));
+    LogOcr(Utils::Format("screenshot %s: %lu KB in %lu ms (waited %lu ms for it)", g_shotJob.ok ? "written" : "FAILED",
+                         (unsigned long)(g_shotJob.bytes / 1024), (unsigned long)g_shotJob.ms,
+                         (unsigned long)(osGetTime() - t0)));
 }
 
+// The screenshot's file name for a word saved now: picked the first time, written at the close.
 static std::string SaveScreenshot() {
     if (!g_lookupShot.empty()) return g_lookupShot;
     const bool top = g_readTop && Pic(0).valid, bottom = g_readBottom && Pic(1).valid;
@@ -595,17 +598,32 @@ static std::string SaveScreenshot() {
     std::string ts = Timestamp();  // "2026-10-24 14:30:05"
     std::string name;
     for (char c : ts) name += (c == ' ') ? '_' : (c == ':' ? '-' : c);
-    name += ".bmp";
+    g_lookupShot = name + ".qoi";
+    return g_lookupShot;
+}
+
+// At the lookup's close: when a word was saved, its screenshot goes to the SD card in the
+// background, the pictures with it; otherwise they are just freed.
+static void WriteScreenshotLater() {
+    const bool top = g_readTop && Pic(0).valid, bottom = g_readBottom && Pic(1).valid;
+    if (g_lookupShot.empty() || (!top && !bottom)) {
+        DropPictures();
+        return;
+    }
     FinishScreenshot();
-    snprintf(g_shotJob.path, sizeof(g_shotJob.path), "%s/%s", kShotDir, name.c_str());
-    g_shotJob.top = top;
-    g_shotJob.bottom = bottom;
-    g_shotJob.ok = false;
-    g_shotJob.ms = 0;
+    ShotJob &j = g_shotJob;
+    snprintf(j.path, sizeof(j.path), "%s/%s", kShotDir, g_lookupShot.c_str());
+    j.top = top;
+    j.bottom = bottom;
+    j.ok = false;
+    j.ms = j.bytes = 0;
+    for (int i = 0; i < 2; i++) {  // the pictures move to the job
+        j.pic[i] = Pic(i);
+        Pic(i).px = nullptr;
+        Pic(i).valid = false;
+    }
     g_shotTask = new Task(WriteShot, nullptr, System::IsNew3DS() ? Task::NewAppCore : Task::AppCore);
     g_shotTask->Start();
-    g_lookupShot = name;
-    return name;
 }
 
 // Saves a word to mined.tsv. `status` gets the line to show.
@@ -974,6 +992,7 @@ static void OpenLookup(const std::vector<std::string> &blocks, bool textOnTop) {
 static void ReadAndLookUp(int mode) {
     Process::Pause();
     BoostCpu();
+    FinishScreenshot();  // the last lookup's pictures are still being written out
     LoadKnown();  // kept for the session: before the pictures, which come and go
     g_readTop = mode != kReadBottom;
     g_readBottom = mode != kReadTop;
@@ -993,9 +1012,8 @@ static void ReadAndLookUp(int mode) {
         g_viewOpenedAt = osGetTime();
         OpenLookup(blocks, g_readBottom && g_textOnTop);
     }
-    FinishScreenshot();
     RestoreScreens();
-    DropPictures();
+    WriteScreenshotLater();  // the game goes on while it is written
     g_lookupShot = "";
     RestoreCpu();
     Process::Play();
@@ -1036,15 +1054,19 @@ static int SendWordToPc(const std::string &host, int port, const std::string &li
     if (!kt::netPost(host, port, "/mine", headers, body, 1500, 6000, reply, error)) return 0;
     if (reply.compare(0, 9, "NEED_SHOT") == 0 && !shot.empty()) {
         // the PC hasn't seen this screenshot: upload it, then ask again
-        SdReader bmp;
+        SdReader file;
         std::string compact, r2;
-        if (!bmp.open(std::string(kShotDir) + "/" + shot)) {
+        if (!file.open(std::string(kShotDir) + "/" + shot)) {
             error = "screenshot " + shot + " is missing";
             return 0;
         }
-        if (!kt::screenshotRGB565(bmp, compact, error)) return 0;
-        kt::MemReader body2(compact);
-        if (!kt::netPost(host, port, "/shot", headers, body2, 1500, 10000, r2, error)) return 0;
+        if (shot.size() > 4 && shot.compare(shot.size() - 4, 4, ".qoi") == 0) {  // small already: as it is
+            if (!kt::netPost(host, port, "/shot", headers, file, 1500, 10000, r2, error)) return 0;
+        } else {  // an older BMP: sent as RGB565, a third of its size
+            if (!kt::screenshotRGB565(file, compact, error)) return 0;
+            kt::MemReader body2(compact);
+            if (!kt::netPost(host, port, "/shot", headers, body2, 1500, 10000, r2, error)) return 0;
+        }
         kt::MemReader again(line + "\n");
         if (!kt::netPost(host, port, "/mine", headers, again, 1500, 6000, reply, error)) return 0;
     }
@@ -1432,6 +1454,7 @@ static void Settings() {
     m.setTitle("Kotoba3DS");
     m.setButtons({" Choose", " Close"});
     enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kLast, kSaved, kCards, kKnown, kPc, kHelp, kRows };
+    FinishScreenshot();  // "Make Anki cards" may send it
     while (true) {
         LoadKnown();
         const int saved = CountSaved();

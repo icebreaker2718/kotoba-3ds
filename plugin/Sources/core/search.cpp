@@ -179,15 +179,6 @@ static size_t longestWordAt(Dictionary &dict, const std::string &text, size_t i,
     return i + len <= text.size() ? len : 0;
 }
 
-static bool allHiragana(const std::string &s) {
-    size_t i = 0;
-    while (i < s.size()) {
-        uint32_t cp = utf8Next(s, i);
-        if (cp < 0x3041 || cp > 0x309F) return false;
-    }
-    return !s.empty();
-}
-
 std::vector<std::string> chunkText(Dictionary &dict, const std::string &text, uint32_t maxChars) {
     static const char *const kParticles[] = {"が", "は", "を", "に", "へ", "で", "と", "も", "の", "や"};
     std::vector<std::string> out;
@@ -196,9 +187,9 @@ std::vector<std::string> chunkText(Dictionary &dict, const std::string &text, ui
         size_t next = i;
         utf8Next(text, next);
         size_t len = longestWordAt(dict, text, i, maxChars);  // longest dictionary word here
-        // a particle glued to the next word (が+ある -> があ): split it off when the word after
-        // the particle reaches further
-        if (len > 0 && allHiragana(text.substr(i, len))) {
+        // a particle glued to the next word (が+ある -> があ, と+ケーキ -> とケ): split it off when the
+        // word after the particle reaches further
+        if (len > 0) {
             std::string first = text.substr(i, next - i);
             bool particle = false;
             for (const char *p : kParticles) particle = particle || first == p;
