@@ -218,8 +218,30 @@ class CardMaker:
     def submit(self, row, img):
         self.jobs.put((row, img))
 
+    def _prepare(self):
+        """At start: opens the dictionaries (indexing them the first time) and says what cards
+        will get, with a warning when there are no definitions or pitch accent to add."""
+        import mine
+        try:
+            self.enricher = mine.Enricher(self.reader.cfg, log=self.log)
+        except Exception as e:
+            self.log(f"WARNING: could not open the dictionaries: {type(e).__name__}: {e}")
+            return
+        e, d = self.enricher, self.reader.cfg.get("dictionaries", {})
+        names = lambda items: ", ".join(x.title for x in items) or "none"
+        self.log(f"Cards get: definitions {names(e.glossaries)}; pitch accent {names(e.pitches)}; "
+                 f"frequency {names(e.freqs)}.")
+        folder = mine._resolve(d.get("folder") or "dictionaries")
+        if not e.glossaries:
+            self.log("WARNING: no Yomitan definitions dictionary (e.g. jitendex-yomitan.zip) found in "
+                     f"{folder}: cards get only the 3DS's short definition. Put the zip there (don't "
+                     "unzip it), or list its path under dictionaries.glossary in config.json, then restart.")
+        if not e.pitches:
+            self.log(f"WARNING: no pitch accent dictionary found in {folder}: cards get no pitch accent.")
+
     def _run(self):
         import mine
+        self._prepare()
         while True:
             row, img = self.jobs.get()
             try:
