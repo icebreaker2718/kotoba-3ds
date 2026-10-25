@@ -44,6 +44,11 @@ int main(int argc, char **argv) {
     bool ok = localReadScreen(ocr, grey, w, h, boxes, paras, e);
     free(grey);
     if (!ok) { printf("OCR FAILED: %s\n", e.c_str()); return 3; }
-    for (auto &p : paras) printf("PARAGRAPH: %s\n", p.c_str());
+    for (auto &p : paras) {  // the text, then where the game broke its lines
+        std::string flat, shown = p;
+        for (char c : p) if (c != '\n') flat += c;
+        for (char &c : shown) if (c == '\n') c = '|';
+        printf("PARAGRAPH: %s\nLINES: %s\n", flat.c_str(), shown.c_str());
+    }
     return 0;
 }

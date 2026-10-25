@@ -439,22 +439,54 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
     paragraphs.clear();
     if (usedBox) *usedBox = -1;
     std::vector<TextLine> lines;
-    for (size_t bi = 0; bi < boxes.size() && bi < 2; bi++) {  // the best two boxes, then the whole screen
+    // every box with Japanese in it (a screen can have two speech bubbles), in reading order
+    struct Got { const TextBox *box; std::vector<std::string> paras; int index; };
+    std::vector<Got> got;
+    for (size_t bi = 0; bi < boxes.size(); bi++) {
         const TextBox &b = boxes[bi];
+        bool inside = false;  // mostly within a box read already (a box inside a box)
+        for (const Got &g : got) {
+            const TextBox &o = *g.box;
+            unsigned ix = std::min(b.x + b.w, o.x + o.w) > std::max(b.x, o.x) ? std::min(b.x + b.w, o.x + o.w) - std::max(b.x, o.x) : 0;
+            unsigned iy = std::min(b.y + b.h, o.y + o.h) > std::max(b.y, o.y) ? std::min(b.y + b.h, o.y + o.h) - std::max(b.y, o.y) : 0;
+            if ((uint64_t)ix * iy * 2 > (uint64_t)std::min(b.w * b.h, o.w * o.h)) inside = true;
+        }
+        if (inside) continue;
         unsigned x0 = b.x > 2 ? b.x - 2 : 0, y0 = b.y > 2 ? b.y - 2 : 0;
         unsigned x1 = b.x + b.w + 2 < w ? b.x + b.w + 2 : w, y1 = b.y + b.h + 2 < h ? b.y + b.h + 2 : h;
         std::string e;
-        if (ocr.read(grey, w, h, lines, e, progress, x0, y0, x1 - x0, y1 - y0)) {
-            paragraphs = textParagraphs(lines);
-            cleanParagraphs(paragraphs);
-            if (japaneseChars(paragraphs) >= 2) {
-                if (usedBox) *usedBox = (int)bi;
-                return true;
-            }
-        }
+        if (!ocr.read(grey, w, h, lines, e, progress, x0, y0, x1 - x0, y1 - y0)) continue;
+        // lines that lie in a box read already: the same text again (boxes can overlap)
+        lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const TextLine &l) {
+                        float cx = l.centerX * w, cy = l.centerY * h;
+                        for (const Got &g : got)
+                            if (cx >= g.box->x && cx < g.box->x + g.box->w && cy >= g.box->y && cy < g.box->y + g.box->h)
+                                return true;
+                        return false;
+                    }), lines.end());
+        std::vector<std::string> ps = textParagraphs(lines, true);
+        cleanParagraphs(ps);
+        if (japaneseChars(ps) >= 2) got.push_back({&b, ps, (int)bi});
+    }
+    if (!got.empty()) {
+        std::stable_sort(got.begin(), got.end(), [](const Got &a, const Got &b) {
+            // top to bottom; side by side (overlapping rows): left to right
+            bool sameRow = a.box->y < b.box->y + b.box->h && b.box->y < a.box->y + a.box->h;
+            return sameRow ? a.box->x < b.box->x : a.box->y < b.box->y;
+        });
+        for (const Got &g : got) paragraphs.insert(paragraphs.end(), g.paras.begin(), g.paras.end());
+        // a scrap from another box (「こー」) goes when there is real text, as within a box
+        unsigned best = 0;
+        for (const std::string &p : paragraphs) best = std::max(best, japaneseChars({p}));
+        if (best >= 6)
+            paragraphs.erase(std::remove_if(paragraphs.begin(), paragraphs.end(),
+                                            [](const std::string &p) { return japaneseChars({p}) < 3; }),
+                             paragraphs.end());
+        if (usedBox) *usedBox = got[0].index;
+        return true;
     }
     if (!ocr.read(grey, w, h, lines, error, progress)) return false;  // the whole screen
-    paragraphs = textParagraphs(lines);
+    paragraphs = textParagraphs(lines, true);
     cleanParagraphs(paragraphs);
     if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
     return true;

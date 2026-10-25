@@ -102,6 +102,14 @@ DEFAULT_CONFIG = {
         "game_crops": {},
     },
     "picture": {"format": "webp", "scale": 2},
+    "known": {
+        "_comment": "Words that already have Anki cards show in green on the 3DS (mine.py known, or "
+                    "Select > Known words with ocr_server.py running). query: an Anki search for the "
+                    "notes to take words from (\"\" = all notes). fields: the fields that hold the word, "
+                    "first found wins ([] = the {expression} field of anki.fields, then the usual names).",
+        "query": "",
+        "fields": [],
+    },
     "games": {"_comment": "title id -> game name for MiscInfo and the tag", "0004000000000000": "Example Game"},
 }
 KOTOBA_FIELDS = {
@@ -273,6 +281,70 @@ def anki(cfg, action, **params):
     if resp.get("error"):
         raise AnkiError(resp["error"])
     return resp.get("result")
+
+
+# ---------------------------------------------------------------------------
+# words that already have cards (green on the 3DS)
+# ---------------------------------------------------------------------------
+KNOWN_FIELD_NAMES = ["Expression", "Word", "Vocab", "Vocabulary", "Term", "Kanji", "Japanese", "Front"]
+_JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\u3005]")
+
+
+def clean_known_word(value):
+    """A card field -> the plain word: no HTML, no furigana (食[た]べる, <ruby>), no spaces."""
+    v = re.sub(r"<rt>.*?</rt>|<rp>.*?</rp>", "", value, flags=re.S)
+    v = re.sub(r"<[^>]*>", "", v)
+    v = v.replace("&nbsp;", " ")
+    v = re.sub(r"\[[^\]]*\]", "", v)
+    v = re.sub(r"\s+", "", v)
+    if not v or len(v) > 30 or not _JAPANESE.search(v):
+        return ""
+    return v
+
+
+def known_words(cfg, log=print):
+    """The words of the user's Anki cards, sorted by their UTF-8 bytes (as the 3DS searches them)."""
+    k = cfg.get("known", {})
+    query = k.get("query") or "deck:*"
+    fields = list(k.get("fields") or [])
+    if not fields:
+        fields = [f for f, t in cfg["anki"]["fields"].items() if t.strip() == "{expression}"]
+        fields += [f for f in KNOWN_FIELD_NAMES if f not in fields]
+    ids = anki(cfg, "findNotes", query=query)
+    words = set()
+    for i in range(0, len(ids), 1000):
+        for note in anki(cfg, "notesInfo", notes=ids[i:i + 1000]):
+            have = note.get("fields", {})
+            for f in fields:
+                if f in have:
+                    w = clean_known_word(have[f].get("value", ""))
+                    if w:
+                        words.add(w)
+                    break
+    log(f"{len(words)} words in {len(ids)} Anki notes.")
+    return sorted(words, key=lambda w: w.encode("utf-8"))
+
+
+def known_text(words):
+    return "# Kotoba3DS: words that have Anki cards (green in lookups)\n" + "".join(w + "\n" for w in words)
+
+
+def run_known(cfg, args):
+    data = known_text(known_words(cfg)).encode("utf-8")
+    try:
+        src = open_source(cfg, args)
+    except (OSError, ftplib.Error) as e:
+        path = os.path.join(HERE, "known.txt")
+        with open(path, "wb") as f:
+            f.write(data)
+        print(f"Couldn't reach the 3DS ({e}). Wrote {path}: copy it to SD:{REMOTE_DIR}/known.txt.")
+        return 1
+    try:
+        src.write("known.txt", data)
+    finally:
+        src.close()
+    print(f"Put the list on the 3DS ({REMOTE_DIR}/known.txt): those words show in green in lookups.")
+    return 0
 
 
 def setup_anki(cfg):
@@ -706,7 +778,9 @@ def run_import(cfg, args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", nargs="?", default="import", choices=["import", "setup"])
+    ap.add_argument("command", nargs="?", default="import", choices=["import", "setup", "known"],
+                    help="import: make cards from the saved words (default); setup: check Anki; "
+                         "known: put the words of your Anki cards on the 3DS (green in lookups)")
     ap.add_argument("--config", default=os.path.join(HERE, "config.json"))
     ap.add_argument("--ftp", help="HOST[:PORT] of ftpd on the 3DS (overrides config)")
     ap.add_argument("--sd", help="path where the SD card is mounted (overrides config)")
@@ -729,6 +803,8 @@ def main():
         if args.command == "setup":
             setup_anki(cfg)
             return 0
+        if args.command == "known":
+            return run_known(cfg, args)
         return run_import(cfg, args)
     except AnkiError as e:
         print(e)

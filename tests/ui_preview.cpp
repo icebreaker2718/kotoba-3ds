@@ -1,6 +1,7 @@
 // Draws the plugin's lookup screens on a PC, as the console would: both screens stacked in one BMP.
 //   ui_preview atlas.bin dict.bin shot.bmp model.vocr out.bmp [action ...]
-//   ui_preview atlas.bin dict.bin shot.bmp --text "テキスト|二つ目" out.bmp [action ...]
+//   ui_preview atlas.bin dict.bin shot.bmp --text "テキスト|二つ目/の二行目" out.bmp [action ...]
+// ('|' between blocks, '/' a line break; KNOWN="天気,食べる" in the environment: known words)
 // atlas.bin: make_font_atlas.py. Actions: right left up down L R scroll save hide tap:x,y
 #include <algorithm>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include "core/bmp.hpp"
 #include "core/correct.hpp"
 #include "core/local_ocr.hpp"
+#include "core/known_words.hpp"
 #include "core/lookup_view.hpp"
 #include "core/textbox.hpp"
 #include "core/ui_text.hpp"
@@ -112,6 +114,7 @@ int main(int argc, char **argv) {
             p = t.find('|', s);
             if (p == std::string::npos) p = t.size();
             blocks.push_back(t.substr(s, p - s));
+            for (char &c : blocks.back()) if (c == '/') c = '\n';
         }
         argi = 7;
         if (argc < 7) return 2;
@@ -129,7 +132,15 @@ int main(int argc, char **argv) {
     const char *out = argv[argi - 1];
     TextRenderer tr(font);
     LookupView view(dict, tr);
+    KnownWords known;
+    if (const char *k = getenv("KNOWN")) {
+        std::string list = k;
+        for (char &c : list) if (c == ',') c = '\n';
+        known.load(list.data(), list.size());
+        view.setKnown(&known);
+    }
     view.setText(blocks);
+    while (view.prefetch()) {}
     for (int i = argi; i < argc; i++) {
         std::string a = argv[i];
         LookupView::Button b;

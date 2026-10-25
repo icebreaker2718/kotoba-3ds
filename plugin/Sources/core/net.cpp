@@ -168,7 +168,7 @@ static bool sendAll(int s, const char *data, size_t len, int timeoutMs) {
     return true;
 }
 
-static bool readReply(int s, int timeoutMs, std::string &body, std::string &error) {
+static bool readReply(int s, int timeoutMs, std::string &body, std::string &error, size_t maxBytes = 256 * 1024) {
     std::string raw;
     char buf[2048];
     size_t headerEnd = std::string::npos;
@@ -180,13 +180,16 @@ static bool readReply(int s, int timeoutMs, std::string &body, std::string &erro
         if (n < 0) { error = "connection error while reading the answer" + errStr("recv", errno); return false; }
         if (n == 0) break;
         raw.append(buf, (size_t)n);
-        if (raw.size() > 256 * 1024) { error = "answer too large"; return false; }
+        if (raw.size() > maxBytes) { error = "answer too large"; return false; }
         if (headerEnd == std::string::npos) {
             headerEnd = raw.find("\r\n\r\n");
             if (headerEnd != std::string::npos) {
                 size_t p = raw.find("Content-Length:");
                 if (p == std::string::npos) p = raw.find("content-length:");
                 if (p != std::string::npos && p < headerEnd) contentLength = atol(raw.c_str() + p + 15);
+                // room for all of it at once (a long answer would otherwise be copied as it grows)
+                if (contentLength > 0 && headerEnd + 4 + (size_t)contentLength <= maxBytes)
+                    raw.reserve(headerEnd + 4 + (size_t)contentLength);
             }
         }
         if (headerEnd != std::string::npos && contentLength >= 0 &&
@@ -199,7 +202,9 @@ static bool readReply(int s, int timeoutMs, std::string &body, std::string &erro
         size_t sp = raw.find(' ');
         if (sp != std::string::npos) status = atoi(raw.c_str() + sp + 1);
     }
-    body = raw.substr(headerEnd + 4, contentLength >= 0 ? (size_t)contentLength : std::string::npos);
+    raw.erase(0, headerEnd + 4);  // the body, without a second copy
+    if (contentLength >= 0 && raw.size() > (size_t)contentLength) raw.resize((size_t)contentLength);
+    body.swap(raw);
     if (status != 200) {
         // server sends "ERR\n<message>"
         size_t nl = body.find('\n');
@@ -231,7 +236,7 @@ bool netPing(const std::string &host, int port, int timeoutMs, std::string &erro
 
 bool netPost(const std::string &host, int port, const std::string &path,
              const std::vector<std::string> &headers, Reader &src, int connectTimeoutMs, int replyTimeoutMs,
-             std::string &responseBody, std::string &error) {
+             std::string &responseBody, std::string &error, size_t maxReply) {
     int s = connectTo(host, port, connectTimeoutMs, error);
     if (s < 0) return false;
     uint32_t size = src.size();
@@ -254,7 +259,7 @@ bool netPost(const std::string &host, int port, const std::string &path,
         }
         off += n;
     }
-    if (ok) ok = readReply(s, replyTimeoutMs, responseBody, error);
+    if (ok) ok = readReply(s, replyTimeoutMs, responseBody, error, maxReply);
     closeSock(s);
     return ok;
 }

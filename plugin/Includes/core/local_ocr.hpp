@@ -104,8 +104,9 @@ uint8_t *topScreenGrey(Reader &bmp, unsigned &w, unsigned &h, std::string &error
 // R, G, B bytes -> grey bytes as the model expects (malloc'd; nullptr if out of memory).
 uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h);
 
-// Reads the best text box (findTextBoxes) and falls back to the whole screen when it holds no
-// Japanese. Returns the text blocks (textParagraphs); `usedBox` = index of the box read, -1 = screen.
+// Reads every text box found (findTextBoxes) that holds Japanese, top to bottom, and falls back
+// to the whole screen when none does. Returns the text blocks (textParagraphs, the game's line
+// breaks kept as '\n'); `usedBox` = index of the first box read, -1 = the whole screen.
 bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h, const std::vector<TextBox> &boxes,
                      std::vector<std::string> &paragraphs, std::string &error,
                      void (*progress)(unsigned i, unsigned n) = nullptr, int *usedBox = nullptr);

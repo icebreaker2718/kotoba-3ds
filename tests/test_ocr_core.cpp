@@ -78,7 +78,11 @@ int main(int argc, char **argv) {
             printf("WORKERS: %u\n", par.lastWorkers());
         }
         printf("READ: %s\n", used >= 0 ? "text box" : "whole screen");
-        for (auto &p : paras) printf("PARAGRAPH: %s\n", p.c_str());
+        for (auto &p : paras) {
+            std::string flat;
+            for (char c : p) if (c != '\n') flat += c;
+            printf("PARAGRAPH: %s\n", flat.c_str());
+        }
         return 0;
     }
     std::string err;
@@ -95,6 +99,11 @@ int main(int argc, char **argv) {
         check(ps.size() == 3 && ps[1] == "また夢世界へ行く時は声をかけるんじゃぞ!",
               "lines of one text box merged" + (ps.size() > 1 ? ": " + ps[1] : std::string()));
         check(ps.size() == 3 && ps[0] == "メニュー" && ps[2] == "はい", "menu and a far-off choice stay separate");
+        std::vector<std::string> br = textParagraphs(ls, true);
+        check(br.size() == 3 && br[1] == "また夢世界へ行く時は\n声をかけるんじゃぞ!", "the game's line break kept");
+        std::vector<std::string> cl = {"今日はいい天気だね!\nク"};
+        cleanParagraphs(cl);
+        check(cl[0] == "今日はいい天気だね!", "a speck after a line break dropped: " + cl[0]);
     }
 
     {   // clean-up of what the OCR read

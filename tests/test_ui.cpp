@@ -10,6 +10,7 @@
 
 #include "core/bmp.hpp"
 #include "core/kana.hpp"
+#include "core/known_words.hpp"
 #include "core/lookup_view.hpp"
 #include "core/menu_view.hpp"
 #include "core/hotkeys.hpp"
@@ -332,6 +333,45 @@ int main(int argc, char **argv) {
         for (int ty = 8; ty < 182 && c2 != sc; ty += 5) c2 = v.charAt(last.x + last.w / 2, ty);
         check(c2 == sc, "the text scrolled so the selection is on screen");
         (void)bt;
+    }
+    {   // the game's line breaks: rows start there, and the text shrinks so the lines fit
+        LookupView v(dict, tr);
+        v.setText({"ドリームストーンはパジャマウンテンの\nどこかにあるらしいが…"});
+        check(v.blocks()[0] == "ドリームストーンはパジャマウンテンのどこかにあるらしいが…", "line breaks out of the text");
+        int d = cellOf(v, "ど");
+        check(d >= 0 && v.cells()[d].row == 1 && v.cells()[d].x == 12, "the game's second line starts a row");
+        check(v.rows().size() == 2 && v.textSize() < 27, "smaller text: 18 characters fit a row");
+        LookupView w(dict, tr);
+        w.setText({"今日は\nいい天気"});
+        check(w.textSize() == 27 && w.rows().size() == 2, "short lines keep the big text");
+        w.setText({"ああああああああああああああああああああ"});
+        int r2 = -1;
+        for (size_t i = 0; i < w.cells().size() && r2 < 0; i++) if (w.cells()[i].row == 1) r2 = (int)i;
+        check(r2 > 0 && w.cells()[r2].x == 12 + w.textSize() / 2, "a game line too long for a row goes on indented");
+        w.setText({"Press the\nbutton"});
+        check(w.blocks()[0] == "Press the button", "English words broken across lines keep their space");
+    }
+    {   // known words: green wherever they are
+        KnownWords kw;
+        const char list[] = "# words with cards\n天気\r\n食べる\n  \n天気\n";
+        check(kw.load(list, sizeof(list) - 1) && kw.size() == 2 && kw.has("天気") && !kw.has("今日"), "the known words list");
+        LookupView v(dict, tr);
+        v.setKnown(&kw);
+        v.setText({"今日はいい天気だから\nケーキを食べた"});
+        int guard = 0;
+        while (v.prefetch() && guard++ < 1000) {}
+        check(v.cellKnown(cellOf(v, "天")) && v.cellKnown(cellOf(v, "気")) && !v.cellKnown(cellOf(v, "今")), "a known word is green");
+        check(v.cellKnown(cellOf(v, "食")), "a known word conjugated (食べた: 食べる) is green");
+        check(v.takeRedraw() && !v.takeRedraw(), "the screens are redrawn once for it");
+        LookupView s(dict, tr);
+        s.setKnown(&kw);
+        s.setText({"ケーキとケーキ"});
+        guard = 0;
+        while (s.prefetch() && guard++ < 1000) {}
+        check(!s.cellKnown(cellOf(s, "ケ", 1)), "not known before it is saved");
+        tapCell(s, cellOf(s, "ケ"));
+        s.markSaved();
+        check(s.cellKnown(cellOf(s, "ケ", 1)) && kw.has("ケーキ"), "saving a word turns it green elsewhere too");
     }
     {   // hotkeys: names, and one that is part of another waits for it
         check(keyComboName(keys::ZL | keys::ZR) == "ZL + ZR" && keyComboName(0) == "Off" &&

@@ -27,7 +27,7 @@ static size_t countKanji(const std::string &s) {
     return n;
 }
 
-std::vector<std::string> textParagraphs(const std::vector<TextLine> &lines) {
+std::vector<std::string> textParagraphs(const std::vector<TextLine> &lines, bool keepBreaks) {
     // typical text height: median over lines with kanji or long lines
     std::vector<float> hs;
     for (const TextLine &l : lines)
@@ -72,7 +72,8 @@ std::vector<std::string> textParagraphs(const std::vector<TextLine> &lines) {
         prev = &l;
         std::string &p = out.back();
         // English lines get a space between them, Japanese ones don't
-        if (!p.empty() && (unsigned char)p.back() < 0x80 && (unsigned char)l.text[0] < 0x80) p += ' ';
+        if (!p.empty() && keepBreaks) p += '\n';
+        else if (!p.empty() && (unsigned char)p.back() < 0x80 && (unsigned char)l.text[0] < 0x80) p += ' ';
         p += l.text;
     }
     out.erase(std::remove(out.begin(), out.end(), std::string()), out.end());
@@ -112,7 +113,7 @@ void cleanParagraphs(std::vector<std::string> &paras) {
         bool kataOrKanji = false, ascii = false;
         for (size_t k = lastPunct + 1; k < cps.size(); k++) {
             uint32_t c = cps[k];
-            if (c == 0x3001 || c == 0x3002 || c == ',' || c == '.') continue;
+            if (c == 0x3001 || c == 0x3002 || c == ',' || c == '.' || c == '\n') continue;
             n++;
             if ((c >= 0x30A1 && c <= 0x30FA) || (c >= 0x3400 && c <= 0x9FFF)) kataOrKanji = true;
             if (c < 0x80) ascii = true;

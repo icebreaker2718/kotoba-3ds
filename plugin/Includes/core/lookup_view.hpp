@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/dict.hpp"
+#include "core/known_words.hpp"
 #include "core/search.hpp"
 #include "core/ui_text.hpp"
 
@@ -20,7 +21,9 @@ public:
 
     LookupView(Dictionary &dict, TextRenderer &text) : dict_(dict), tr_(text) {}
 
-    // The text blocks that were read (the longest first is best). Selects the first word.
+    // The text blocks that were read. A '\n' in a block is where the game broke the line: the text
+    // starts a new row there too (and is shrunk, down to a point, so the game's lines fit), but
+    // words and the sentence run on across it. Selects the first word.
     void setText(const std::vector<std::string> &blocks);
     const std::vector<std::string> &blocks() const { return blocks_; }
 
@@ -29,13 +32,19 @@ public:
     // A touch at (x, y) on the touchscreen: a character (looks up the word starting there), or a
     // button (returned through `button`).
     bool tap(int x, int y, Button &button);
-    bool moveWord(int dir);     // D-pad / Circle Pad left/right: previous/next word
-    bool moveRow(int dir);      // D-pad / Circle Pad up/down: the row above/below, same position
-    // Looks up one of the words the next press could go to (call while idle). False when there
-    // is nothing left to look up.
+    bool moveWord(int dir);     // Circle Pad left/right: previous/next word
+    bool moveRow(int dir);      // Circle Pad up/down: the row above/below, same position
+    // Looks up one of the words the next press could go to, or checks one word against the
+    // known words (call while idle). False when there is nothing left to do.
     bool prefetch();
-    bool page(int dir);         // L/R: the other dictionary matches at this spot
-    bool scroll(int lines);     // C-stick: the definition up/down
+    bool page(int dir);         // L/R, D-pad left/right: the other dictionary matches at this spot
+    bool scroll(int lines);     // D-pad up/down, C-stick: the definition up/down
+    // Words the player has already (Anki cards, saved words) show in green; prefetch() finds them.
+    // markSaved() adds the saved word to it. nullptr: none.
+    void setKnown(KnownWords *known) { known_ = known; }
+    // True once since prefetch() found a known word (the screens should be drawn again).
+    bool takeRedraw() { bool r = redraw_; redraw_ = false; return r; }
+    void setRedraw() { redraw_ = true; }  // ask again (not drawn yet)
     void setHidden(bool hidden) { hidden_ = hidden; }  // the Hide button then reads "Show"
     bool hidden() const { return hidden_; }
 
@@ -51,7 +60,7 @@ public:
     const std::string &query() const { return so_.query; }
     const std::string &sentence() const;          // the block the selection is in
     std::string selectedText() const;             // the highlighted characters
-    void markSaved();                             // shows the selection as saved (green)
+    void markSaved();                             // shows the selection (and the word elsewhere) as saved (green)
     void setStatus(const std::string &s, Rgb c) { status_ = s; statusColor_ = c; }
 
     // ---- drawing ----
@@ -82,17 +91,21 @@ public:
     const std::vector<Cell> &cells() const { return cells_; }
     const std::vector<Row> &rows() const { return rows_; }
     int selectedCell() const;
+    int textSize() const { return textSize_; }
+    bool cellKnown(int i) const { return isKnown(cells_[i]); }
 
 private:
     Dictionary &dict_;
     TextRenderer &tr_;
     std::vector<std::string> blocks_;
+    std::vector<std::vector<size_t>> breaks_;  // per block: byte offsets that start a game line
     std::vector<Cell> cells_;
     std::vector<Row> rows_;
     mutable std::vector<std::vector<size_t>> stops_;  // per block: byte offsets where words start
     mutable std::vector<char> stopsReady_;            // per block: stops_ worked out yet
     const std::vector<size_t> &stops(size_t block) const;
     int contentH_ = 0, scrollY_ = 0;
+    int textSize_ = 27, rowH_ = 34;
     // selection
     int selBlock_ = -1;
     size_t selByte_ = 0, selLen_ = 0;
@@ -120,6 +133,16 @@ private:
 
     struct Cached { int block; size_t byte; SearchOutput so; };
     std::vector<Cached> cache_;
+    // known words: per block, per word character
+    // a word character: whether the longest word starting there is known (state 0 not checked
+    // yet, 1 no, 2 yes); len its bytes, first the first character's; stop: a word starts there
+    struct Mark { size_t byte = 0, len = 0, first = 0; uint8_t state = 0; bool stop = false; std::vector<std::string> forms; };
+    mutable std::vector<std::vector<Mark>> marks_;  // filled in with stops()
+    KnownWords *known_ = nullptr;
+    bool redraw_ = false;
+    bool checkKnown();
+    void formsOf(const SearchOutput &so, std::vector<std::string> &forms, size_t &len);
+    bool isKnown(const Cell &c) const;
 
     void layout();
     static void trimResults(SearchOutput &so);

@@ -2,7 +2,7 @@
 //
 // In a game, press a hotkey (default ZL+ZR: the top screen; the touchscreen and both screens can
 // have their own): the game pauses, the 3DS reads the screen itself (on-device OCR,
-// plugin/Sources/vocr) and shows the text: tap a word (or move with the D-pad) and its entry
+// plugin/Sources/vocr) and shows the text: tap a word (or move with the Circle Pad) and its entry
 // shows over the dimmed game (the layout follows Rubi for Vita's overlay). Saved words go to
 // SD:/3ds/kotoba3ds/mined.tsv with a screenshot; "Make Anki cards" in the Select menu sends them
 // to tools/ocr_server.py on the PC (or tools/mine.py reads them later).
@@ -22,6 +22,7 @@
 #include "core/dict.hpp"
 #include "core/correct.hpp"
 #include "core/hotkeys.hpp"
+#include "core/known_words.hpp"
 #include "core/local_ocr.hpp"
 #include "core/lookup_view.hpp"
 #include "core/menu_view.hpp"
@@ -34,6 +35,7 @@
 extern "C" u32 __ctru_heap_size;  // libctru: the plugin's heap (what Luma gave it, minus code and CTRPF's own)
 
 namespace CTRPluginFramework {
+extern FS_Archive _sdmcArchive;  // CTRPF's SD card archive (File uses it)
 
 // ---------------------------------------------------------------------------
 // Paths & settings
@@ -44,6 +46,7 @@ static const char *kLogPath = "/3ds/kotoba3ds/mined.tsv";
 static const char *kShotDir = "/3ds/kotoba3ds/shots";
 static const char *kSettingsPath = "/3ds/kotoba3ds/settings.txt";
 static const char *kModelDir = "/3ds/kotoba3ds/ocr/";
+static const char *kKnownPath = "/3ds/kotoba3ds/known.txt";
 
 // What a read covers. Each has its own hotkey (0 = off).
 enum ReadMode { kReadTop = 0, kReadBottom = 1, kReadBoth = 2, kModes = 3 };
@@ -483,49 +486,124 @@ static int CountSaved() {
     return n;
 }
 
+// The words the player has already, green in lookups: known.txt (the words of their Anki cards,
+// from the PC) and the words saved here. Loaded once, kept (reloaded after it changes).
+static kt::KnownWords *g_knownPtr = nullptr;
+#define g_known Leaky(g_knownPtr)
+static bool g_knownLoaded = false;
+static size_t g_knownFromAnki = 0;  // words in known.txt
+static const u32 kKnownMax = 1024 * 1024;
+
+static void LoadKnown() {
+    if (g_knownLoaded) return;
+    g_knownLoaded = true;
+    g_known.clear();
+    g_knownFromAnki = 0;
+    File f;
+    if (File::Open(f, kKnownPath, File::READ) == File::SUCCESS) {
+        const u64 size = f.GetSize();
+        const u32 len = (u32)std::min<u64>(size, kKnownMax);
+        char *buf = (char *)malloc(len + 1);
+        if (buf && f.Read(buf, len) == File::SUCCESS) {
+            g_known.adopt(buf, len, (size_t)size);  // keeps buf
+            g_knownFromAnki = g_known.size();
+        } else {
+            free(buf);
+            LogOcr(Utils::Format("known.txt (%lu KB) not loaded: not enough memory", (unsigned long)(size / 1024)));
+        }
+        f.Close();
+    }
+    std::vector<std::string> cols;
+    for (const std::string &l : SavedLines()) {
+        if (l[0] == '#') continue;
+        SplitTabs(l, cols);
+        if (cols.size() > 2) g_known.add(cols[2]);
+    }
+}
+
 // The screenshot of the current lookup: the screen(s) that were read (top 400x240, touchscreen
 // 320x240, both 400x480 with the touchscreen centred under the top screen), written from the
-// kept pictures the first time a word of the lookup is saved.
+// kept pictures the first time a word of the lookup is saved. Written on another CPU core while
+// the lookup goes on (the SD card takes a while): FinishScreenshot() waits for it.
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
 
-static std::string SaveScreenshot() {
-    if (!g_lookupShot.empty()) return g_lookupShot;
-    const bool top = g_readTop && Pic(0).valid, bottom = g_readBottom && Pic(1).valid;
-    if (!top && !bottom) return "";
+struct ShotJob {
+    char path[96];
+    bool top, bottom, ok;
+    u32 ms;
+};
+static ShotJob g_shotJob;
+static Task *g_shotTask = nullptr;
+
+static s32 WriteShot(void *) {
+    ShotJob &j = g_shotJob;
+    const u64 t0 = osGetTime();
+    j.ok = false;
+    const bool top = j.top, bottom = j.bottom;
     const u32 W = top ? 400 : 320, H = top && bottom ? 480 : 240;
-    std::string ts = Timestamp();  // "2026-10-24 14:30:05"
-    std::string name;
-    for (char c : ts) name += (c == ' ') ? '_' : (c == ':' ? '-' : c);
-    name += ".bmp";
-    File f;
-    if (File::Open(f, std::string(kShotDir) + "/" + name, File::WRITE | File::CREATE | File::TRUNCATE) != File::SUCCESS)
-        return "";
-    std::string header = kt::bmpHeader(W, H);
-    bool ok = f.Write(header.data(), header.size()) == File::SUCCESS;
+    const std::string header = kt::bmpHeader(W, H);
     const u32 rowBytes = W * 3;  // 1200 or 960: already a multiple of 4
-    std::vector<u8> chunk(16 * rowBytes);
+    // the file made at its full size first: growing it write by write is what takes the SD card long
+    FSUSER_CreateFile(_sdmcArchive, fsMakePath(PATH_ASCII, j.path), 0, header.size() + (u64)rowBytes * H);
+    File f;
+    if (File::Open(f, j.path, File::WRITE | File::CREATE) != File::SUCCESS) return 0;
+    bool ok = f.Write(header.data(), header.size()) == File::SUCCESS;
+    const u32 kRows = 48;
+    u8 *chunk = (u8 *)malloc(kRows * rowBytes);
+    ok = ok && chunk;
     // A BMP stores its rows bottom first, and a picture's columns run bottom to top: file row r
     // is pixel r of every column (of the touchscreen first, when both are in it).
-    for (u32 r0 = 0; ok && r0 < H; r0 += 16) {
-        std::fill(chunk.begin(), chunk.end(), 0);
-        for (u32 r = r0; r < r0 + 16; r++) {
+    for (u32 r0 = 0; ok && r0 < H; r0 += kRows) {
+        memset(chunk, 0, kRows * rowBytes);
+        for (u32 r = r0; r < r0 + kRows; r++) {
             const bool fromBottom = bottom && (!top || r < 240);
             const Picture &p = Pic(fromBottom ? 1 : 0);
             const u32 k = r % 240, x0 = (fromBottom && top) ? 40 : 0;
-            for (u32 x = 0; x < p.w; x++) {
+            u8 *o = &chunk[(r - r0) * rowBytes + x0 * 3];
+            for (u32 x = 0; x < p.w; x++, o += 3) {
                 uint8_t rgb[3];
                 kt::picturePixelRGB(p.px + ((size_t)x * 240 + k) * p.bytes, p.bytes, rgb);
-                u8 *o = &chunk[(r - r0) * rowBytes + (x0 + x) * 3];
                 o[0] = rgb[2];  // B, G, R
                 o[1] = rgb[1];
                 o[2] = rgb[0];
             }
         }
-        ok = f.Write(chunk.data(), chunk.size()) == File::SUCCESS;
+        ok = f.Write(chunk, kRows * rowBytes) == File::SUCCESS;  // 240 and 480 are multiples of 48
     }
+    free(chunk);
     f.Close();
-    if (!ok) return "";
+    j.ok = ok;
+    j.ms = (u32)(osGetTime() - t0);
+    return 0;
+}
+
+// Waits for the screenshot being written (if any). Call before the pictures go.
+static void FinishScreenshot() {
+    if (!g_shotTask) return;
+    g_shotTask->Wait();
+    delete g_shotTask;
+    g_shotTask = nullptr;
+    if (!g_shotJob.ok) File::Remove(g_shotJob.path);  // a half-written file is no use to anyone
+    LogOcr(Utils::Format("screenshot %s in %lu ms", g_shotJob.ok ? "written" : "FAILED", (unsigned long)g_shotJob.ms));
+}
+
+static std::string SaveScreenshot() {
+    if (!g_lookupShot.empty()) return g_lookupShot;
+    const bool top = g_readTop && Pic(0).valid, bottom = g_readBottom && Pic(1).valid;
+    if (!top && !bottom) return "";
+    std::string ts = Timestamp();  // "2026-10-24 14:30:05"
+    std::string name;
+    for (char c : ts) name += (c == ' ') ? '_' : (c == ':' ? '-' : c);
+    name += ".bmp";
+    FinishScreenshot();
+    snprintf(g_shotJob.path, sizeof(g_shotJob.path), "%s/%s", kShotDir, name.c_str());
+    g_shotJob.top = top;
+    g_shotJob.bottom = bottom;
+    g_shotJob.ok = false;
+    g_shotJob.ms = 0;
+    g_shotTask = new Task(WriteShot, nullptr, System::IsNew3DS() ? Task::NewAppCore : Task::AppCore);
+    g_shotTask->Start();
     g_lookupShot = name;
     return name;
 }
@@ -533,6 +611,7 @@ static std::string SaveScreenshot() {
 // Saves a word to mined.tsv. `status` gets the line to show.
 static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string &query, const std::string &sentence,
                      std::string &status) {
+    const u64 t0 = osGetTime();
     std::string shot = SaveScreenshot();
     bool fresh = File::Exists(kLogPath) != 1;
     File f;
@@ -552,6 +631,7 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
     }
     int n = CountSaved();
     status = "Saved " + kt::cardExpressionFor(e, r.matchedKey) + Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s");
+    LogOcr(Utils::Format("saved a word in %lu ms", (unsigned long)(osGetTime() - t0)));
     return true;
 }
 
@@ -626,8 +706,9 @@ static void SaveSelected(kt::LookupView &v) {
     v.setStatus(status, ok ? kGood : kWarn);
 }
 
-// Runs the lookup screens until B / Close. Tap a character (text on the touchscreen); D-pad or
-// Circle Pad: words and rows; L/R: matches; C-stick: scroll; A save, X hide.
+// Runs the lookup screens until B / Close. Tap a character (text on the touchscreen); Circle Pad:
+// words and rows; D-pad up/down (or C-stick): scroll the entry; D-pad left/right or L/R: the other
+// matches; A save, X hide.
 static u64 g_viewOpenedAt = 0;  // when the read finished, for the log
 static void RunLookupView(kt::LookupView &v) {
     g_hide = 0;
@@ -640,9 +721,10 @@ static void RunLookupView(kt::LookupView &v) {
     bool touchWas = true;  // a touch held from before doesn't count
     u32 repeatKey = 0;
     u64 repeatAt = 0;
-    const u32 kLeft = Key::DPadLeft | Key::CPadLeft, kRight = Key::DPadRight | Key::CPadRight,
-              kUp = Key::DPadUp | Key::CPadUp, kDown = Key::DPadDown | Key::CPadDown,
-              kScroll = Key::CStickUp | Key::CStickDown, kMoves = kLeft | kRight | kUp | kDown | kScroll;
+    const u32 kScrollUp = Key::DPadUp | Key::CStickUp, kScrollDown = Key::DPadDown | Key::CStickDown,
+              kScroll = kScrollUp | kScrollDown,
+              kMoves = Key::CPadLeft | Key::CPadRight | Key::CPadUp | Key::CPadDown | kScroll;
+    u64 lastDraw = 0;
     while (true) {
         Controller::Update();
         u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
@@ -651,8 +733,8 @@ static void RunLookupView(kt::LookupView &v) {
         if (down & Key::B) break;
         if (down & Key::A) { SaveSelected(v); changed = true; }
         if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
-        if (down & Key::L) moved |= v.page(-1);
-        if (down & Key::R) moved |= v.page(1);
+        if (down & (Key::L | Key::DPadLeft)) moved |= v.page(-1);
+        if (down & (Key::R | Key::DPadRight)) moved |= v.page(1);
         // moving: on the press, then repeating while held
         u32 k = down & kMoves;
         if (k) {
@@ -666,12 +748,12 @@ static void RunLookupView(kt::LookupView &v) {
         } else {
             repeatKey = 0;
         }
-        if (k & kRight) moved |= v.moveWord(1);
-        else if (k & kLeft) moved |= v.moveWord(-1);
-        if (k & kDown) moved |= v.moveRow(1);
-        else if (k & kUp) moved |= v.moveRow(-1);
-        if (k & Key::CStickDown) changed |= v.scroll(1);
-        else if (k & Key::CStickUp) changed |= v.scroll(-1);
+        if (k & Key::CPadRight) moved |= v.moveWord(1);
+        else if (k & Key::CPadLeft) moved |= v.moveWord(-1);
+        if (k & Key::CPadDown) moved |= v.moveRow(1);
+        else if (k & Key::CPadUp) moved |= v.moveRow(-1);
+        if (k & kScrollDown) changed |= v.scroll(1);
+        else if (k & kScrollUp) changed |= v.scroll(-1);
         // touch: acts on the press
         bool touch = Touch::IsDown();
         if (touch && !touchWas) {
@@ -692,10 +774,17 @@ static void RunLookupView(kt::LookupView &v) {
         if (moved || changed) {
             drawSum += DrawLookup(v);
             draws++;
+            lastDraw = osGetTime();
             continue;  // straight back to the buttons
         }
-        // idle: look up the words the next press could go to, one per pass
-        if (!held && v.prefetch()) continue;
+        // idle: look up the words the next press could go to, one per pass, then which words of
+        // the text the player has already (green: drawn when done, or every half second)
+        const bool more = !held && v.prefetch();
+        if (v.takeRedraw()) {
+            if (more && osGetTime() - lastDraw < 500) v.setRedraw();
+            else { DrawLookup(v); lastDraw = osGetTime(); }
+        }
+        if (more) continue;
         Sleep(Milliseconds(10));
     }
     RestoreScreens();
@@ -806,8 +895,9 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes) {
     return grey;
 }
 
-// Reads the screens of `mode` -> text blocks (the top screen's first, each screen's longest
-// first). Call with the game paused and nothing drawn yet.
+// Reads the screens of `mode` -> text blocks (the top screen's first; each screen's text boxes
+// top to bottom, or, read whole, its longest text first). Call with the game paused and nothing
+// drawn yet.
 static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string &error) {
     u64 t0 = osGetTime();
     std::string name = FindModel();
@@ -843,9 +933,11 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
         }
         std::vector<std::string> paras;
         std::string err;
-        if (kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], paras, err, LocalProgress)) {
-            std::stable_sort(paras.begin(), paras.end(),  // the longest first (the dialogue, usually)
-                             [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
+        int used = -1;
+        if (kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], paras, err, LocalProgress, &used)) {
+            if (used < 0)  // the whole screen: the longest first (the dialogue, usually)
+                std::stable_sort(paras.begin(), paras.end(),
+                                 [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
             blocks.insert(blocks.end(), paras.begin(), paras.end());
             any = true;
         } else if (firstError.empty()) {
@@ -856,10 +948,13 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     }
     u64 t3 = osGetTime();
     if (!any) error = firstError.empty() ? "no text found" : firstError;
-    LogOcr(Utils::Format("%s: %s, model %lu ms, box %lu ms, read %lu ms (%u threads, %d MHz, %u fixed), heap free %lu KB, %s",
+    std::string first = any ? blocks[0] : error;
+    for (char &c : first) if (c == '\n') c = '/';
+    LogOcr(Utils::Format("%s: %s, model %lu ms, box %lu ms, read %lu ms (%u threads, %d MHz, %u fixed), heap free %lu KB, %u block%s, %s",
                          name.c_str(), kModeNames[mode], (unsigned long)(t1 - t0), (unsigned long)(t2 - t1),
                          (unsigned long)(t3 - t2), g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
-                         (unsigned long)(HeapFree() / 1024), any ? blocks[0].c_str() : error.c_str()));
+                         (unsigned long)(HeapFree() / 1024), (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s",
+                         first.c_str()));
     return any;
 }
 
@@ -868,6 +963,8 @@ static void OpenLookup(const std::vector<std::string> &blocks, bool textOnTop) {
     g_lastTextOnTop = textOnTop;
     kt::LookupView &v = View();
     v.setTextOnTop(textOnTop);
+    LoadKnown();
+    v.setKnown(&g_known);
     v.setText(blocks);
     RunLookupView(v);
     DropView();
@@ -877,6 +974,7 @@ static void OpenLookup(const std::vector<std::string> &blocks, bool textOnTop) {
 static void ReadAndLookUp(int mode) {
     Process::Pause();
     BoostCpu();
+    LoadKnown();  // kept for the session: before the pictures, which come and go
     g_readTop = mode != kReadBottom;
     g_readBottom = mode != kReadTop;
     g_lookupShot = "";
@@ -895,6 +993,7 @@ static void ReadAndLookUp(int mode) {
         g_viewOpenedAt = osGetTime();
         OpenLookup(blocks, g_readBottom && g_textOnTop);
     }
+    FinishScreenshot();
     RestoreScreens();
     DropPictures();
     g_lookupShot = "";
@@ -1020,10 +1119,90 @@ static void MakeCards() {
                     " word(s) that are cards now from Saved words? (Their screenshots stay on the SD card.)",
                 {"Remove them", "Keep them"});
     if (c != 0) return;
-    std::string out;
-    for (int i = 0; i < (int)lines.size(); i++)
-        if (std::find(done.begin(), done.end(), i) == done.end()) out += lines[i] + "\n";
+    std::string out, cards;
+    std::vector<std::string> cols;
+    for (int i = 0; i < (int)lines.size(); i++) {
+        if (std::find(done.begin(), done.end(), i) == done.end()) {
+            out += lines[i] + "\n";
+        } else {  // a card now: it stays green as one of the words with Anki cards
+            SplitTabs(lines[i], cols);
+            if (cols.size() > 2 && !cols[2].empty()) cards += cols[2] + "\n";
+        }
+    }
     WriteWholeFile(kLogPath, out);
+    if (!cards.empty()) {
+        File f;
+        if (File::Open(f, kKnownPath, File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
+            f.Write(cards.data(), cards.size());
+            f.Close();
+        }
+    }
+    g_knownLoaded = false;
+}
+
+// ---------------------------------------------------------------------------
+// Known words: the list of words with Anki cards, from tools/ocr_server.py on the PC
+// ---------------------------------------------------------------------------
+static const char *kKnownHelp =
+    "Words you have already show in green in lookups: the words you saved, and the words of your "
+    "Anki cards.\n\n"
+    "Get the words of your Anki cards from tools/ocr_server.py on your PC (same Wi-Fi, Anki open), "
+    "or run  mine.py known  on the PC: it puts the list on the SD card (SD:/3ds/kotoba3ds/known.txt).";
+
+static void KnownWordsMenu() {
+    LoadKnown();
+    while (true) {
+        std::string now = g_knownFromAnki ? Utils::Format("%u words with Anki cards.", (unsigned)g_knownFromAnki)
+                                          : std::string("No list of your Anki cards' words yet.");
+        int c = Ask("Known words", now, {"Get them from my PC", "Forget the list"});
+        if (c < 0) return;
+        if (c == 1) {
+            if (Ask("Known words", "Forget the words of your Anki cards? (Saved words stay green.)",
+                    {"Forget them", "Keep them"}) == 0) {
+                File::Remove(kKnownPath);
+                g_knownLoaded = false;
+                LoadKnown();
+            }
+            continue;
+        }
+        kt::MenuView m(Text());
+        m.setTitle("Known words");
+        m.setHelp(kKnownHelp);
+        m.setMessage("Looking for your PC...");
+        DrawMenu(m);
+        g_known.clear();  // room for the new list
+        g_knownLoaded = false;
+        std::string err, host, reply;
+        int port = kPcPort;
+        bool ok = kt::netStart(err) && ResolveServer(host, port, err);
+        if (ok) {
+            m.setMessage("Getting the words of your Anki cards from " + g_server + "...\n\n(A big collection takes a moment.)");
+            DrawMenu(m);
+            kt::MemReader none("");
+            ok = kt::netPost(host, port, "/known", {}, none, 1500, 60000, reply, err, kKnownMax + 64);
+        }
+        kt::netStop();
+        if (ok && reply.compare(0, 7, "KNOWN1\n") != 0) {
+            ok = false;
+            err = "the PC's ocr_server.py is too old: update it (it comes with this release)";
+        }
+        if (ok && !WriteWholeFile(kKnownPath, reply.substr(7))) {
+            ok = false;
+            err = "could not write " + std::string(kKnownPath);
+        }
+        reply.clear();
+        reply.shrink_to_fit();
+        LoadKnown();
+        if (!ok) {
+            Notice("Known words", "Couldn't get the list:\n" + err, kKnownHelp);
+            return;
+        }
+        Notice("Known words",
+               Utils::Format("%u words with Anki cards. They show in green in lookups.", (unsigned)g_knownFromAnki) +
+                   (g_known.truncated() ? "\n\n(The list is too long for the 3DS: only its first part is used.)" : ""),
+               kKnownHelp);
+        return;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1257,7 @@ static void SavedWords() {
         std::string out;
         for (const std::string &l : lines) out += l + "\n";
         WriteWholeFile(kLogPath, out);
+        g_knownLoaded = false;  // it may not be green any more
         armed = -1;
         m.setStatus("Deleted.", kGreyInk);
     }
@@ -1204,9 +1384,11 @@ static void HowToUse() {
          "Each of \"Read the top screen\", \"Read the touchscreen\" and \"Read both screens\" can have "
          "its own hotkey (Select, then the item). The top screen's is ZL + ZR at first."},
         {"Looking words up",
-         "The text shows on the touchscreen (or on the top screen: \"Touchscreen text shows on\"). "
-         "Tap a word, or move with the D-pad or Circle Pad; its entry shows on the other screen.\n\n"
-         "L / R: other meanings of the same spot. C-stick: scroll a long entry. B: back to the game."},
+         "The text shows on the touchscreen (or on the top screen: \"Touchscreen text shows on\"), "
+         "broken into lines as in the game. Tap a word, or move with the Circle Pad; its entry shows "
+         "on the other screen.\n\n"
+         "D-pad up / down (or C-stick): scroll a long entry. D-pad left / right (or L / R): other "
+         "meanings of the same spot. B: back to the game."},
         {"Seeing the game",
          "X (or Hide) uncovers the screen that was read: see-through (the text over the game) or "
          "hidden (the game alone), as set under \"Hide (X)\". X again brings the lookup back; so "
@@ -1216,6 +1398,9 @@ static void HowToUse() {
          "\"Saved words\" lists them; Y deletes one.\n\n"
          "\"Make Anki cards\" sends them to tools/ocr_server.py on your PC (same Wi-Fi, Anki open). "
          "tools/mine.py can also read them from the SD card."},
+        {"Words you know",
+         "Words you saved show in green, and so do the words of your Anki cards once \"Known words\" "
+         "has their list (from your PC, or mine.py known)."},
         {"Files",
          "The dictionary: SD:/3ds/kotoba3ds/dict.bin. The OCR model: SD:/3ds/kotoba3ds/ocr/ "
          "(from Kotoba3DS-ocr-model.zip). Both come with the Kotoba3DS release."},
@@ -1246,8 +1431,9 @@ static void Settings() {
     kt::MenuView m(Text());
     m.setTitle("Kotoba3DS");
     m.setButtons({" Choose", " Close"});
-    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kLast, kSaved, kCards, kPc, kHelp, kRows };
+    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kLast, kSaved, kCards, kKnown, kPc, kHelp, kRows };
     while (true) {
+        LoadKnown();
         const int saved = CountSaved();
         std::vector<kt::MenuItem> items(kRows);
         static const char *const kKeyHelp[kModes] = {
@@ -1264,7 +1450,7 @@ static void Settings() {
         items[kTextWhere].value = g_textOnTop ? "the top screen" : "the touchscreen";
         items[kTextWhere].help =
             "When the touchscreen was read, its text can show where it was (tap the words) or on the "
-            "top screen (move with the D-pad), so the touchscreen shows the entry.\n\nA,  or : change.";
+            "top screen (move with the Circle Pad), so the touchscreen shows the entry.\n\nA,  or : change.";
         items[kHide].label = "Hide (X)";
         items[kHide].value = kHideNames[g_hideMode];
         items[kHide].help =
@@ -1280,9 +1466,12 @@ static void Settings() {
         items[kCards].label = "Make Anki cards";
         items[kCards].dim = saved == 0;
         items[kCards].help = kCardsHelp;
+        items[kKnown].label = "Known words";
+        items[kKnown].value = Utils::Format("%u", (unsigned)g_knownFromAnki);
+        items[kKnown].help = std::string(kKnownHelp) + "\n\nA: get or forget the list.";
         items[kPc].label = "PC";
         items[kPc].value = g_server.empty() ? "find automatically" : g_server;
-        items[kPc].help = "The address of your PC running tools/ocr_server.py, for \"Make Anki cards\".";
+        items[kPc].help = "The address of your PC running tools/ocr_server.py, for \"Make Anki cards\" and \"Known words\".";
         items[kHelp].label = "How to use";
         items[kHelp].help = "The buttons, the settings and the files, in short.";
         m.setItems(items);
@@ -1315,6 +1504,8 @@ static void Settings() {
             SavedWords();
         } else if (row == kCards) {
             MakeCards();
+        } else if (row == kKnown) {
+            KnownWordsMenu();
         } else if (row == kPc) {
             ChoosePc();
         } else if (row == kHelp) {

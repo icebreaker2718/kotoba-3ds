@@ -118,6 +118,9 @@ A = f"http://127.0.0.1:{audio_srv.server_port}"
 
 # ---- fake AnkiConnect with Lapis ----
 calls, notes, media, flags = [], [], {}, {}
+other_notes = [{"fields": {"Front": "飲[の]み 物[もの]", "Back": "drink"}},   # an older deck's cards
+               {"fields": {"Front": "dog", "Back": "犬"}},
+               {"fields": {"Vocab": "<b>猫</b>&nbsp;", "Front": "x"}}]
 class Anki(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):
@@ -132,6 +135,11 @@ class Anki(BaseHTTPRequestHandler):
         elif a == "storeMediaFile": media[p["filename"]] = base64.b64decode(p["data"]); res = p["filename"]
         elif a == "findCards": res = [int(p["query"].split(":")[1]) * 10]
         elif a == "setSpecificValueOfCard": flags[p["card"]] = (p["keys"], p["newValues"], p.get("warning_check")); res = [True]
+        elif a == "findNotes": res = list(range(1, len(notes) + len(other_notes) + 1))
+        elif a == "notesInfo":
+            alln = notes + other_notes
+            res = [{"noteId": i, "fields": {k: {"value": v, "order": 0} for k, v in alln[i - 1]["fields"].items()}}
+                   for i in p["notes"]]
         elif a == "addNote":
             if set(p["note"]["fields"]) - set(LAPIS_FIELDS): err = "unknown field"
             elif any(n["fields"]["Expression"] == p["note"]["fields"]["Expression"] for n in notes):
@@ -237,6 +245,16 @@ cfg["dictionaries"] = {"folder": dfolder, "glossary": [], "pitch": [], "frequenc
 json.dump(cfg, open(cfgp, "w"))
 enr = mine.Enricher(mine.load_config(cfgp), log=lambda *a: None)
 check([len(enr.glossaries), len(enr.pitches), len(enr.freqs)] == [1, 1, 1], "dictionaries auto-detected by kind")
+
+# the words of the Anki cards, for the 3DS's green words
+check(mine.clean_known_word("<ruby>食<rt>た</rt></ruby>べる") == "食べる" and mine.clean_known_word("dog") == "",
+      "card fields cleaned to the word")
+words = mine.known_words(mine.load_config(cfgp), log=lambda *a: None)
+check("食べる" in words and "飲み物" in words and "dog" not in words, f"words of all notes: {words}")
+check("猫" in words and "x" not in words, "a note's word field found by its usual name (Vocab before Front)")
+check(words == sorted(words, key=lambda w: w.encode()), "sorted by bytes, as the 3DS searches")
+check(run("known") == 0 and open(os.path.join(kdir, "known.txt"), encoding="utf-8").read().splitlines()[1:] == words,
+      "mine.py known puts known.txt on the 3DS")
 
 # dry run with dictionaries missing doesn't crash
 cfg["dictionaries"] = {"glossary": ["nope.zip"], "pitch": [], "frequency": []}

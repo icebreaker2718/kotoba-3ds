@@ -22,7 +22,12 @@ class Anki(BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         a, p = req["action"], req.get("params", {})
         res, err = 1, None
-        if a == "addNote":
+        if a == "findNotes":
+            res = list(range(1, len(notes) + 1))
+        elif a == "notesInfo":
+            res = [{"noteId": i, "fields": {k: {"value": v, "order": 0} for k, v in notes[i - 1]["fields"].items()}}
+                   for i in p["notes"]]
+        elif a == "addNote":
             if any(n["fields"]["Expression"] == p["note"]["fields"]["Expression"] for n in notes):
                 err = "cannot create note because it is a duplicate"
             else:
@@ -66,6 +71,10 @@ import urllib.request
 again = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/mine", data=(line + "\n").encode()), timeout=5).read().decode()
 print("sending the same word again:", again.strip().replace(chr(10), " "))
 card_ok = card_ok and "already" in again
+# Select > Known words: the words of the Anki cards
+known = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/known", data=b""), timeout=5).read().decode()
+print("words of the Anki cards:", known.splitlines()[2:])
+card_ok = card_ok and known.startswith("KNOWN1\n") and "宝箱" in known.splitlines()
 # pick_crop.py's Test button: X-Crop overrides the configured box
 import urllib.request
 req = urllib.request.Request(f"http://127.0.0.1:{port}/ocr", data=open(bmp, "rb").read(),

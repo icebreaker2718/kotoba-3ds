@@ -91,7 +91,8 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
 1. A line has a word you don't know → press **ZL + ZR**. The game pauses and the 3DS reads the
    top screen ("Reading the screen…", under a second). Text on the touchscreen: set a hotkey for
    *Read the touchscreen* (or *Read both screens*) in the Select menu.
-2. The text appears in large type on the **touchscreen**. **Tap a word**: its entry shows on the
+2. The text appears in large type on the **touchscreen**, broken into lines where the game broke
+   them (the type gets a little smaller when the game's lines are long). **Tap a word**: its entry shows on the
    top screen over the dimmed game (the layout follows
    [Rubi for Vita](https://github.com/bee-san/Rubi_for_vita)'s overlay), the word in yellow, its
    reading in blue, how common it is (its [JPDB](https://jpdb.io) frequency rank, e.g. #1,234), any
@@ -101,22 +102,24 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    | Control | Does |
    |---|---|
    | Tap a character | look up the word starting there |
-   | D-pad or Circle Pad ◀ ▶ | previous / next word (held: keeps going) |
-   | D-pad or Circle Pad ▲ ▼ | the row above / below |
-   | L / R | the other matches at that spot (homographs, most common first, then shorter words), shown as 1/3 |
-   | C-stick (New 3DS / 2DS) | scroll a long definition |
+   | Circle Pad ◀ ▶ | previous / next word (held: keeps going) |
+   | Circle Pad ▲ ▼ | the row above / below |
+   | D-pad ▲ ▼ (or C-stick) | scroll a long definition |
+   | D-pad ◀ ▶ (or L / R) | the other matches at that spot (homographs, most common first, then shorter words), shown as 1/3 |
    | **A** (or the Save button) | save the word |
    | X (or Hide) | uncover the screen that was read: see-through or hidden (*Hide (X)* in the menu); again to come back |
    | **B** (or Close) | close; the game continues |
 
-   If the screen had several blocks of text (a menu and a dialogue box), they are all there, the
-   longest first, with a line between them (both screens: the top screen's first). When the
+   If the screen had several text boxes (two speech bubbles, a menu and a dialogue box), they are
+   all there, top to bottom, with a line between them (both screens: the top screen's first). When the
    touchscreen was read, its text can also go on the top screen and the entry on the touchscreen
    (*Touchscreen text shows on*).
 3. **Save** writes the word to `mined.tsv` with the sentence and a screenshot of the screen(s)
    that were read (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green.
+4. **Words you know are green**: the words you saved before, and the words of your Anki cards
+   once *Known words* has their list (below), wherever they are in the text.
 
-The **Select** menu (drawn like the lookup: tap, or D-pad and A) has:
+The **Select** menu (drawn like the lookup: tap, or D-pad / Circle Pad and A) has:
 
 | Item | Does |
 |---|---|
@@ -126,11 +129,12 @@ The **Select** menu (drawn like the lookup: tap, or D-pad and A) has:
 | *Last lookup* | reopen the text of your last lookup |
 | *Saved words* | review them with their entry; Y deletes one |
 | *Make Anki cards* | send the saved words to your PC (below) |
+| *Known words* | get the words of your Anki cards from your PC, so they show in green (below) |
 | *PC* | find your PC, or type its address |
 | *How to use* | the controls in short |
 
-**How it reads the screen.** The text box is found by its flat colour (so a box that moves
-around is fine), its lines are read, furigana and stray marks (the "next" arrow) are dropped.
+**How it reads the screen.** The text boxes are found by their flat colour (so a box that moves
+around is fine; every box with Japanese in it is read), their lines are read, furigana and stray marks (the "next" arrow) are dropped.
 With no box on screen it reads the whole screen. Where the recognizer was unsure of a kanji, the
 dictionary decides: a guess that makes a word replaces one that doesn't (造跡 → 遺跡). The OCR is VOCR from
 [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), the recognizer
@@ -151,6 +155,15 @@ cards** in the Select menu: every saved word is sent and becomes a Lapis card, w
 definition, audio, pitch and picture (words that are cards already are skipped), and you can
 then clear them from the list. The plugin finds your PC automatically; you can also type its
 address under **PC**. `mine.py` (below) still works too, over ftpd or from the SD card.
+
+**Words you have cards for, in green.** With `ocr_server.py` running (Anki open), choose
+**Known words** → *Get them from my PC*: the words of all your Anki notes go to the 3DS
+(`SD:/3ds/kotoba3ds/known.txt`), and from then on they show in green in lookups, like the words
+you saved. `py -3.12 tools\mine.py known` does the same over ftpd or an SD card reader. The word
+is taken from each note's `Expression` field (or `Word`, `Vocab`, `Vocabulary`, `Term`, `Kanji`,
+`Japanese`, `Front`: the first one the note has), furigana and HTML removed; to choose, set
+`known.query` (an Anki search, e.g. `"deck:Mining Deck"`) and `known.fields` in `config.json`.
+Words that *Make Anki cards* turns into cards are added to the list as they go.
 
 ## 4. Make the Anki cards on your PC
 
@@ -189,7 +202,8 @@ Cards go to your deck **Mining Deck** with the **Lapis** note type by default.
 ### Each time
 1. Close the game, open **ftpd** on the 3DS, and keep Anki open on the PC.
 2. Run `python tools/mine.py`. Add `--dry-run` to preview, `--no-ocr` to skip OCR, or
-   `--clear` to remove imported words from the 3DS log afterwards.
+   `--clear` to remove imported words from the 3DS log afterwards. `python tools/mine.py known`
+   puts the words of your Anki cards on the 3DS (green in lookups).
 
 The script remembers what it imported (`tools/imported.json`), so running it twice never
 makes duplicate cards.

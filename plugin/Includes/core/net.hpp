@@ -43,10 +43,12 @@ bool netDiscover(int port, int timeoutMs, std::string &hostOut, int &portOut, st
 // Quick reachability check: GET /ping.
 bool netPing(const std::string &host, int port, int timeoutMs, std::string &error);
 
-// POSTs `body` (read from `src`, streamed) to http://host:port/path and returns the body.
+// POSTs `body` (read from `src`, streamed) to http://host:port/path and returns the body (at
+// most maxReply bytes).
 bool netPost(const std::string &host, int port, const std::string &path,
              const std::vector<std::string> &headers, Reader &src,
-             int connectTimeoutMs, int replyTimeoutMs, std::string &responseBody, std::string &error);
+             int connectTimeoutMs, int replyTimeoutMs, std::string &responseBody, std::string &error,
+             size_t maxReply = 256 * 1024);
 
 // Parses the server reply: "KOTOBA1\n<sentence>\n<chunk>\t<chunk>...\n".
 bool parseOcrReply(const std::string &body, std::string &sentence, std::vector<std::string> &chunks,

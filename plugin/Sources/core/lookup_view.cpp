@@ -21,8 +21,9 @@ static const Rgb kBg(15, 18, 22), kText(237, 237, 237), kDim(138, 144, 153), kWo
 
 // touchscreen
 // kTextSize is the line height the font's 30-px cell is scaled to: 27 makes full-width characters
-// about 22 px wide, 13 to a row (big enough to tap with a finger)
-static const int kMargin = 12, kTextSize = 27, kRowH = 34, kTextTop = 8, kTextBottom = 182;
+// about 22 px wide, 13 to a row (big enough to tap with a finger). Text whose game lines are
+// longer is shrunk so they fit, down to kMinTextSize (about 18 to a row); rows are 7 px taller.
+static const int kMargin = 12, kTextSize = 27, kMinTextSize = 20, kRowGap = 7, kTextTop = 8, kTextBottom = 182;
 static const int kStatusY = 186, kStatusSize = 14, kButtonY = 206, kButtonH = 30;
 static const int kBlockGap = 12;
 // top screen
@@ -66,6 +67,31 @@ void LookupView::layout() {
     cells_.clear();
     rows_.clear();
     const int maxW = textW() - 2 * kMargin;
+    // the biggest text size that fits each of the game's lines on one row (lines too long even
+    // at the smallest size don't count: they carry on in the next row, indented, at any size)
+    struct Span { size_t block, from, to; };
+    std::vector<Span> lines;
+    auto width = [&](const Span &l, int size) {
+        int x = 0;
+        for (size_t i = l.from; i < l.to;) x += tr_.advance(utf8Next(blocks_[l.block], i), size);
+        return x;
+    };
+    for (size_t b = 0; b < blocks_.size(); b++) {
+        size_t from = 0;
+        for (size_t k = 0; k <= breaks_[b].size(); k++) {
+            Span l = {b, from, k < breaks_[b].size() ? breaks_[b][k] : blocks_[b].size()};
+            if (width(l, kMinTextSize) <= maxW) lines.push_back(l);
+            from = l.to;
+        }
+    }
+    textSize_ = kTextSize;
+    for (bool fits = false; !fits && textSize_ > kMinTextSize;) {
+        fits = true;
+        for (const Span &l : lines)
+            if (width(l, textSize_) > maxW) { fits = false; textSize_--; break; }
+    }
+    rowH_ = textSize_ + kRowGap;
+    const int indent = textSize_ / 2;  // rows that carry on a game line too long for one
     int y = 0;
     for (size_t b = 0; b < blocks_.size(); b++) {
         if (b > 0) y += kBlockGap;
@@ -75,13 +101,25 @@ void LookupView::layout() {
         row.y = y;
         row.first = (int)cells_.size();
         int x = 0;
+        size_t k = 0;  // the next game line break
         for (size_t i = 0; i < t.size();) {
             Cell c;
             c.block = (int)b;
             c.byte = i;
             c.cp = utf8Next(t, i);
             c.len = i - c.byte;
-            c.w = tr_.advance(c.cp, kTextSize);
+            c.w = tr_.advance(c.cp, textSize_);
+            if (k < breaks_[b].size() && breaks_[b][k] == c.byte) {  // the game's next line: a new row
+                k++;
+                if (x > 0) {
+                    row.end = (int)cells_.size();
+                    rows_.push_back(row);
+                    y += rowH_;
+                    row.y = y;
+                    row.first = (int)cells_.size();
+                    x = 0;
+                }
+            }
             // a new row when this one is full (closing punctuation may hang into the margin)
             if (x > 0 && x + c.w > maxW && !(noRowStart(c.cp) && x + c.w <= maxW + kMargin)) {
                 // punctuation that can't hang takes the character before it along to the new row
@@ -90,12 +128,12 @@ void LookupView::layout() {
                     cells_.pop_back();
                     row.end = (int)cells_.size();
                     rows_.push_back(row);
-                    y += kRowH;
+                    y += rowH_;
                     row.y = y;
                     row.first = (int)cells_.size();
-                    prev.x = kMargin;
+                    prev.x = kMargin + indent;
                     prev.row = (int)rows_.size();
-                    x = prev.w;
+                    x = indent + prev.w;
                     cells_.push_back(prev);
                     c.x = kMargin + x;
                     c.row = (int)rows_.size();
@@ -105,10 +143,10 @@ void LookupView::layout() {
                 }
                 row.end = (int)cells_.size();
                 rows_.push_back(row);
-                y += kRowH;
+                y += rowH_;
                 row.y = y;
                 row.first = (int)cells_.size();
-                x = 0;
+                x = indent;  // a game line too long for a row goes on, indented
             }
             c.x = kMargin + x;
             c.row = (int)rows_.size();
@@ -117,13 +155,31 @@ void LookupView::layout() {
         }
         row.end = (int)cells_.size();
         rows_.push_back(row);
-        y += kRowH;
+        y += rowH_;
     }
     contentH_ = y;
 }
 
 void LookupView::setText(const std::vector<std::string> &blocks) {
-    blocks_ = blocks;
+    // the game's line breaks out of the text, remembered as where rows start
+    blocks_.clear();
+    breaks_.clear();
+    for (const std::string &raw : blocks) {
+        std::string t;
+        std::vector<size_t> br;
+        for (size_t i = 0; i < raw.size(); i++) {
+            if (raw[i] != '\n') { t += raw[i]; continue; }
+            if (t.empty() || i + 1 >= raw.size() || raw[i + 1] == '\n') continue;
+            // English words broken across lines get their space back
+            unsigned char before = (unsigned char)t.back(), after = (unsigned char)raw[i + 1];
+            if (before < 0x80 && after < 0x80 && before != ' ' && after != ' ') t += ' ';
+            br.push_back(t.size());
+        }
+        blocks_.push_back(t);
+        breaks_.push_back(br);
+    }
+    marks_.assign(blocks_.size(), {});
+    redraw_ = false;
     saved_.clear();
     status_.clear();
     scrollY_ = 0;
@@ -158,6 +214,19 @@ const std::vector<size_t> &LookupView::stops(size_t b) const {
             size_t i = 0;
             if (isWordChar(utf8Next(w, i))) stops_[b].push_back(at);
             at += w.size();
+        }
+        // known words are looked for at every character, not only where the split starts words:
+        // 天気 in いい天気, the second ケーキ in ケーキとケーキ
+        const std::string &t = blocks_[b];
+        size_t k = 0;
+        for (size_t i = 0; i < t.size();) {
+            Mark m;
+            m.byte = i;
+            bool word = isWordChar(utf8Next(t, i));
+            while (k < stops_[b].size() && stops_[b][k] < m.byte) k++;
+            m.stop = k < stops_[b].size() && stops_[b][k] == m.byte;
+            m.first = i - m.byte;
+            if (word) marks_[b].push_back(m);
         }
     }
     return stops_[b];
@@ -333,7 +402,7 @@ void LookupView::keepVisible() {
     int lastRow = cells_[c].row;
     for (size_t i = c; i < cells_.size() && cells_[i].block == selBlock_ && cells_[i].byte < selByte_ + selLen_; i++)
         lastRow = cells_[i].row;
-    int bottom = rows_[lastRow].y + kRowH;
+    int bottom = rows_[lastRow].y + rowH_;
     if (bottom - scrollY_ > areaH) scrollY_ = bottom - areaH;
     if (top < scrollY_) scrollY_ = top;
     if (scrollY_ < 0) scrollY_ = 0;
@@ -343,7 +412,7 @@ int LookupView::charAt(int x, int y) const {
     if (textOnTop_ || y < kTextTop || y >= textBottom()) return -1;
     int cy = y - kTextTop + scrollY_;
     for (const Row &r : rows_) {
-        if (cy < r.y || cy >= r.y + kRowH) continue;
+        if (cy < r.y || cy >= r.y + rowH_) continue;
         int best = -1, bestD = 1 << 30;
         for (int i = r.first; i < r.end; i++) {
             const Cell &c = cells_[i];
@@ -456,12 +525,65 @@ bool LookupView::prefetch() {
     }
     // then a few words further on
     int ahead = 0;
-    for (size_t bl = selBlock_; bl < blocks_.size(); bl++)
+    for (size_t bl = selBlock_; bl < blocks_.size() && ahead <= 6; bl++)
         for (size_t st : stops(bl)) {
             if (bl == (size_t)selBlock_ && st <= selByte_) continue;
-            if (++ahead > 6) return false;
+            if (++ahead > 6) break;
             if (!isCached((int)bl, st)) { lookup((int)bl, st); return true; }
         }
+    // then which words the player has already
+    return checkKnown();
+}
+
+// The spellings a word could be on a card under (the kanji form, the form on the screen, the
+// dictionary form it came from), for the longest match at a spot; len = its length.
+void LookupView::formsOf(const SearchOutput &so, std::vector<std::string> &forms, size_t &len) {
+    forms.clear();
+    len = 0;
+    for (const Result &r : so.results)
+        if (!r.prefixOnly) len = std::max(len, r.surface.size());
+    if (!len) return;
+    int n = 0;
+    for (const Result &r : so.results) {
+        if (r.prefixOnly || r.surface.size() != len || ++n > 4) continue;
+        Entry e;
+        if (!dict_.entry(r.entryId, e)) continue;
+        for (const std::string &f : {cardExpressionFor(e, r.matchedKey), expressionFor(e, r.matchedKey), r.matchedKey})
+            if (!f.empty() && std::find(forms.begin(), forms.end(), f) == forms.end()) forms.push_back(f);
+    }
+}
+
+// Checks one more word stop against the known words. False when all are checked.
+bool LookupView::checkKnown() {
+    if (!known_) return false;
+    for (size_t b = 0; b < blocks_.size(); b++) {
+        if (!stopsReady_[b]) { stops(b); return true; }
+        for (Mark &m : marks_[b]) {
+            if (m.state) continue;
+            SearchOutput so;
+            bool cached = false;
+            for (const Cached &c : cache_)
+                if (c.block == (int)b && c.byte == m.byte) { so = c.so; cached = true; break; }
+            if (!cached) {  // looked up without taking a place in the cache the moves use
+                so = scanAt(dict_, blocks_[b], m.byte);
+                trimResults(so);
+            }
+            formsOf(so, m.forms, m.len);
+            m.state = 1;
+            // a one-character word only where the split starts a word (not 気 inside 天気)
+            if (m.stop || m.len > m.first)
+                for (const std::string &f : m.forms)
+                    if (known_->has(f)) { m.state = 2; redraw_ = true; break; }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LookupView::isKnown(const Cell &c) const {
+    if ((size_t)c.block >= marks_.size()) return false;
+    for (const Mark &m : marks_[c.block])
+        if (m.state == 2 && c.byte >= m.byte && c.byte < m.byte + m.len) return true;
     return false;
 }
 
@@ -494,7 +616,20 @@ bool LookupView::scroll(int lines) {
 }
 
 void LookupView::markSaved() {
-    if (selBlock_ >= 0) saved_.push_back({selBlock_, selByte_, selLen_});
+    if (selBlock_ < 0) return;
+    saved_.push_back({selBlock_, selByte_, selLen_});
+    if (!known_) return;
+    // the word is known now: wherever else it is in the text, it turns green too
+    std::vector<std::string> forms;
+    size_t len;
+    formsOf(so_, forms, len);
+    if (forms.empty()) return;
+    known_->add(forms[0]);
+    for (std::vector<Mark> &ms : marks_)
+        for (Mark &m : ms)
+            if (m.state == 1 && (m.stop || m.len > m.first))
+                for (const std::string &f : m.forms)
+                    if (std::find(forms.begin(), forms.end(), f) != forms.end()) { m.state = 2; break; }
 }
 
 bool LookupView::isSaved(const Cell &c) const {
@@ -536,18 +671,18 @@ void LookupView::drawTextPanel(Canvas &c, Panel p) {
         }
     for (const Row &r : rows_) {
         int y = r.y - scrollY_;
-        if (y < 0 || y + kRowH > areaH) continue;  // only whole rows
+        if (y < 0 || y + rowH_ > areaH) continue;  // only whole rows
         y += kTextTop;
         for (int i = r.first; i < r.end; i++) {
             const Cell &cl = cells_[i];
             bool sel = cl.block == selBlock_ && cl.byte >= selByte_ && cl.byte < selByte_ + selLen_;
-            if (sel) c.fill(cl.x - 1, y + 1, cl.w + 2, kRowH - 2, kWordBg);
+            if (sel) c.fill(cl.x - 1, y + 1, cl.w + 2, rowH_ - 2, kWordBg);
         }
         for (int i = r.first; i < r.end; i++) {
             const Cell &cl = cells_[i];
             bool sel = cl.block == selBlock_ && cl.byte >= selByte_ && cl.byte < selByte_ + selLen_;
-            Rgb col = sel ? kWord : (isSaved(cl) ? kSavedC : kText);
-            tr_.drawChar(c, cl.x, y + (kRowH - kTextSize) / 2, cl.cp, kTextSize, col);
+            Rgb col = sel ? kWord : (isSaved(cl) || isKnown(cl) ? kSavedC : kText);
+            tr_.drawChar(c, cl.x, y + (rowH_ - textSize_) / 2, cl.cp, textSize_, col);
         }
     }
     // more text above / below
@@ -558,7 +693,7 @@ void LookupView::drawTextPanel(Canvas &c, Panel p) {
         std::vector<std::string> s = tr_.wrap(status_, kStatusSize, W - 2 * kMargin);
         if (!s.empty()) tr_.draw(c, kMargin, statusY(), s[0], kStatusSize, statusColor_);
     } else {
-        std::string hint = "\uE07B\uE07C\uE049 words  \uE052\uE053 meanings  C-stick scroll";
+        std::string hint = "\uE049 words  \uE079\uE07A scroll  \uE07B\uE07C\uE052\uE053 meanings";
         int w = tr_.width(hint, 13);
         tr_.draw(c, (W - w) / 2, statusY() + 1, hint, 13, kDim);
     }

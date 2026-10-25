@@ -277,6 +277,8 @@ def make_handler(reader, log, maker=None):
                 return self._post_shot()
             if self.path.startswith("/mine"):
                 return self._post_mine()
+            if self.path.startswith("/known"):
+                return self._post_known()
             if not self.path.startswith("/ocr"):
                 return self._send(404, "ERR\nnot found\n")
             body = self._body()
@@ -312,6 +314,15 @@ def make_handler(reader, log, maker=None):
                 return self._send(400, f"ERR\nnot an image: {e}\n")
             reader.remember(self.headers.get("X-Title-Id", "").upper(), self.headers.get("X-Shot-Name", ""), img)
             self._send(200, "OK\n")
+
+        def _post_known(self):
+            import mine
+            try:
+                words = mine.known_words(reader.cfg, log=lambda m: None)
+            except mine.AnkiError as e:
+                return self._send(503, f"ERR\n{e}\n")
+            log(f"[{time.strftime('%H:%M:%S')}] sent the words of your Anki cards: {len(words)}")
+            self._send(200, "KNOWN1\n" + mine.known_text(words))
 
         def _post_mine(self):
             import mine
@@ -400,7 +411,8 @@ def serve(cfg, port=PORT, engine="manga-ocr", preload=True, log=print, ready=Non
     log("Address for the plugin: " + (", ".join(f"{ip}:{port}" for ip in ips) or f"<this PC's IP>:{port}"))
     log("(If Windows asks, allow Python on private networks.)  Ctrl+C to stop.")
     if maker:
-        log("On the 3DS: Select > Make Anki cards sends your saved words here (keep Anki open).")
+        log("On the 3DS: Select > Make Anki cards sends your saved words here (keep Anki open);")
+        log("Select > Known words gets the words of your Anki cards (green in lookups).")
     if ready:
         ready.set()
     try:
