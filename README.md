@@ -3,6 +3,8 @@
 An in-game Japanese dictionary for a modded (New) 3DS / 2DS, plus a PC script that turns the
 words you save into Anki cards with the screenshot and the sentence.
 
+Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-vn-ocr) model she built. Without it this project would not be possible!
+
 **On the 3DS** (Luma3DS plugin): press **ZL + ZR** in any game when a line has a word you
 don't know. The game pauses, the 3DS **reads the screen itself** (on-device OCR, no PC or
 internet) and shows the text on the touchscreen: tap a word and its full entry appears on the top
@@ -18,6 +20,7 @@ frequency and word audio.
 The on-console dictionary is built from [Jitendex](https://jitendex.org) (or JMdict, or any
 Yomitan dictionary). It lives on the SD card and is searched on disk, so the plugin needs only
 about 100 KB of RAM.
+
 
 ---
 
