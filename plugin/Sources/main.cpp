@@ -1796,17 +1796,6 @@ static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's o
 }
 
 static void Watcher(void) {
-    {   // for troubleshooting sleep: what the lid and the system's sleep flag do, as the game plays
-        static int lastLid = -1, lastSleep = -1;
-        const int lid = LidClosed() ? 1 : 0, sleep = SystemImpl::WantsToSleep() ? 1 : 0;
-        if (lid != lastLid || sleep != lastSleep) {
-            if (lastLid >= 0)
-                LogOcr(Utils::Format("power %llu: lid %s, sleep flag %d", (unsigned long long)osGetTime(),
-                                     lid ? "closed" : "open", sleep));
-            lastLid = lid;
-            lastSleep = sleep;
-        }
-    }
     if (SleepRequested()) return;  // the console is going to sleep: not now
     if (g_shotDeferred) {
         g_shotDeferred = false;
