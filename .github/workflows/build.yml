@@ -179,3 +179,25 @@ jobs:
           **Kotoba3DS-2MiB-test.3gx** is a test copy for games that crash at start with the plugin: it asks Luma for 2 MiB of the game's memory instead of 5. Reading the screen doesn't fit in 2 MiB, so it only shows whether the game starts (and its start-up line in ocr_log.txt).
 
           See the README for the PC tools (OCR server, Anki cards)."
+
+  test-release:
+    # The test branch's plugin as a pre-release ("test"), for trying on the console before main.
+    needs: [plugin]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/test'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Kotoba3DS-plugin
+          path: out
+      - name: Publish the "test" pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete test-build --yes --cleanup-tag 2>/dev/null || true
+          gh release create test-build out/Kotoba3DS.3gx --target "$GITHUB_SHA" --prerelease \
+            --title "Kotoba3DS test build" \
+            --notes "From the test branch (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)): changes not yet confirmed on a console. Uses the latest release's dict.bin and OCR model."
