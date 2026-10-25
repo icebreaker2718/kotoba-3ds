@@ -472,15 +472,30 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
                          std::max(a.centerY - a.height / 2, b.centerY - b.height / 2);
         return ix > 0.5f * std::min(a.width, b.width) && iy > 0.5f * std::min(a.height, b.height);
     };
+    // A line mostly inside another box that box read without finding it is a cut of something
+    // that box left out on purpose: the furigana over its first row (「ほんき」), seen by a box
+    // that clips the bubble's edge.
+    auto insideBox = [w, h](const TextLine &l, const TextBox &b) {  // lines are in fractions of the screen
+        const float bx0 = (float)b.x / w, bx1 = (float)(b.x + b.w) / w, by0 = (float)b.y / h, by1 = (float)(b.y + b.h) / h;
+        const float ix = std::min(l.centerX + l.width / 2, bx1) - std::max(l.centerX - l.width / 2, bx0);
+        const float iy = std::min(l.centerY + l.height / 2, by1) - std::max(l.centerY - l.height / 2, by0);
+        return ix > 0.5f * l.width && iy > 0.5f * l.height;
+    };
+    std::vector<std::vector<TextLine>> read0;  // as read, before any line is given away
+    for (const Read &rd : reads) read0.push_back(rd.lines);
     for (size_t r = 0; r < reads.size(); r++)
         for (size_t q = 0; q < reads.size(); q++) {
             if (q == r) continue;
             std::vector<TextLine> &mine = reads[r].lines;
-            const std::vector<TextLine> &theirs = reads[q].lines;
+            const std::vector<TextLine> &theirs = read0[q];
             mine.erase(std::remove_if(mine.begin(), mine.end(), [&](const TextLine &l) {
-                           for (const TextLine &o : theirs)  // theirs is wider (on a tie: the earlier box keeps it)
-                               if (overlap(l, o) && (o.width > l.width || (o.width == l.width && q < r))) return true;
-                           return false;
+                           bool seen = false;
+                           for (const TextLine &o : theirs) {
+                               if (!overlap(l, o)) continue;
+                               seen = true;  // theirs is wider (on a tie: the earlier box keeps it)
+                               if (o.width > l.width || (o.width == l.width && q < r)) return true;
+                           }
+                           return !seen && !theirs.empty() && insideBox(l, *reads[q].box);
                        }), mine.end());
         }
     for (const Read &rd : reads) {
