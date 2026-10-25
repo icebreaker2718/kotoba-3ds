@@ -36,6 +36,13 @@ extern "C" u32 __ctru_heap_size;  // libctru: the plugin's heap (what Luma gave 
 
 namespace CTRPluginFramework {
 extern FS_Archive _sdmcArchive;  // CTRPF's SD card archive (File uses it)
+// CTRPF's own record of the system's sleep request (the lid closed), as its menus use it: in
+// libctrpf, though its header isn't installed with it.
+class SystemImpl {
+public:
+    static bool WantsToSleep(void);
+    static void ReadyToSleep(void);
+};
 
 // ---------------------------------------------------------------------------
 // Paths & settings
@@ -371,6 +378,24 @@ struct MenuEvent {
 
 // Shows the screen and waits: A or a tapped row chooses, a tapped button, or B / Left / Right /
 // any of `keys`. Up / down (held: repeating) move the highlight.
+// The lid was closed (the system wants to sleep): the game must go on to answer it, or the
+// console hangs with the screens off. Every screen of the plugin closes, as if B were pressed.
+// The paused game can't answer the system's sleep query (that takes its main thread, which the
+// pause holds), so the lid itself is watched: closed, and the plugin lets the game go on at once.
+static bool LidClosed() {
+    static bool ptmOk = R_SUCCEEDED(ptmuInit());
+    static u64 lastAt = 0;
+    static bool closed = false;
+    const u64 now = osGetTime();
+    if (ptmOk && now - lastAt >= 30) {  // a quick question to the power service, ~30 times a second at most
+        lastAt = now;
+        u8 shell = 1;
+        closed = R_SUCCEEDED(PTMU_GetShellState(&shell)) && shell == 0;
+    }
+    return closed;
+}
+static bool SleepRequested() { return LidClosed() || SystemImpl::WantsToSleep(); }
+
 static MenuEvent MenuInput(kt::MenuView &m, u32 keys = 0) {
     DrawMenu(m);
     bool touchWas = true;  // a touch held from before doesn't count
@@ -382,6 +407,10 @@ static MenuEvent MenuInput(kt::MenuView &m, u32 keys = 0) {
         u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
         u64 now = osGetTime();
         MenuEvent ev;
+        if (SleepRequested()) {
+            ev.key = Key::B;
+            return ev;
+        }
         if (down & Key::A) {
             if (m.selected() >= 0) {
                 ev.type = MenuEvent::kChoose;
@@ -618,7 +647,7 @@ static std::string *g_lookupShotPtr = nullptr;
 
 struct ShotJob {
     char path[96];
-    bool top, bottom, ok;
+    bool top, bottom, ok, started;
     u32 ms, bytes;
     Picture pic[2];  // handed over by the lookup: freed when written
     File *file;
@@ -667,7 +696,14 @@ static void WriteShot(void *) {
 }
 
 // Waits for the screenshot being written (if any).
+static bool g_shotDeferred = false;  // a screenshot to write once the console is awake again
+static void StartScreenshotThread();
+
 static void FinishScreenshot() {
+    if (g_shotDeferred) {  // still waiting for the console to wake: written now
+        g_shotDeferred = false;
+        StartScreenshotThread();
+    }
     if (!g_shotThread) return;
     const u64 t0 = osGetTime();
     threadJoin(g_shotThread, U64_MAX);
@@ -701,6 +737,7 @@ static void WriteScreenshotLater() {
     }
     FinishScreenshot();
     ShotJob &j = g_shotJob;
+    j.started = false;
     snprintf(j.path, sizeof(j.path), "%s/%s", kShotDir, g_lookupShot.c_str());
     j.top = top;
     j.bottom = bottom;
@@ -713,6 +750,15 @@ static void WriteScreenshotLater() {
     }
     // its own thread with room on its stack (CTRPF's tasks have 4 KB), below the game's priority so
     // the game goes on as usual; on the game's core: it mostly waits for the SD card
+    if (SleepRequested()) {  // the lid is closing: not now (the SD card and the system are busy with that)
+        g_shotDeferred = true;
+        return;
+    }
+    StartScreenshotThread();
+}
+
+static void StartScreenshotThread() {
+    g_shotJob.started = true;
     g_shotThread = threadCreate(WriteShot, nullptr, 32 * 1024, 0x3F, -2, false);
     if (!g_shotThread) WriteShot(nullptr);  // no thread: now, then
 }
@@ -885,7 +931,7 @@ static void RunLookupView(kt::LookupView &v) {
         u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
         bool changed = false, moved = false;
         u64 t0 = osGetTime();
-        if (down & Key::B) break;
+        if ((down & Key::B) || SleepRequested()) break;
         if (down & Key::A) { SaveOrUndo(v); changed = true; }
         if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
         if (down & Key::Y) { MarkKnown(v); changed = true; }
@@ -1140,13 +1186,30 @@ static void OpenLookup(const std::vector<std::string> &blocks, bool textOnTop) {
 // and skips the line you were reading.
 static void WaitForRelease() {
     const u64 until = osGetTime() + 3000;  // a button held on purpose doesn't keep the game paused
-    while (osGetTime() < until) {
+    while (osGetTime() < until && !SleepRequested()) {
         Controller::Update();
         if (!Controller::GetKeysDown(true) && !Touch::IsDown()) break;
         Sleep(Milliseconds(10));
     }
+    if (SleepRequested()) return;
     Sleep(Milliseconds(80));
     Controller::Update();  // the game's next reading is "nothing pressed"
+}
+
+// The game goes on; if the lid was closed meanwhile, the system's sleep goes ahead now.
+static void ResumeGame() {
+    const bool lid = SleepRequested();
+    Process::Play();
+    int extra = 0;
+    while (Process::IsPaused() && extra < 8) {  // paused twice somewhere: the game must go on all the same
+        Process::Play();
+        extra++;
+    }
+    if (lid)
+        LogOcr(Utils::Format("power %llu: lid closed with the plugin open: the game goes on (paused %s, %d extra), "
+                             "sleep flag %d", (unsigned long long)osGetTime(), Process::IsPaused() ? "STILL" : "no",
+                             extra, SystemImpl::WantsToSleep() ? 1 : 0));
+    if (SystemImpl::WantsToSleep()) SystemImpl::ReadyToSleep();
 }
 
 // A hotkey: pause the game, read its screen(s), look a word up.
@@ -1176,7 +1239,7 @@ static void ReadAndLookUp(int mode) {
     g_lookupShot = "";
     RestoreCpu();
     WaitForRelease();
-    Process::Play();
+    ResumeGame();
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,7 +1336,7 @@ static void MakeCards() {
     int sent = 0, already = 0, failed = 0;
     std::string firstError;
     std::vector<int> done;  // lines that are cards now
-    for (size_t k = 0; k < words.size(); k++) {
+    for (size_t k = 0; k < words.size() && !SleepRequested(); k++) {
         m.setMessage(Utils::Format("Sending word %u of %u to %s...", (unsigned)(k + 1), (unsigned)words.size(),
                                    g_server.c_str()));
         DrawMenu(m);
@@ -1472,6 +1535,7 @@ static void RecordHotkey(int mode) {
     bool released = false;  // wait for the A that chose this to be let go
     bool touchWas = true;
     while (true) {
+        if (SleepRequested()) return;
         Controller::Update();
         const u32 down = Controller::GetKeysDown() & (kt::keys::Usable | Key::Select);
         bool touch = Touch::IsDown();
@@ -1732,13 +1796,18 @@ static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's o
 }
 
 static void Watcher(void) {
+    if (SleepRequested()) return;  // the console is going to sleep: not now
+    if (g_shotDeferred) {
+        g_shotDeferred = false;
+        StartScreenshotThread();
+    }
     if (g_openMenu) {
         g_openMenu = false;
         Process::Pause();
         Settings();
         g_hotkeys.reset();
         WaitForRelease();
-        Process::Play();
+        ResumeGame();
         return;
     }
     for (int m = 0; m < kModes; m++) g_hotkeys.set(m, g_combo[m]);

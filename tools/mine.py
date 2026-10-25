@@ -3,16 +3,18 @@
 mine.py - turns the words you saved with Kotoba3DS into Anki cards.
 
 It reads SD:/3ds/kotoba3ds/mined.tsv (over FTP from the ftpd homebrew app, or from the SD
-card in a card reader), crops each word's screenshot to the top screen, optionally OCRs the
-sentence with manga-ocr, and adds a note per word through AnkiConnect.
+card in a card reader), takes each word's sentence (read on the 3DS) and screenshot, and adds a
+note per word through AnkiConnect.
 
   python mine.py setup            create config.json, check the note type/deck, index dictionaries
   python mine.py                  import new words (Anki must be open)
   python mine.py --dry-run        show what would be added
   python mine.py --clear          after importing, remove imported words from the 3DS log
+  python mine.py known            put the words of your Anki cards on the 3DS (green there)
 
 Needs: Anki with the AnkiConnect add-on (2055492159), `pip install pillow`.
-Optional: `pip install manga-ocr` for sentence OCR.
+Optional: `pip install manga-ocr`, only for words saved by old plugin versions, which didn't
+keep the sentence (it is then read off the screenshot).
 """
 import argparse
 import base64
@@ -631,17 +633,54 @@ def highlight(sentence, expression, reading):
     return sentence
 
 
-def flag_note(cfg, note_id, log=print):
-    """Flags the new note's cards (AnkiConnect setSpecificValueOfCard)."""
-    flag = int(cfg["anki"].get("flag_missing", 1) or 0)
-    if not flag or not note_id:
-        return
+PENDING_FLAGS = {}  # note id -> word: cards Anki wouldn't let us flag yet (an editor had them open)
+
+
+def _set_flag(cfg, note_id, flag):
+    """-> None when flagged, else why not."""
     try:
         for card in anki(cfg, "findCards", query=f"nid:{note_id}") or []:
-            anki(cfg, "setSpecificValueOfCard", card=card, keys=["flags"], newValues=[str(flag)],
-                 warning_check=True)
+            # A number, not the "1" AnkiConnect's docs show: it sets the value as given, and Anki
+            # won't save a text flag. AnkiConnect reports a failed key in the result (as
+            # [False, "why"]), not as an error, so that is checked too.
+            res = anki(cfg, "setSpecificValueOfCard", card=card, keys=["flags"], newValues=[flag],
+                       warning_check=True)
+            bad = [r for r in (res or []) if r is not True]
+            if bad:
+                return str(bad)
     except AnkiError as e:
-        log(f"    (couldn't flag the card - update AnkiConnect? {e})")
+        return str(e)
+    return None
+
+
+def flag_note(cfg, note_id, log=print, word=""):
+    """Flags the new note's cards (AnkiConnect setSpecificValueOfCard). When Anki refuses because
+    the note is open in an editor (the Browse window shows new cards), it is tried again later:
+    retry_flags()."""
+    flag = int(cfg["anki"].get("flag_missing", 1) or 0)
+    if not flag or not note_id:
+        return True
+    why = _set_flag(cfg, note_id, flag)
+    if why is None:
+        return True
+    PENDING_FLAGS[note_id] = word or str(note_id)
+    if "editor" in why.lower():
+        log("    (Anki has this card open in an editor, e.g. the Browse window: it gets its flag once "
+            "that is closed)")
+    else:
+        log(f"    (couldn't flag the card yet: {why})")
+    return False
+
+
+def retry_flags(cfg, log=print):
+    """Flags the cards that couldn't be flagged before. -> how many still wait."""
+    flag = int(cfg["anki"].get("flag_missing", 1) or 0)
+    for note_id, word in list(PENDING_FLAGS.items()):
+        if not flag or _set_flag(cfg, note_id, flag) is None:
+            del PENDING_FLAGS[note_id]
+            if flag:
+                log(f"  flagged {word} now")
+    return len(PENDING_FLAGS)
 
 
 # ---------------------------------------------------------------------------
@@ -757,7 +796,7 @@ def make_card(cfg, enricher, row, img=None, dry_run=False, log=print):
         log(f"  {label}: {e}")
         return "unreachable" if "Can't reach" in str(e) else "failed"
     if missing:
-        flag_note(cfg, note_id, log)
+        flag_note(cfg, note_id, log, label)
     bits = [x for x, ok in (("audio", extra.get("audio")), ("pitch", extra.get("pitch_position")),
                             ("picture", picture_html)) if ok]
     log(f"  added {label}" + (f"  「{re.sub('<.*?>', '', sentence)}」" if sentence else "")
@@ -808,6 +847,15 @@ def run_import(cfg, args):
             save_state(done)
         if not args.dry_run:
             print(f"Done: {added} added, {skipped} duplicates, {failed} failed.")
+            if PENDING_FLAGS:  # cards Anki had open in an editor: a few more tries
+                import time
+                for _ in range(6):
+                    if not retry_flags(cfg):
+                        break
+                    time.sleep(5)
+                if PENDING_FLAGS:
+                    print("Not flagged (Anki kept them open in an editor): " + ", ".join(PENDING_FLAGS.values())
+                          + ". Flag them by hand (Ctrl+1 in the Browse window), or close the editor and run again.")
             if args.clear and failed == 0:
                 keep = [l for l in data.decode("utf-8").splitlines()
                         if l.startswith("#") or (l.strip() and row_key(parse_log(l.encode())[0]) not in done)]

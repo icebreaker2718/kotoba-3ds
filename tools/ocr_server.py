@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-ocr_server.py - reads Japanese text off 3DS screenshots for the Kotoba3DS plugin.
+ocr_server.py - the PC side of the Kotoba3DS plugin: makes Anki cards of the words you saved
+(Select > Make Anki cards) and sends the words of your Anki cards (Select > Known words).
 
-Run it on your PC while you play:
+Run it on your PC with Anki open, on the same Wi-Fi as the 3DS:
 
     py -3.12 tools\\ocr_server.py
 
-The plugin finds it automatically on your home network (or you can type the address shown
-below into the plugin's "OCR server" setting). In-game: press the screenshot hotkey, open
-the plugin menu, choose "Read screen", then tap the word you want.
+The plugin finds it automatically on your home network (or type the address shown below under
+"PC" in the plugin's menu). The 3DS reads the screen itself: no OCR runs here. (The old
+/ocr request, for plugin versions that sent screenshots to read, still works when manga-ocr
+is installed: it is loaded then, at the first such request.)
 
-Uses the same config.json as mine.py (ocr.crop / ocr.game_crops pick the text box).
-Needs: pip install pillow manga-ocr   (Python 3.12 or older)
+Uses the same config.json as mine.py. Needs: pip install pillow
 """
 import argparse
 import io
@@ -140,7 +141,13 @@ class Reader:
 
     def load(self):
         if self.engine == "manga-ocr" and self.model is None:
-            from manga_ocr import MangaOcr
+            try:
+                from manga_ocr import MangaOcr
+            except ImportError:
+                print("A screenshot came to be read, but manga-ocr isn't installed: update the plugin "
+                      "(it reads the screen itself), or pip install manga-ocr.")
+                self.engine = "none"
+                return
             print("Loading manga-ocr (first start downloads the model)...")
             self.model = MangaOcr()
 
@@ -211,10 +218,40 @@ class CardMaker:
     def submit(self, row, img):
         self.jobs.put((row, img))
 
+    def _prepare(self):
+        """At start: opens the dictionaries (indexing them the first time) and says what cards
+        will get, with a warning when there are no definitions or pitch accent to add."""
+        import mine
+        try:
+            self.enricher = mine.Enricher(self.reader.cfg, log=self.log)
+        except Exception as e:
+            self.log(f"WARNING: could not open the dictionaries: {type(e).__name__}: {e}")
+            return
+        e, d = self.enricher, self.reader.cfg.get("dictionaries", {})
+        names = lambda items: ", ".join(x.title for x in items) or "none"
+        self.log(f"Cards get: definitions {names(e.glossaries)}; pitch accent {names(e.pitches)}; "
+                 f"frequency {names(e.freqs)}.")
+        folder = mine._resolve(d.get("folder") or "dictionaries")
+        if not e.glossaries:
+            self.log("WARNING: no Yomitan definitions dictionary (e.g. jitendex-yomitan.zip) found in "
+                     f"{folder}: cards get only the 3DS's short definition. Put the zip there (don't "
+                     "unzip it), or list its path under dictionaries.glossary in config.json, then restart.")
+        if not e.pitches:
+            self.log(f"WARNING: no pitch accent dictionary found in {folder}: cards get no pitch accent.")
+
     def _run(self):
         import mine
+        import queue
+        self._prepare()
         while True:
-            row, img = self.jobs.get()
+            try:  # while idle, cards Anki wouldn't let be flagged (open in an editor) are tried again
+                row, img = self.jobs.get(timeout=15 if mine.PENDING_FLAGS else None)
+            except queue.Empty:
+                try:
+                    mine.retry_flags(self.reader.cfg, log=self.log)
+                except Exception:
+                    pass
+                continue
             try:
                 cfg = self.reader.cfg
                 if self.enricher is None:
@@ -389,7 +426,7 @@ def local_ips():
     return sorted(ip for ip in ips if not ip.startswith("127."))
 
 
-def serve(cfg, port=PORT, engine="manga-ocr", preload=True, log=print, ready=None, stop=None, model=None,
+def serve(cfg, port=PORT, engine="manga-ocr", preload=False, log=print, ready=None, stop=None, model=None,
           config_path=None, cards=True):
     reader = Reader(cfg, engine, model, config_path)
     maker = CardMaker(reader, log) if cards else None
@@ -436,8 +473,6 @@ def main():
         serve(cfg, a.port, config_path=a.config, cards=not a.no_cards)
     except KeyboardInterrupt:
         print("stopped")
-    except ImportError as e:
-        sys.exit(f"{e}\nInstall the OCR model with: py -3.12 -m pip install manga-ocr")
 
 
 if __name__ == "__main__":

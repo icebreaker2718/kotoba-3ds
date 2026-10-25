@@ -444,10 +444,12 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
     // every box with Japanese in it (a screen can have two speech bubbles), in reading order
     struct Got { const TextBox *box; std::vector<std::string> paras; int index; };
     std::vector<Got> got;
+    struct Read { const TextBox *box; int index; std::vector<TextLine> lines; };
+    std::vector<Read> reads;
     for (size_t bi = 0; bi < boxes.size(); bi++) {
         const TextBox &b = boxes[bi];
         bool inside = false;  // mostly within a box read already (a box inside a box)
-        for (const Got &g : got) {
+        for (const Read &g : reads) {
             const TextBox &o = *g.box;
             unsigned ix = std::min(b.x + b.w, o.x + o.w) > std::max(b.x, o.x) ? std::min(b.x + b.w, o.x + o.w) - std::max(b.x, o.x) : 0;
             unsigned iy = std::min(b.y + b.h, o.y + o.h) > std::max(b.y, o.y) ? std::min(b.y + b.h, o.y + o.h) - std::max(b.y, o.y) : 0;
@@ -458,17 +460,48 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
         unsigned x1 = b.x + b.w + 2 < w ? b.x + b.w + 2 : w, y1 = b.y + b.h + 2 < h ? b.y + b.h + 2 : h;
         std::string e;
         if (!ocr.read(grey, w, h, lines, e, progress, x0, y0, x1 - x0, y1 - y0)) continue;
-        // lines that lie in a box read already: the same text again (boxes can overlap)
-        lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const TextLine &l) {
-                        float cx = l.centerX * w, cy = l.centerY * h;
-                        for (const Got &g : got)
-                            if (cx >= g.box->x && cx < g.box->x + g.box->w && cy >= g.box->y && cy < g.box->y + g.box->h)
-                                return true;
-                        return false;
-                    }), lines.end());
-        std::vector<std::string> ps = textParagraphs(lines, true);
+        reads.push_back({&b, (int)bi, lines});
+    }
+    // Boxes can overlap (a speech bubble and the light ground behind it can come out as two), so
+    // a line can be read twice: once whole, once cut at the edge of the other box (「たえられる」
+    // for 「きたえられる」). Each line goes to the box that read the most of it.
+    auto overlap = [](const TextLine &a, const TextLine &b) {
+        const float ix = std::min(a.centerX + a.width / 2, b.centerX + b.width / 2) -
+                         std::max(a.centerX - a.width / 2, b.centerX - b.width / 2);
+        const float iy = std::min(a.centerY + a.height / 2, b.centerY + b.height / 2) -
+                         std::max(a.centerY - a.height / 2, b.centerY - b.height / 2);
+        return ix > 0.5f * std::min(a.width, b.width) && iy > 0.5f * std::min(a.height, b.height);
+    };
+    // A line mostly inside another box that box read without finding it is a cut of something
+    // that box left out on purpose: the furigana over its first row (「ほんき」), seen by a box
+    // that clips the bubble's edge.
+    auto insideBox = [w, h](const TextLine &l, const TextBox &b) {  // lines are in fractions of the screen
+        const float bx0 = (float)b.x / w, bx1 = (float)(b.x + b.w) / w, by0 = (float)b.y / h, by1 = (float)(b.y + b.h) / h;
+        const float ix = std::min(l.centerX + l.width / 2, bx1) - std::max(l.centerX - l.width / 2, bx0);
+        const float iy = std::min(l.centerY + l.height / 2, by1) - std::max(l.centerY - l.height / 2, by0);
+        return ix > 0.5f * l.width && iy > 0.5f * l.height;
+    };
+    std::vector<std::vector<TextLine>> read0;  // as read, before any line is given away
+    for (const Read &rd : reads) read0.push_back(rd.lines);
+    for (size_t r = 0; r < reads.size(); r++)
+        for (size_t q = 0; q < reads.size(); q++) {
+            if (q == r) continue;
+            std::vector<TextLine> &mine = reads[r].lines;
+            const std::vector<TextLine> &theirs = read0[q];
+            mine.erase(std::remove_if(mine.begin(), mine.end(), [&](const TextLine &l) {
+                           bool seen = false;
+                           for (const TextLine &o : theirs) {
+                               if (!overlap(l, o)) continue;
+                               seen = true;  // theirs is wider (on a tie: the earlier box keeps it)
+                               if (o.width > l.width || (o.width == l.width && q < r)) return true;
+                           }
+                           return !seen && !theirs.empty() && insideBox(l, *reads[q].box);
+                       }), mine.end());
+        }
+    for (const Read &rd : reads) {
+        std::vector<std::string> ps = textParagraphs(rd.lines, true);
         cleanParagraphs(ps);
-        if (japaneseChars(ps) >= 2) got.push_back({&b, ps, (int)bi});
+        if (japaneseChars(ps) >= 2) got.push_back({rd.box, ps, rd.index});
     }
     if (!got.empty()) {
         std::stable_sort(got.begin(), got.end(), [](const Got &a, const Got &b) {
