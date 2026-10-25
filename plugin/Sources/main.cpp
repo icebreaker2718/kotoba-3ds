@@ -924,13 +924,105 @@ static void LogBootMemory() {
                          (long)(sysUsed / 1024), (long)(baseUsed / 1024), (unsigned long)(__ctru_heap_size / 1024)));
 }
 
+// ---------------------------------------------------------------------------
+// Giving the game back the memory the plugin takes
+//
+// On a New 3DS, Luma maps the plugin's memory (5 MiB) into the game and it counts against the
+// game's 64 MB budget (its "commit" limit). Nintendo's SDK sizes a game's heap at start as
+//     heap = min(APPMEMALLOC, 64 MB) - memory already committed - device memory
+// so the heap comes out 5 MiB short; a game that needs all of it (大逆転裁判2) fails an
+// allocation and crashes. The console has the memory (the app region is 124 MB), so before the
+// game's first instruction: raise the game's commit limit by the plugin's size, and make the SDK's
+// formula leave the plugin's share out of "already committed". Done only when the numbers say it
+// is safe, and the formula only when its instructions are found exactly once.
+// ---------------------------------------------------------------------------
+static s64 g_commitLimitBefore = -1;  // to put back when the game exits
+
+static bool ArmImmediate(u32 v, u32 &enc) {  // ARM data-processing immediate (8 bits rotated)
+    for (u32 rot = 0; rot < 16; rot++) {
+        u32 r = (v << (2 * rot)) | (rot ? v >> (32 - 2 * rot) : 0);  // rotate left by 2*rot
+        if (r < 256) { enc = (rot << 8) | r; return true; }
+    }
+    return false;
+}
+
+static void GiveGameItsMemory() {
+    PluginHeader *h = FwkSettings::Header;
+    if (!h) return;
+    const u32 plugin = h->heapSize + h->exeSize;  // the block Luma took from the game
+    const u32 appMemAlloc = *(vu32 *)0x1FF80040;
+    s64 appRegion = 0;
+    svcGetSystemInfo(&appRegion, 0x10000, 0x80);
+    Handle rl = 0;
+    if (R_FAILED(svcGetResourceLimit(&rl, CUR_PROCESS_HANDLE))) return;
+    ResourceLimitType t = RESLIMIT_COMMIT;
+    s64 limit = -1, committed = -1;
+    svcGetResourceLimitLimitValues(&limit, rl, &t, 1);
+    svcGetResourceLimitCurrentValues(&committed, rl, &t, 1);
+    const u32 codeSize = Process::GetTextSize() + Process::GetRoDataSize() + Process::GetRwDataSize();
+    std::string why;
+    // only for a game told it has at most 64 MB (the SDK's cap, so the formula's cap does nothing),
+    // whose commit already holds the plugin's block, with room left in the app region
+    const s64 want = (s64)appMemAlloc + plugin;
+    if (appMemAlloc == 0 || appMemAlloc > 0x4000000) why = "APPMEMALLOC above 64 MB";
+    else if (limit < (s64)appMemAlloc) why = "unusual commit limit";
+    else if (committed < (s64)(codeSize + plugin)) why = "the plugin isn't counted in the game's memory";
+    else if (want > appRegion) why = "no room in the app region";
+    u32 subImm = 0;
+    if (why.empty() && !ArmImmediate(plugin, subImm)) why = "plugin size not encodable";
+    // the SDK's  cmp rN, #0x4000000 / movhi rN, #0x4000000 / sub r0, rN, r0
+    u32 at = 0, found = 0;
+    if (why.empty()) {
+        const u32 *text = (const u32 *)0x00100000;
+        const u32 words = Process::GetTextSize() / 4;
+        for (u32 i = 0; i + 2 < words; i++) {
+            u32 w0 = text[i];
+            if ((w0 & 0xFFF0FFFF) != 0xE3500301) continue;
+            u32 n = (w0 >> 16) & 0xF;
+            if (text[i + 1] == (0x83A00301 | (n << 12)) && text[i + 2] == (0xE0400000 | (n << 16))) {
+                at = 0x00100000 + i * 4;
+                found++;
+            }
+        }
+        if (found != 1) why = Utils::Format("SDK heap sizing found %lu times", (unsigned long)found);
+    }
+    if (why.empty() && limit < want) {
+        // the high word is what the kernel writes to APPMEMALLOC: keep it as it is
+        s64 value = want | ((s64)appMemAlloc << 32);
+        Result r = svcSetResourceLimitValues(rl, &t, &value, 1);
+        if (R_FAILED(r)) why = Utils::Format("could not raise the limit (%08lX)", (unsigned long)r);
+        else g_commitLimitBefore = limit;
+    }
+    svcCloseHandle(rl);
+    if (why.empty()) {
+        Process::Patch(at, 0xE2400000 | subImm);  // sub r0, r0, #plugin  (committed - plugin)
+        Process::Patch(at + 4, 0xE1A00000);       // nop (the 64 MB cap can't apply: checked above)
+        LogOcr(Utils::Format("boot: gave the game back %lu KB (commit limit %ld -> %ld KB, heap sizing at %08lX)",
+                             (unsigned long)(plugin / 1024), (long)(limit / 1024), (long)(want / 1024),
+                             (unsigned long)at));
+    } else {
+        LogOcr("boot: memory left as it is: " + why);
+    }
+}
+
+void OnProcessExit(void) {
+    if (g_commitLimitBefore < 0) return;  // put the game's limit back for whatever runs next
+    Handle rl = 0;
+    if (R_SUCCEEDED(svcGetResourceLimit(&rl, CUR_PROCESS_HANDLE))) {
+        ResourceLimitType t = RESLIMIT_COMMIT;
+        s64 value = g_commitLimitBefore | ((s64)*(vu32 *)0x1FF80040 << 32);
+        svcSetResourceLimitValues(rl, &t, &value, 1);
+        svcCloseHandle(rl);
+    }
+}
+
 void PatchProcess(FwkSettings &settings) {
     LogBootMemory();
+    GiveGameItsMemory();
     settings.AllowActionReplay = false;
     settings.AllowSearchEngine = false;
 }
 
-void OnProcessExit(void) {}
 
 int main(void) {
     PluginMenu *menu = new PluginMenu("Kotoba3DS", 2, 0, 0,
