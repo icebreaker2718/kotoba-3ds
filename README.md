@@ -19,14 +19,13 @@ Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-
   reading, how common the word is (JPDB rank) and other matches for the same spelling.
   Conjugations are undone (食べられなかった → 食べる, with the conjugation shown).
 - **Save words for Anki.** One button saves the word with its sentence and a screenshot. Saving
-  is instant, and a mistaken save can be undone.
+  is instant, and a mistaken save can be undone just as quickly.
 - **Known words in green.** Words you saved, words you marked known with **Y** (grammar, words
   you already know) and the words of your Anki cards are shown in green.
 - **Your choice of spelling.** Saved words are written in their usual kanji, or as the game
   wrote them.
 - **Easy on the game.** The dictionary is searched on the SD card instead of being loaded into
-  memory, a New 3DS runs at full speed only while a lookup is open, and closing a lookup never
-  passes your button press on to the game. Closing the lid with the plugin open is fine.
+  memory, a New 3DS runs at full speed only while a lookup is open.
 
 **On the PC** (optional; `tools/ocr_server.py` or `tools/mine.py`)
 - **Anki cards in one step.** Choose *Make Anki cards* on the 3DS and every saved word becomes a
