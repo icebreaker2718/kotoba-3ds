@@ -5,7 +5,7 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -fsanitize=ad
 CORE := $(wildcard ../plugin/Sources/core/*.cpp)
 DICT ?= ../dict.bin
 LDLIBS := libvocr.a -lm -lpthread
-CFLAGS_VOCR := -std=c99 -O2 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize=shift
+CFLAGS_VOCR := -std=c99 -O2 -ffp-contract=off -DVOCR_PROF=kt_vocr_prof -fsanitize=address,undefined -fno-sanitize=shift
 CXXFLAGS += -I../plugin/Includes/vocr
 VOCR_SRC := $(wildcard ../plugin/Sources/vocr/*.c)
 

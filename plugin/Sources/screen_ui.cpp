@@ -97,6 +97,14 @@ void ScreenCanvas::fill(int x, int y, int w, int h, kt::Rgb c) {
     if (w <= 0 || h <= 0) return;
     uint8_t rgb[3] = {c.r, c.g, c.b}, px[4];
     kt::rgbToFramebuffer(rgb, fmt_, px);
+    if (bpp_ == 4 && !((uintptr_t)base_ & 3)) {  // RGBA8: a word per pixel
+        const u32 v = (u32)px[0] | (u32)px[1] << 8 | (u32)px[2] << 16 | (u32)px[3] << 24;
+        for (int xx = x; xx < x + w; xx++) {
+            u32 *q = (u32 *)(void *)at(xx, y + h - 1);
+            for (int k = 0; k < h; k++) q[k] = v;
+        }
+        return;
+    }
     for (int xx = x; xx < x + w; xx++) {
         u8 *p = at(xx, y + h - 1);  // the column runs upwards in memory
         for (int k = 0; k < h; k++, p += bpp_)
@@ -120,6 +128,49 @@ void ScreenCanvas::blend(int x, int y, kt::Rgb c, uint8_t a) {
     kt::rgbToFramebuffer(rgb, fmt_, p);
 }
 
+// blend() of a glyph, a column at a time (one column of the framebuffer is one run of memory,
+// bottom to top): no call per pixel, and 8-bit formats read and written in place, a 32-bit pixel
+// as one word.
+void ScreenCanvas::blendBlock(int x, int y, int w, int h, const uint8_t *alpha, kt::Rgb c) {
+    int x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0;
+    int x1 = x + w > width ? width - x : w, y1 = y + h > height ? height - y : h;
+    if (x0 >= x1 || y0 >= y1) return;
+    if (bpp_ < 3) {  // 16-bit formats: as blend()
+        kt::Canvas::blendBlock(x, y, w, h, alpha, c);
+        return;
+    }
+    uint8_t full[4];
+    {
+        uint8_t rgb[3] = {c.r, c.g, c.b};
+        kt::rgbToFramebuffer(rgb, fmt_, full);
+    }
+    const unsigned R = bpp_ - 1, G = bpp_ - 2, B = bpp_ - 3;  // RGBA8: A B G R, BGR8: B G R
+    const bool words = bpp_ == 4 && !((uintptr_t)base_ & 3);   // RGBA8 pixels start word-aligned
+    for (int dx = x0; dx < x1; dx++) {
+        u8 *p = at(x + dx, y + y0);
+        const uint8_t *a = alpha + (size_t)y0 * w + dx;
+        for (int dy = y0; dy < y1; dy++, p -= bpp_, a += w) {
+            const unsigned v = *a;
+            if (!v) continue;
+            if (v == 255) {
+                for (unsigned b = 0; b < bpp_; b++) p[b] = full[b];
+                continue;
+            }
+            const unsigned k = 255 - v;
+            if (bpp_ == 4 && words) {
+                const u32 old = *(const u32 *)(const void *)p;
+                const u32 nr = (c.r * v + (old >> 24) * k) / 255, ng = (c.g * v + ((old >> 16) & 0xFF) * k) / 255,
+                          nb = (c.b * v + ((old >> 8) & 0xFF) * k) / 255;
+                *(u32 *)(void *)p = (nr << 24) | (ng << 16) | (nb << 8) | full[0];
+            } else {
+                p[R] = (u8)((c.r * v + p[R] * k) / 255);
+                p[G] = (u8)((c.g * v + p[G] * k) / 255);
+                p[B] = (u8)((c.b * v + p[B] * k) / 255);
+            }
+        }
+    }
+}
+
 void ScreenCanvas::shade(int x, int y, int w, int h, uint8_t a) {
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
@@ -127,8 +178,18 @@ void ScreenCanvas::shade(int x, int y, int w, int h, uint8_t a) {
     if (y + h > height) h = height - y;
     if (w <= 0 || h <= 0) return;
     const unsigned keep = 255 - a;
+    const bool words = bpp_ == 4 && fmt_ == 0 && !((uintptr_t)base_ & 3);
     for (int xx = x; xx < x + w; xx++) {
         u8 *p = at(xx, y + h - 1);
+        if (words) {  // RGBA8 a word at a time: the same bytes, one read and one write per pixel
+            u32 *q = (u32 *)(void *)p;
+            for (int k = 0; k < h; k++, q++) {
+                const u32 v = *q;
+                *q = ((((v >> 24) * keep) >> 8) << 24) | (((((v >> 16) & 0xFF) * keep) >> 8) << 16) |
+                     (((((v >> 8) & 0xFF) * keep) >> 8) << 8) | (v & 0xFF);
+            }
+            continue;
+        }
         for (int k = 0; k < h; k++, p += bpp_) {
             if (bpp_ >= 3) {  // 8 bits a channel (RGBA8 keeps its alpha byte)
                 for (unsigned b = (fmt_ == 0 ? 1 : 0); b < bpp_; b++) p[b] = (u8)((p[b] * keep) >> 8);

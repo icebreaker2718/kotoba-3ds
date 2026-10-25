@@ -31,6 +31,7 @@ public:
     void fill(int x, int y, int w, int h, kt::Rgb c) override;
     void blend(int x, int y, kt::Rgb c, uint8_t alpha) override;
     void shade(int x, int y, int w, int h, uint8_t alpha) override;
+    void blendBlock(int x, int y, int w, int h, const uint8_t *alpha, kt::Rgb c) override;
 
     u8 *at(int x, int y) const { return base_ + ((size_t)x * column_ + (239 - y)) * bpp_; }
 

@@ -80,6 +80,8 @@ static int32_t vocr_smlad(uint32_t a, uint32_t b, int32_t acc)
 #endif
 #endif
 
+int vocr_use_pairs = 1;
+
 #define W8I_CHUNK 512u /* int32 sums of at most 512 int8 x int16 products: 512 * 127 * 32767 < 2^31 */
 #ifdef VOCR_NEON
 #define VOCR_HEAD_CHUNK 32u /* head frames per mm_i16 call on the NEON W8I path (1 KB of stack) */
@@ -686,7 +688,7 @@ static VOCR_NOINLINE void k_conv1(const vocr_op *op, const float *win, float *ou
 #endif
             /* Scalar: 8 channels per pass with the sums in registers (see mm_f32). */
             for (; c0 + 8 <= C; c0 += 8) {
-                float a0, a1, a2, a3, a4, a5, a6, a7, s[8];
+                float a0, a1, a2, a3, a4, a5, a6, a7;
                 if (op->bias) {
                     const float *b = op->bias + c0;
                     a0 = b[0], a1 = b[1], a2 = b[2], a3 = b[3], a4 = b[4], a5 = b[5], a6 = b[6], a7 = b[7];
@@ -706,8 +708,12 @@ static VOCR_NOINLINE void k_conv1(const vocr_op *op, const float *win, float *ou
                         a6 = a6 + wt[6] * x;
                         a7 = a7 + wt[7] * x;
                     }
-                s[0] = a0, s[1] = a1, s[2] = a2, s[3] = a3, s[4] = a4, s[5] = a5, s[6] = a6, s[7] = a7;
-                for (c = 0; c < 8; c++) o[c0 + c] = relu ? relu_f(s[c]) : s[c];
+                if (relu) { /* straight from the registers (through s[], gcc 13 stores and reloads each) */
+                    a0 = relu_f(a0), a1 = relu_f(a1), a2 = relu_f(a2), a3 = relu_f(a3);
+                    a4 = relu_f(a4), a5 = relu_f(a5), a6 = relu_f(a6), a7 = relu_f(a7);
+                }
+                o[c0] = a0, o[c0 + 1] = a1, o[c0 + 2] = a2, o[c0 + 3] = a3;
+                o[c0 + 4] = a4, o[c0 + 5] = a5, o[c0 + 6] = a6, o[c0 + 7] = a7;
             }
             for (; c0 < C; c0 += 32) {
                 const unsigned cn = umin(32u, C - c0);
@@ -786,7 +792,7 @@ static VOCR_NOINLINE void k_dw(const vocr_op *op, const float *win, float *out, 
 #endif
             /* Scalar: 8 channels per pass with the sums in registers (see mm_f32). */
             for (; c0 + 8 <= C; c0 += 8) {
-                float a0, a1, a2, a3, a4, a5, a6, a7, s[8];
+                float a0, a1, a2, a3, a4, a5, a6, a7;
                 if (op->bias) {
                     const float *b = op->bias + c0;
                     a0 = b[0], a1 = b[1], a2 = b[2], a3 = b[3], a4 = b[4], a5 = b[5], a6 = b[6], a7 = b[7];
@@ -806,8 +812,12 @@ static VOCR_NOINLINE void k_dw(const vocr_op *op, const float *win, float *out, 
                         a6 = a6 + wt[6] * x[6];
                         a7 = a7 + wt[7] * x[7];
                     }
-                s[0] = a0, s[1] = a1, s[2] = a2, s[3] = a3, s[4] = a4, s[5] = a5, s[6] = a6, s[7] = a7;
-                for (c = 0; c < 8; c++) o[c0 + c] = relu ? relu_f(s[c]) : s[c];
+                if (relu) { /* straight from the registers (through s[], gcc 13 stores and reloads each) */
+                    a0 = relu_f(a0), a1 = relu_f(a1), a2 = relu_f(a2), a3 = relu_f(a3);
+                    a4 = relu_f(a4), a5 = relu_f(a5), a6 = relu_f(a6), a7 = relu_f(a7);
+                }
+                o[c0] = a0, o[c0 + 1] = a1, o[c0 + 2] = a2, o[c0 + 3] = a3;
+                o[c0 + 4] = a4, o[c0 + 5] = a5, o[c0 + 6] = a6, o[c0 + 7] = a7;
             }
             for (; c0 < C; c0 += 32) {
                 const unsigned cn = umin(32u, C - c0);
@@ -1062,7 +1072,7 @@ static void dequant8(const int8_t *qw, const float *scale, unsigned K, float *wf
 
 /* Per-position int16 quantisation: q = trunc(x * (32767 / max|x|) +- 0.5), and the
  * dequantisation scale max|x| / 32767 (0 for an all-zero position). */
-static void quant16(const float *x, size_t xs, unsigned K, unsigned P, int16_t *qx, float *sx)
+static void quant16_plain(const float *x, size_t xs, unsigned K, unsigned P, int16_t *qx, float *sx)
 {
     unsigned p, k;
     for (p = 0; p < P; p++) {
@@ -1111,10 +1121,175 @@ static void quant16(const float *x, size_t xs, unsigned K, unsigned P, int16_t *
     }
 }
 
+#ifdef VOCR_SIMD32
+#if defined(__GNUC__)
+typedef uint32_t vocr_word __attribute__((may_alias));
+#else
+typedef uint32_t vocr_word;
+#endif
+/* quant16_plain's numbers for an even K, laid out for vocr__k2x8 (Kotoba3DS addition): positions
+ * 2i and 2i + 1 interleaved by pairs of k, each pair (q(k), q(k + 1)) one word, and an odd last
+ * position stored as usual. Element k of position p is at (p & ~1) K + (k & ~1) 2 + (p & 1) 2
+ * + (k & 1). The same numbers by other steps, without the VFP compares (each waits for the VFP
+ * pipeline on the ARM11):
+ *  - max |x| as the largest of the values' bits with the sign cleared (the bits of non-negative
+ *    floats order as the floats do);
+ *  - t + (+-0.5 by the sign of t) as +-(|t| + 0.5): IEEE rounding is symmetric, and the sign of
+ *    t = x * inv is x's, as inv > 0;
+ *  - no clamp to +-32767: |x| <= max|x| keeps |t| below 32767.01, so the sum truncates to at
+ *    most 32767. */
+static void quant16_pairs(const float *x, size_t xs, unsigned K, unsigned P, int16_t *qx, float *sx)
+{
+    unsigned p, k;
+    for (p = 0; p < P; p++) {
+        const float *xp = x + p * xs;
+        const vocr_word *xb = (const vocr_word *)(const void *)xp;
+        const int il = (p | 1u) < P;
+        vocr_word *qw = (vocr_word *)(void *)(il ? qx + (size_t)(p & ~1u) * K + (p & 1u) * 2u : qx + (size_t)p * K);
+        const unsigned step = il ? 2u : 1u; /* words from one pair of k to the next */
+        uint32_t mb = 0;
+        float mx, inv;
+        for (k = 0; k < K; k++) {
+            const uint32_t a = xb[k] & 0x7FFFFFFFu;
+            if (a > mb) mb = a;
+        }
+        memcpy(&mx, &mb, sizeof mx);
+        if (!(mx > 0.0f)) {
+            for (k = 0; k < K; k += 2) qw[(k / 2u) * step] = 0;
+            sx[p] = 0.0f;
+            continue;
+        }
+        inv = 32767.0f / mx;
+        sx[p] = mx / 32767.0f;
+        for (k = 0; k < K; k += 2, qw += step) {
+            int v0 = (int)(fabsf(xp[k] * inv) + 0.5f), v1 = (int)(fabsf(xp[k + 1] * inv) + 0.5f);
+            if ((int32_t)xb[k] < 0) v0 = -v0;
+            if ((int32_t)xb[k + 1] < 0) v1 = -v1;
+            *qw = (uint32_t)(uint16_t)v0 | (uint32_t)v1 << 16;
+        }
+    }
+}
+#endif
+
+static void quant16(const float *x, size_t xs, unsigned K, unsigned P, int16_t *qx, float *sx, int pairs)
+{
+#ifdef VOCR_SIMD32
+    if (pairs) {
+        quant16_pairs(x, xs, K, P, qx, sx);
+        return;
+    }
+#endif
+    (void)pairs;
+    quant16_plain(x, xs, K, P, qx, sx);
+}
+
 /* Integer block: y[p][j] = act(S[p][j] * (scale[j] * sx[p]) + bias[j]), where
  * S = 0 + float(c_0) + float(c_1) + ... (float adds, in order) and c_i is the exact int32
  * sum of q[k][j] * qx[p][k] over k in [512 i, 512 i + 512). 512 * 127 * 32767 < 2^31, so
  * no chunk can overflow, and for K <= 512 S is just float(sum). */
+#ifdef VOCR_SIMD32
+/* Two positions at once (Kotoba3DS addition): out[0..7] and out[8..15] = the exact int32 sums of
+ * w(k, j) * x(k) over npairs pairs of k for two positions p, p + 1, from packed weights w (16
+ * bytes per pair of k, as vocr_pack_simd32 leaves them) and a pair-interleaved input x: for each
+ * pair of k, one word (x_p(k), x_p(k + 1)) then one word (x_p+1(k), x_p+1(k + 1)). Each weight is
+ * sign-extended once for both positions: 16 instructions per 16 multiply-accumulates where one
+ * position at a time takes 23. The ARM version keeps both positions' sums for 4 outputs in r4-r11
+ * and runs the 8 outputs as two halves; its loop is software-pipelined, so it reads (and ignores)
+ * up to 16 bytes past the weights and 8 past x. */
+#if defined(__ARM_FEATURE_SIMD32) && defined(__arm__) && !defined(__thumb__) && !defined(VOCR_SIMD32_EMULATE)
+void vocr__k2x8(const void *w, const void *x, unsigned npairs, int32_t *out);
+/* r0 w, r1 x, r2 xa, r3 xb, r12 a weight word, lr its sign-extended halves; r4-r7 position p's
+ * sums for the half's 4 outputs, r8-r11 position p + 1's; [sp] out, w, x, x end */
+__asm__(".pushsection .text.vocr__k2x8,\"ax\",%progbits\n"
+        ".syntax unified\n"
+        ".arm\n"
+        ".align 2\n"
+        ".global vocr__k2x8\n"
+        ".type vocr__k2x8, %function\n"
+        "vocr__k2x8:\n"
+        "    push    {r4-r11, lr}\n"
+        "    sub     sp, sp, #16\n"
+        "    add     r2, r1, r2, lsl #3\n"
+        "    str     r3, [sp, #0]\n"
+        "    str     r0, [sp, #4]\n"
+        "    str     r1, [sp, #8]\n"
+        "    str     r2, [sp, #12]\n"
+        ".macro VOCR_K2X8_PAIR\n"
+        "    sxtb16  lr, r12\n"
+        "    smlad   r6, lr, r2, r6\n"
+        "    smlad   r10, lr, r3, r10\n"
+        "    sxtb16  lr, r12, ror #8\n"
+        "    ldr     r12, [r0], #16\n"
+        "    smlad   r7, lr, r2, r7\n"
+        "    smlad   r11, lr, r3, r11\n"
+        "    sxtb16  lr, r12\n"
+        "    smlad   r4, lr, r2, r4\n"
+        "    smlad   r8, lr, r3, r8\n"
+        "    sxtb16  lr, r12, ror #8\n"
+        "    ldr     r12, [r0, #4]\n"
+        "    smlad   r5, lr, r2, r5\n"
+        "    ldr     r2, [r1], #4\n"
+        "    smlad   r9, lr, r3, r9\n"
+        "    ldr     r3, [r1], #4\n"
+        ".endm\n"
+        ".macro VOCR_K2X8_HALF off\n"
+        "    ldr     r0, [sp, #4]\n"
+        "    ldr     r1, [sp, #8]\n"
+        "    ldr     lr, [sp, #12]\n"
+        "    add     r0, r0, #(\\off / 2)\n"
+        "    sub     lr, lr, r1\n"
+        "    mov     r4, #0\n"
+        "    mov     r5, #0\n"
+        "    mov     r6, #0\n"
+        "    mov     r7, #0\n"
+        "    mov     r8, #0\n"
+        "    mov     r9, #0\n"
+        "    mov     r10, #0\n"
+        "    mov     r11, #0\n"
+        "    ldr     r12, [r0, #4]\n"
+        "    ldr     r2, [r1], #4\n"
+        "    ldr     r3, [r1], #4\n"
+        "    tst     lr, #8\n"
+        "    bne     2f\n"
+        "1:\n"
+        "    VOCR_K2X8_PAIR\n"
+        "2:\n"
+        "    VOCR_K2X8_PAIR\n"
+        "    ldr     lr, [sp, #12]\n"
+        "    cmp     r1, lr\n"
+        "    bls     1b\n"
+        "    ldr     lr, [sp, #0]\n"
+        "    add     lr, lr, #\\off\n"
+        "    stmia   lr, {r4-r7}\n"
+        "    add     lr, lr, #32\n"
+        "    stmia   lr, {r8-r11}\n"
+        ".endm\n"
+        "    VOCR_K2X8_HALF 0\n"
+        "    VOCR_K2X8_HALF 16\n"
+        "    add     sp, sp, #16\n"
+        "    pop     {r4-r11, pc}\n"
+        ".purgem VOCR_K2X8_PAIR\n"
+        ".purgem VOCR_K2X8_HALF\n"
+        ".size vocr__k2x8, .-vocr__k2x8\n"
+        ".popsection\n");
+#else
+static void vocr__k2x8(const void *w, const void *x, unsigned npairs, int32_t *out)
+{
+    const uint32_t *wp = (const uint32_t *)w, *xp = (const uint32_t *)x;
+    unsigned i, h;
+    for (h = 0; h < 16; h++) out[h] = 0;
+    for (i = 0; i < npairs; i++, wp += 4, xp += 2)
+        for (h = 0; h < 4; h++) {
+            const uint32_t lo = vocr_sxtb16(wp[h]), hi = vocr_sxtb16(vocr_ror8(wp[h]));
+            out[2 * h] = vocr_smlad(lo, xp[0], out[2 * h]);
+            out[2 * h + 1] = vocr_smlad(hi, xp[0], out[2 * h + 1]);
+            out[8 + 2 * h] = vocr_smlad(lo, xp[1], out[8 + 2 * h]);
+            out[8 + 2 * h + 1] = vocr_smlad(hi, xp[1], out[8 + 2 * h + 1]);
+        }
+}
+#endif
+#endif
+
 #ifdef VOCR_SIMD32
 /* mm_i16 for packed weights (vocr_pack_simd32): for each pair of k, 16 bytes hold
  * [w(k,j) w(k,j+1) w(k+1,j) w(k+1,j+1)] for j = 0, 2, 4, 6; an odd last k is unpacked. */
@@ -1217,6 +1392,84 @@ static void mm_i16_simd32(const int8_t *qw, const float *scale, const float *bia
 #define VOCR_MM_I16(m, ...) ((m)->packed ? mm_i16_simd32(__VA_ARGS__) : mm_i16(__VA_ARGS__))
 #else
 #define VOCR_MM_I16(m, ...) mm_i16(__VA_ARGS__)
+#endif
+#ifdef VOCR_SIMD32
+/* mm_i16_simd32 for a pair-interleaved qx (quant16 with pairs): positions two at a time through
+ * vocr__k2x8; an odd last position is stored as it was and goes through mm_i16_simd32. The
+ * integer sums are the same exact sums, and the float steps are mm_i16_simd32's in its order. */
+/* the outputs of one pair of positions from their 16 float sums, for each kind of layer (the
+ * flags are constants where it is inlined, so each kind gets its own loop) */
+#if defined(__GNUC__)
+#define VOCR_ALWAYS_INLINE __attribute__((always_inline)) inline
+#else
+#define VOCR_ALWAYS_INLINE
+#endif
+static VOCR_ALWAYS_INLINE void pair_out(const float *fs, const int32_t *is, const float *scale, const float *bias,
+                                        const float *sx, float *y, size_t ys, const float *res, size_t rs, int relu)
+{
+    const float s0 = sx[0], s1 = sx[1];
+    unsigned j;
+    for (j = 0; j < 8; j++) { /* the sums as floats (fs), or the one chunk's ints (is): float(c) */
+        float v = (is ? (float)is[j] : fs[j]) * (scale[j] * s0);
+        float u = (is ? (float)is[8 + j] : fs[8 + j]) * (scale[j] * s1);
+        if (bias) v = v + bias[j], u = u + bias[j];
+        if (relu) v = relu_f(v), u = relu_f(u);
+        if (res) v = v + res[j], u = u + res[rs + j];
+        y[j] = v;
+        y[ys + j] = u;
+    }
+}
+
+static void mm_i16_pairs(const int8_t *qw, const float *scale, const float *bias, const int16_t *qx,
+                         const float *sx, unsigned K, unsigned P, float *y, size_t ys, const float *res,
+                         size_t rs, int relu)
+{
+    const int kind = (bias ? 1 : 0) | (relu ? 2 : 0) | (res ? 4 : 0);
+    unsigned p, j, k0;
+/* pair_out for this kind of layer, with constant flags (each case its own loop) */
+#define VOCR_PAIR_OUT(FS, IS)                                                                        \
+    do {                                                                                             \
+        float *yp_ = y + p * ys;                                                                     \
+        const float *rp_ = res ? res + p * rs : NULL;                                                \
+        switch (kind) {                                                                              \
+        case 0: pair_out(FS, IS, scale, NULL, sx + p, yp_, ys, NULL, rs, 0); break;                  \
+        case 1: pair_out(FS, IS, scale, bias, sx + p, yp_, ys, NULL, rs, 0); break;                  \
+        case 2: pair_out(FS, IS, scale, NULL, sx + p, yp_, ys, NULL, rs, 1); break;                  \
+        case 3: pair_out(FS, IS, scale, bias, sx + p, yp_, ys, NULL, rs, 1); break;                  \
+        case 4: pair_out(FS, IS, scale, NULL, sx + p, yp_, ys, rp_, rs, 0); break;                   \
+        case 5: pair_out(FS, IS, scale, bias, sx + p, yp_, ys, rp_, rs, 0); break;                   \
+        case 6: pair_out(FS, IS, scale, NULL, sx + p, yp_, ys, rp_, rs, 1); break;                   \
+        default: pair_out(FS, IS, scale, bias, sx + p, yp_, ys, rp_, rs, 1); break;                  \
+        }                                                                                            \
+    } while (0)
+    for (p = 0; p + 2 <= P; p += 2) {
+        const int16_t *xp = qx + (size_t)p * K;
+        int32_t s[16];
+        if (K <= W8I_CHUNK) { /* one chunk: S = 0 + float(c) = float(c) (an int's float is never -0) */
+            vocr__k2x8(qw, xp, K / 2, s);
+            VOCR_PAIR_OUT(NULL, s);
+        } else {
+            float fs[16];
+            for (j = 0; j < 16; j++) fs[j] = 0.0f;
+            for (k0 = 0; k0 < K; k0 += W8I_CHUNK) {
+                const unsigned k1 = umin(K, k0 + W8I_CHUNK);
+                vocr__k2x8(qw + (size_t)k0 * 8, xp + (size_t)k0 * 2, (k1 - k0) / 2, s);
+                for (j = 0; j < 16; j++) fs[j] = fs[j] + (float)s[j];
+            }
+            VOCR_PAIR_OUT(fs, NULL);
+        }
+    }
+#undef VOCR_PAIR_OUT
+    if (p < P)
+        mm_i16_simd32(qw, scale, bias, qx + (size_t)p * K, sx + p, K, 1, y + p * ys, ys, res ? res + p * rs : NULL,
+                      rs, relu);
+}
+/* pair-interleaved input for this layer: the SIMD32 weights and an even K */
+#define VOCR_PAIRS(m, K) (vocr_use_pairs && (m)->packed && !((K) & 1u))
+#define VOCR_MM_I16P(m, pairs, ...) ((pairs) ? mm_i16_pairs(__VA_ARGS__) : VOCR_MM_I16(m, __VA_ARGS__))
+#else
+#define VOCR_PAIRS(m, K) 0
+#define VOCR_MM_I16P(m, pairs, ...) VOCR_MM_I16(m, __VA_ARGS__)
 #endif
 
 static void mm_i16(const int8_t *qw, const float *scale, const float *bias, const int16_t *qx,
@@ -1495,6 +1748,39 @@ static float exp_neg(float x)
     return p * p2.f;
 }
 
+#ifndef VOCR_NEON
+/* Whether any of v[0..7] > t, by the floats' bits (Kotoba3DS addition: the head's per-class compares
+ * each wait for the VFP pipeline on the ARM11; most blocks of classes have nothing to add). For
+ * t >= +0, v > t exactly when v's bits, as a signed int, exceed t's (a negative v, or -0, has
+ * negative bits; NaN bits above t's only send the block to the exact compares). Otherwise each
+ * value's order key (fkey's: -m for a negative value of magnitude bits m, so -0 = +0) is compared. */
+static int head_above(const float *v, float t)
+{
+#if defined(__GNUC__)
+    typedef int32_t i32a __attribute__((may_alias));
+#else
+    typedef int32_t i32a;
+#endif
+    const i32a *b = (const i32a *)(const void *)v;
+    int32_t tb, mx;
+    unsigned j;
+    memcpy(&tb, &t, sizeof tb);
+    if (tb >= 0 && (tb & 0x7FFFFFFF) <= 0x7F800000) {
+        mx = b[0];
+        for (j = 1; j < 8; j++) mx = b[j] > mx ? b[j] : mx;
+        return mx > tb;
+    }
+    if ((tb & 0x7FFFFFFF) > 0x7F800000) return 1; /* t is NaN: let the compares decide */
+    tb = (tb & 0x7FFFFFFF) ? -(tb & 0x7FFFFFFF) : 0;
+    for (j = 0; j < 8; j++) {
+        const int32_t m = b[j] & 0x7FFFFFFF;
+        if (m > 0x7F800000) return 1; /* NaN */
+        if ((b[j] < 0 ? -m : m) > tb) return 1;
+    }
+    return 0;
+}
+#endif
+
 /* softmax-max probability over one frame's top-K logits (v[0] is the largest) */
 static float topk_conf(const float *v, unsigned k)
 {
@@ -1516,7 +1802,8 @@ static void run_pw(const vocr_ctx *c, unsigned i, const float *x, unsigned P, fl
     float *wf = (float *)(void *)scr;
     unsigned nb;
     if (!P) return;
-    if (c->mode == VOCR_MODE_W8I) quant16(x, K, K, P, qx, sx);
+    const int pairs = c->mode == VOCR_MODE_W8I && VOCR_PAIRS(c->model, K);
+    if (c->mode == VOCR_MODE_W8I) quant16(x, K, K, P, qx, sx, pairs);
     for (nb = 0; nb < N / 8; nb++) {
         const float *b = op->bias ? op->bias + nb * 8 : NULL;
         const float *rb = res ? res + nb * 8 : NULL;
@@ -1527,7 +1814,7 @@ static void run_pw(const vocr_ctx *c, unsigned i, const float *x, unsigned P, fl
             dequant8(op->q + wo, op->scale + nb * 8, K, wf);
             mm_f32(wf, b, x, K, K, P, y + nb * 8, N, rb, N, relu);
         } else {
-            VOCR_MM_I16(c->model, op->q + wo, op->scale + nb * 8, b, qx, sx, K, P, y + nb * 8, N, rb, N, relu);
+            VOCR_MM_I16P(c->model, pairs, op->q + wo, op->scale + nb * 8, b, qx, sx, K, P, y + nb * 8, N, rb, N, relu);
         }
     }
 }
@@ -1651,7 +1938,8 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
                 tc[j] = 0;
             }
         }
-    if (c->mode == VOCR_MODE_W8I) quant16(x, K, K, nf, qx, sx);
+    const int pairs = c->mode == VOCR_MODE_W8I && VOCR_PAIRS(c->model, K); /* f0 below is always even */
+    if (c->mode == VOCR_MODE_W8I) quant16(x, K, K, nf, qx, sx, pairs);
 #ifdef VOCR_NEON
     if (c->mode == VOCR_MODE_W8I && K >= 16u) {
         step = VOCR_HEAD_CHUNK;
@@ -1683,7 +1971,7 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
             else if (c->mode == VOCR_MODE_W8F)
                 mm_f32(wf, b, x + (size_t)f0 * K, K, K, pn, tmp, 8, NULL, 0, 0);
             else
-                VOCR_MM_I16(c->model, op->q + wo, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn,
+                VOCR_MM_I16P(c->model, pairs, op->q + wo, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn,
                             tmp, 8, NULL, 0, 0);
 #ifdef VOCR_NEON
             if (nb < n_lanes) {
@@ -1746,6 +2034,11 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
                     const unsigned frame = o->frame + f0 + q;
                     float *tv = ex->topk_logit + (size_t)frame * TK;
                     uint16_t *tc = ex->topk_class + (size_t)frame * TK;
+                    if (!ex->logits && nb * 8 + 8 <= N && !head_above(tmp + q * 8, tv[TK - 1])) {
+                        /* none of the 8 is above the K-th largest (nor, so, the largest) */
+                        if (!nb && ex->blank_logit) ex->blank_logit[frame] = tmp[q * 8];
+                        continue;
+                    }
                     for (j = 0; j < 8 && nb * 8 + j < N; j++) {
                         const float v = tmp[q * 8 + j];
                         if (ex->logits && frame < ex->cap_frames)
@@ -1770,6 +2063,7 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
             } else {
                 for (q = 0; q < pn; q++) {
                     const unsigned frame = o->frame + f0 + q;
+                    if (!(ex && ex->logits) && nb * 8 + 8 <= N && !head_above(tmp + q * 8, bestv[f0 + q])) continue;
                     for (j = 0; j < 8 && nb * 8 + j < N; j++) {
                         const float v = tmp[q * 8 + j];
                         if (ex && ex->logits && frame < ex->cap_frames)

@@ -113,8 +113,8 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green.
 
 The **Select** menu has: *Last results* (reopen the text of your last lookup), *Saved words* (review or
-delete), *Hotkey* (if ZL + ZR does something in your game), *Anki cards* (see below) and
-*How to use*.
+delete), *Hotkey* (if ZL + ZR does something in your game), *Anki cards* (see below),
+*How to use* and *Speed test* (the next read is timed in several ways, into `ocr_log.txt`).
 
 **How it reads the screen.** The text box is found by its flat colour (so a box that moves
 around is fine), its lines are read, furigana and stray marks (the "next" arrow) are dropped.
@@ -128,7 +128,8 @@ dictionary decides: a guess that makes a word replaces one that doesn't (造跡 
 **non-commercial use only**. Each read's timing goes into `SD:/3ds/kotoba3ds/ocr_log.txt`.
 
 On a New 3DS / 2DS the plugin runs the CPU at full speed (804 MHz + L2 cache, as Rosalina's
-*New 3DS menu* does) while a lookup is open and reads two lines at once; the game's own
+*New 3DS menu* does) while a lookup is open and reads two or three lines at once (three when the
+system lets the plugin use the fourth CPU core); the game's own
 setting is restored when you close the lookup.
 
 **Cards while you play.** With `py -3.12 tools\ocr_server.py` running on your PC (same Wi-Fi,

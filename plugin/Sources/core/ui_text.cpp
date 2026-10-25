@@ -30,27 +30,51 @@ int TextRenderer::width(const std::string &text, int size) {
 
 // The glyph scaled to `size` (made once, then kept: the same characters are drawn on every redraw).
 const TextRenderer::Scaled *TextRenderer::scaled(uint32_t cp, int size) {
-    uint64_t key = ((uint64_t)cp << 8) | (uint64_t)(size & 0xFF);
-    auto it = cache_.find(key);
-    if (it != cache_.end()) return &it->second;
+    if (size <= 0 || size > 255) return nullptr;
+    const uint32_t key = (cp << 8) | (uint32_t)size;
+    if (slots_.empty()) {  // the first glyph: the cache's two blocks
+        slots_.resize(kSlots);
+        slab_.resize(kCacheBytes);
+    }
+    unsigned at = (key * 2654435761u) >> 22;  // 10 bits: kSlots
+    while (slots_[at].key && slots_[at].key != key) at = (at + 1) & (kSlots - 1);
+    if (slots_[at].key == key) {
+        const Slot &sl = slots_[at];
+        found_.advance = sl.advance;
+        found_.ox = sl.ox;
+        found_.w = sl.w;
+        found_.h = sl.h;
+        found_.alpha = slab_.data() + sl.off;
+        return &found_;
+    }
     GlyphInfo gi;
     if (!font_.metrics(cp, gi)) return nullptr;
     const int cw = font_.cellWidth(), ch = font_.cellHeight();
     const float s = (float)size / ch;  // destination pixels per source pixel
-    Scaled g;
-    g.advance = (int)std::lround(gi.advance * s);
-    g.ox = (int)std::lround(gi.left * s);
-    g.w = (gi.width > 0 && cp != ' ' && cp != 0x3000) ? (int)std::ceil(gi.width * s) : 0;
-    g.h = size;
+    Slot g;
+    g.key = key;
+    g.advance = (int16_t)std::lround(gi.advance * s);
+    g.ox = (int16_t)std::lround(gi.left * s);
+    int w = (gi.width > 0 && cp != ' ' && cp != 0x3000) ? (int)std::ceil(gi.width * s) : 0;
+    g.h = (uint16_t)size;
+    const size_t bytes = (size_t)(w > 0 ? w : 0) * size;
+    if (bytes > slab_.size()) w = 0;
+    if (slabUsed_ + bytes > slab_.size() || count_ + 1 > kSlots * 3 / 4) {  // full: start over
+        std::fill(slots_.begin(), slots_.end(), Slot());
+        slabUsed_ = 0;
+        count_ = 0;
+        at = (key * 2654435761u) >> 22;
+    }
     cell_.resize((size_t)cw * ch);
-    if (g.w > 0 && font_.pixels(cp, cell_.data())) {
+    uint8_t *alpha = slab_.data() + slabUsed_;
+    if (w > 0 && font_.pixels(cp, cell_.data())) {
         // area-weighted resampling: each destination pixel averages the source area it covers;
         // the cell holds the glyph's pixels from column 0
-        g.alpha.assign((size_t)g.w * size, 0);
+        std::fill(alpha, alpha + (size_t)w * size, 0);
         const float inv = 1.0f / s;
         for (int dy = 0; dy < size; dy++) {
             float sy0 = dy * inv, sy1 = (dy + 1) * inv;
-            for (int dx = 0; dx < g.w; dx++) {
+            for (int dx = 0; dx < w; dx++) {
                 float sx0 = dx * inv, sx1 = (dx + 1) * inv;
                 float sum = 0, area = 0;
                 for (int sy = (int)sy0; sy < ch && sy < sy1; sy++) {
@@ -65,31 +89,30 @@ const TextRenderer::Scaled *TextRenderer::scaled(uint32_t cp, int size) {
                 }
                 if (area <= 0) continue;
                 float a = sum / area * 1.25f;  // a slight boost: thin strokes stay solid when shrunk
-                g.alpha[(size_t)dy * g.w + dx] = a > 255 ? 255 : (uint8_t)a;
+                alpha[(size_t)dy * w + dx] = a > 255 ? 255 : (uint8_t)a;
             }
         }
     } else {
-        g.w = 0;
+        w = 0;
     }
-    cacheBytes_ += g.alpha.size() + 32;
-    if (cacheBytes_ > kCacheBytes) {  // full: start over (a lookup draws far fewer glyphs than this)
-        cache_.clear();
-        cacheBytes_ = g.alpha.size() + 32;
-    }
-    return &(cache_[key] = std::move(g));
+    g.w = (uint16_t)w;
+    g.off = (uint32_t)slabUsed_;
+    slabUsed_ += (size_t)w * size;
+    while (slots_[at].key) at = (at + 1) & (kSlots - 1);
+    slots_[at] = g;
+    count_++;
+    found_.advance = g.advance;
+    found_.ox = g.ox;
+    found_.w = g.w;
+    found_.h = g.h;
+    found_.alpha = alpha;
+    return &found_;
 }
 
 int TextRenderer::drawChar(Canvas &c, int x, int y, uint32_t cp, int size, Rgb color) {
     const Scaled *g = scaled(fallback(cp), size);
     if (!g) return x;
-    const int ox = x + g->ox;
-    for (int dy = 0; dy < g->h; dy++) {
-        int py = y + dy;
-        if (py < 0 || py >= c.height) continue;
-        const uint8_t *row = g->alpha.data() + (size_t)dy * g->w;
-        for (int dx = 0; dx < g->w; dx++)
-            if (row[dx] && ox + dx >= 0 && ox + dx < c.width) c.blend(ox + dx, py, color, row[dx]);
-    }
+    if (g->w > 0) c.blendBlock(x + g->ox, y, g->w, g->h, g->alpha, color);
     return x + g->advance;
 }
 

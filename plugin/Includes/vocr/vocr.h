@@ -150,6 +150,9 @@ int vocr_load(vocr_model *m, const void *blob, size_t bytes);
 /* Kotoba3DS addition: reorder the int8 weights for the ARMv6 SIMD kernel (in place; the
  * blob must be writable). 1 = done, 0 = not available in this build. */
 int vocr_pack_simd32(vocr_model *m);
+/* Kotoba3DS: nonzero (the default) = the SIMD32 path multiplies two positions at a time; 0 = one
+ * at a time, as before (the same text, for timing them against each other). */
+extern int vocr_use_pairs;
 
 /* Check the blob's CRC-32 (optional; vocr_load checks structure, not content). */
 int vocr_check_crc(const void *blob, size_t bytes);

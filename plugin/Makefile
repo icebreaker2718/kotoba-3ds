@@ -25,7 +25,7 @@ COMMON		:=	$(ARCH) -mword-relocations \
 				-fomit-frame-pointer -ffunction-sections -fno-strict-aliasing
 
 # C = the OCR runtime (Sources/vocr): built for speed. C++ = the plugin: built for size.
-CFLAGS		:=	$(COMMON) -O2 -std=gnu99 -ffp-contract=off $(INCLUDE) -D__3DS__
+CFLAGS		:=	$(COMMON) -O2 -std=gnu99 -ffp-contract=off $(INCLUDE) -D__3DS__ -DVOCR_PROF=kt_vocr_prof
 
 CXXFLAGS	:= $(COMMON) -Os $(INCLUDE) -D__3DS__ -fno-rtti -fno-exceptions -std=gnu++17
 

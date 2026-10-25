@@ -12,7 +12,36 @@
 #include "vocr_lines.h"
 #include "vocr_lines_refine.h"
 
+// VOCR's phase marks (vocr.c is built with -DVOCR_PROF=kt_vocr_prof): free unless profiling.
+static bool g_prof = false;
+static uint64_t (*g_profClock)() = nullptr;
+static uint64_t g_profTicks[64], g_profT = 0;
+static unsigned g_profLast = 63;
+extern "C" void kt_vocr_prof(unsigned id) {
+    if (!g_prof) return;
+    uint64_t t = g_profClock();
+    g_profTicks[g_profLast] += t - g_profT;
+    g_profT = t;
+    g_profLast = id < 62 ? id : (id == 101 ? 62 : 63);
+}
+
 namespace kt {
+
+void ocrProfile(bool on, uint64_t (*clock)()) {
+    if (on) {
+        memset(g_profTicks, 0, sizeof(g_profTicks));
+        g_profClock = clock;
+        g_profT = clock();
+        g_profLast = kProfOther;
+    } else if (g_prof) {
+        kt_vocr_prof(100);  // close the last phase
+    }
+    g_prof = on && clock;
+}
+
+const uint64_t *ocrProfileTicks() { return g_profTicks; }
+
+void ocrUsePairKernel(bool on) { vocr_use_pairs = on ? 1 : 0; }
 
 void *LocalOcr::alignedAlloc(size_t bytes) {  // 16-byte aligned; freed by the destructor (the plugin never runs it)
     void *raw = malloc(bytes + 16);
@@ -44,7 +73,7 @@ bool LocalOcr::load(Reader &file, std::string &error) {
 bool LocalOcr::loadInner(Reader &file, std::string &error) {
     uint32_t n = file.size();
     if (n < 64 || n > 8 * 1024 * 1024) { error = "the OCR model file looks wrong"; return false; }
-    unsigned char *blob = (unsigned char *)alignedAlloc(n);
+    unsigned char *blob = (unsigned char *)alignedAlloc(n + 32);  // + the bytes VOCR's ARM kernel may read past the end
     if (!blob) { error = "not enough memory for the OCR model"; return false; }
     for (uint32_t off = 0; off < n;) {  // in pieces: SD reads of a few hundred KB at a time
         uint32_t piece = n - off > 256 * 1024 ? 256 * 1024 : n - off;
@@ -71,6 +100,8 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     vocr_opts o;
     memset(&o, 0, sizeof(o));
     o.mode = m->int8 ? VOCR_MODE_W8I : VOCR_MODE_F32;
+    o.tile_frames = tileFrames_;
+    o.head_frames = headFrames_;
     size_t need = vocr_arena_bytes(m, &o);
     unsigned char *arena = (unsigned char *)alignedAlloc(need);
     if (!arena) { error = "not enough memory for the OCR"; return false; }
@@ -171,6 +202,7 @@ struct LineJob {
     const TopK *tk = nullptr;  // per worker
     RawAlt *alts = nullptr;    // count x kMaxAlts
     unsigned *nAlts = nullptr;
+    const unsigned *order = nullptr;  // the lines in the order they are handed out
     std::atomic<unsigned> next{0}, worker{0};
 };
 
@@ -178,9 +210,11 @@ void lineWorker(void *arg) {
     LineJob *j = (LineJob *)arg;
     unsigned w = j->worker.fetch_add(1);
     vocr_ctx *c = (vocr_ctx *)j->ctxs[w];
-    for (unsigned i; (i = j->next.fetch_add(1)) < j->count;)
+    for (unsigned k; (k = j->next.fetch_add(1)) < j->count;) {
+        const unsigned i = j->order[k];
         j->rc[i] = runLine(c, j->model, j->grey, j->stride, j->lines[i], j->text + (size_t)i * kLineCap, kLineCap,
                            j->tk ? &j->tk[w] : nullptr, j->alts + (size_t)i * kMaxAlts, &j->nAlts[i]);
+    }
 }
 }  // namespace
 
@@ -233,6 +267,8 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
         vocr_opts o;
         memset(&o, 0, sizeof(o));
         o.mode = mode_;
+        o.tile_frames = tileFrames_;
+        o.head_frames = headFrames_;
         if (!c2 || !a2 || vocr_init(c2, m, &o, a2, arenaBytes_) != VOCR_OK) break;  // fewer workers then
         ctxs_.push_back(c2);
     }
@@ -264,6 +300,13 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
     job.tk = fixer_ && topk_.size() >= workers ? (const TopK *)topk_.data() : nullptr;
     job.alts = rawAlts.data();
     job.nAlts = nAlts.data();
+    // the longest lines first: the last one handed out is then a short one, and the workers finish
+    // close together (with 2 workers and lines of 10, 10 and 4 characters: 10 | 10 + 4, not 10 + 10 | 4)
+    std::vector<unsigned> order(std::max(n, 1u), 0);
+    for (unsigned k = 0; k < n; k++) order[k] = k;
+    std::stable_sort(order.begin(), order.begin() + n,
+                     [&](unsigned a, unsigned b) { return todoLines[a].w * todoLines[b].h > todoLines[b].w * todoLines[a].h; });
+    job.order = order.data();
     if (workers > 1) {
         if (progress) progress(0, 1);
         runner_(workers, lineWorker, &job);

@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 ARCH="-march=armv6k -mtune=mpcore -mfloat-abi=hard -mfpu=vfp -marm -fomit-frame-pointer"
 mkdir -p arm_build
 for f in ../plugin/Sources/vocr/*.c; do
-  arm-linux-gnueabihf-gcc $ARCH -O2 -std=gnu99 -ffp-contract=off -I../plugin/Includes/vocr -c "$f" -o "arm_build/$(basename "$f" .c).o"
+  arm-linux-gnueabihf-gcc $ARCH -O2 -std=gnu99 -ffp-contract=off -DVOCR_PROF=kt_vocr_prof -I../plugin/Includes/vocr -c "$f" -o "arm_build/$(basename "$f" .c).o"
 done
 arm-linux-gnueabihf-g++ $ARCH -static -Os -std=gnu++17 -fno-exceptions -fno-rtti -I../plugin/Includes -I../plugin/Includes/vocr \
   -o ocr_cli_arm ocr_cli.cpp ../plugin/Sources/core/local_ocr.cpp ../plugin/Sources/core/textbox.cpp \

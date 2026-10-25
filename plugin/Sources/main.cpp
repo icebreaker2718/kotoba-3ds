@@ -513,25 +513,33 @@ static kt::LookupView &View() {
     return *g_viewPtr;
 }
 
-// Frees the lookup screens and their caches (glyphs, matches) when they close: left in place,
-// their many small blocks would split the free memory the next OCR model load needs whole.
+// Frees the lookup screens and their caches of matches when they close: left in place, their
+// many small blocks would split the free memory the next reads need whole. The scaled glyphs stay
+// (two blocks, allocated once): the next lookup draws its text without making them again.
 static void DropView() {
     delete g_viewPtr;
     g_viewPtr = nullptr;
-    delete g_textPtr;
-    g_textPtr = nullptr;
 }
 
 // Draws both screens once and shows them. Returns the milliseconds it took.
+static u64 g_drawTicks[4];  // since the view opened: the dimmed game, the entry, the text, showing it
 static u32 DrawLookup(kt::LookupView &v) {
-    u64 t0 = osGetTime();
+    u64 t0 = svcGetSystemTick();
     if (!PaintGame(!v.hidden())) OSD::GetTopScreen().DrawRect(0, 0, 400, 240, Color(15, 18, 22));
+    u64 t1 = svcGetSystemTick();
     ScreenCanvas tc(OSD::GetTopScreen());
     v.drawTop(tc);
+    u64 t2 = svcGetSystemTick();
     ScreenCanvas bc(OSD::GetBottomScreen());
     v.drawBottom(bc);
+    u64 t3 = svcGetSystemTick();
     Present();
-    return (u32)(osGetTime() - t0);
+    u64 t4 = svcGetSystemTick();
+    g_drawTicks[0] += t1 - t0;
+    g_drawTicks[1] += t2 - t1;
+    g_drawTicks[2] += t3 - t2;
+    g_drawTicks[3] += t4 - t3;
+    return (u32)((t4 - t0) / 268112);
 }
 
 static void SaveSelected(kt::LookupView &v) {
@@ -561,7 +569,8 @@ static u64 g_viewOpenedAt = 0;  // when the read finished (Lookup), for the log
 static void RunLookupView(kt::LookupView &v) {
     ViewStats st;
     OSD::SwapBuffers();  // let CTRPF finish any pending redraw of its own first
-    DrawLookup(v);
+    memset(g_drawTicks, 0, sizeof(g_drawTicks));
+    u32 firstMs = DrawLookup(v);
     u64 openMs = g_viewOpenedAt ? osGetTime() - g_viewOpenedAt : 0;
     g_viewOpenedAt = 0;
     bool touchWas = true;  // a touch held from before doesn't count
@@ -629,11 +638,17 @@ static void RunLookupView(kt::LookupView &v) {
         Sleep(Milliseconds(10));
     }
     ClearTopPanel();  // the game as it was
-    if (st.draws)
-        LogOcr(Utils::Format("view: opened in %lu ms, %lu moves, look-up avg %lu ms (max %lu), draw avg %lu ms (max %lu), %lu looked up ahead",
-                             (unsigned long)openMs, (unsigned long)st.moves, (unsigned long)(st.moves ? st.lookSum / st.moves : 0),
-                             (unsigned long)st.lookMax, (unsigned long)(st.drawSum / st.draws), (unsigned long)st.drawMax,
+    {
+        const u64 n = st.draws + 1;  // the first draw too
+        LogOcr(Utils::Format("view: opened in %lu ms (first draw %lu ms), %lu moves, look-up avg %lu ms (max %lu), "
+                             "draw avg %lu ms (max %lu: game %lu, entry %lu, text %lu, show %lu ms avg), %lu looked up ahead",
+                             (unsigned long)openMs, (unsigned long)firstMs, (unsigned long)st.moves,
+                             (unsigned long)(st.moves ? st.lookSum / st.moves : 0), (unsigned long)st.lookMax,
+                             (unsigned long)(st.draws ? st.drawSum / st.draws : 0), (unsigned long)st.drawMax,
+                             (unsigned long)(g_drawTicks[0] / n / 268112), (unsigned long)(g_drawTicks[1] / n / 268112),
+                             (unsigned long)(g_drawTicks[2] / n / 268112), (unsigned long)(g_drawTicks[3] / n / 268112),
                              (unsigned long)st.prefetched));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -687,13 +702,40 @@ static s32 CoreTask(void *a) {
     j->job(j->arg);
     return 0;
 }
+// A third worker can go on the New 3DS's core 3, when the kernel lets this process start a thread
+// there (it may refuse: then 2 workers do all the lines, as they share them out as they go).
+static int g_core3 = -1;  // -1 not tried yet, 0 refused, 1 works
 static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
     static const s32 kAffinity[] = {Task::NewAppCore, Task::AppCore};
     CoreJob cj = {job, arg};
+    Thread third = nullptr;
+    if (n >= 3 && g_core3 != 0) {
+        third = threadCreate(job, arg, 16 * 1024, 0x18, 3, false);
+        g_core3 = third ? 1 : 0;
+    }
     std::vector<Task> tasks;
     for (unsigned i = 0; i < n && i < 2; i++) tasks.emplace_back(CoreTask, &cj, kAffinity[i]);
     for (Task &t : tasks) t.Start();
     for (Task &t : tasks) t.Wait();
+    if (third) {
+        threadJoin(third, U64_MAX);
+        threadFree(third);
+    }
+}
+static void Nothing(void *) {}
+static unsigned g_ocrWorkers = 0;  // 0 = as many as this console has (New 3DS: 2 or 3, Old: 1)
+static unsigned OcrWorkers() {
+    if (g_ocrWorkers) return g_ocrWorkers;
+    if (!System::IsNew3DS()) return 1;
+    if (g_core3 < 0) {  // once: may this process run a thread on core 3?
+        Thread t = threadCreate(Nothing, nullptr, 4096, 0x18, 3, false);
+        g_core3 = t ? 1 : 0;
+        if (t) {
+            threadJoin(t, U64_MAX);
+            threadFree(t);
+        }
+    }
+    return g_core3 ? 3 : 2;
 }
 
 static bool LoadModel(const std::string &name, std::string &error) {
@@ -707,6 +749,94 @@ static bool LoadModel(const std::string &name, std::string &error) {
     }
     g_modelName = name;
     return true;
+}
+
+// ---- Speed test (menu): the next read is timed again in other ways, written to ocr_log.txt ----
+static bool g_speedTestNext = false;
+static uint64_t Ticks() { return svcGetSystemTick(); }
+static std::string Ms(u64 ticks) {  // "12.3" (the ARM11's tick is 268,111,856 per second)
+    u64 tenths = (ticks * 10 + 134056) / 268112;
+    return Utils::Format("%lu.%lu", (unsigned long)(tenths / 10), (unsigned long)(tenths % 10));
+}
+
+static void SpeedTest(const std::string &model, const uint8_t *grey, const std::vector<kt::TextBox> &boxes,
+                      const std::vector<std::string> &ref) {
+    struct Config {
+        const char *name;
+        unsigned workers;  // 0 = the usual
+        bool pairs, profile;
+        unsigned tile, head;
+    };
+    static const Config kConfigs[] = {
+        {"usual", 0, true, false, 0, 0},
+        {"usual again", 0, true, false, 0, 0},
+        {"old kernel", 0, false, false, 0, 0},
+        {"1 worker", 1, true, true, 0, 0},
+        {"1 worker, old kernel", 1, false, false, 0, 0},
+        {"2 workers", 2, true, false, 0, 0},
+        {"3 workers", 3, true, false, 0, 0},
+        {"tile 8", 0, true, false, 8, 0},
+        {"head 32", 0, true, false, 0, 32},
+        {"tile 8, head 64", 0, true, false, 8, 64},
+    };
+    LogOcr(Utils::Format("speed test: %d MHz, core 3 %s, heap free %lu KB", CpuMHz(),
+                         g_core3 > 0 ? "usable" : "not usable", (unsigned long)(HeapFree() / 1024)));
+    {   // the steps before the OCR
+        u64 t0 = Ticks();
+        uint8_t *rgb = SnapshotRGB();
+        u64 t1 = Ticks();
+        if (rgb) {
+            std::vector<kt::TextBox> b = kt::findTextBoxes(rgb, 400, 240);
+            u64 t2 = Ticks();
+            uint8_t *g = kt::greyFromRGB(rgb, 400, 240);
+            u64 t3 = Ticks();
+            free(g);
+            free(rgb);
+            LogOcr("speed: screen -> RGB " + Ms(t1 - t0) + " ms, text box " + Ms(t2 - t1) + " ms, grey " + Ms(t3 - t2) + " ms");
+        }
+    }
+    unsigned tile = 0, head = 0;
+    std::string e;
+    for (const Config &c : kConfigs) {
+        if (c.workers == 3 && g_core3 <= 0) continue;
+        if (c.workers > 1 && !System::IsNew3DS()) continue;
+        if (c.tile != tile || c.head != head) {  // other batch sizes: load the model again with them
+            g_localOcr.setOptions(c.tile, c.head);
+            tile = c.tile;
+            head = c.head;
+            if (!LoadModel(model, e)) {
+                LogOcr(std::string("speed: ") + c.name + ": not enough memory");
+                continue;
+            }
+        }
+        ShowBusy("Speed test...", c.name);
+        kt::ocrUsePairKernel(c.pairs);
+        g_localOcr.setParallel(c.workers ? c.workers : OcrWorkers(), RunOnCores);
+        std::vector<std::string> paras;
+        if (c.profile) kt::ocrProfile(true, Ticks);
+        u64 t0 = Ticks();
+        bool ok = kt::localReadScreen(g_localOcr, grey, 400, 240, boxes, paras, e);
+        u64 t1 = Ticks();
+        if (c.profile) kt::ocrProfile(false, Ticks);
+        LogOcr(Utils::Format("speed: %s: ", c.name) + Ms(t1 - t0) +
+               Utils::Format(" ms, %u threads, %s", g_localOcr.lastWorkers(), ok && paras == ref ? "same text" : "DIFFERENT TEXT"));
+        if (c.profile) {  // where the time goes: each layer (VOCR5_N: 19 = the output head), input, the rest
+            const uint64_t *t = kt::ocrProfileTicks();
+            std::string line = "speed: layers (ms):";
+            for (int i = 0; i < kt::kProfSlots; i++) {
+                if (!t[i]) continue;
+                line += i == kt::kProfInput ? " input " : i == kt::kProfOther ? " other " : Utils::Format(" %d:", i);
+                line += Ms(t[i]);
+            }
+            LogOcr(line);
+        }
+    }
+    kt::ocrUsePairKernel(true);
+    g_localOcr.setParallel(OcrWorkers(), RunOnCores);
+    if (tile || head) {
+        g_localOcr.setOptions(0, 0);
+        LoadModel(model, e);
+    }
 }
 
 // Reads the paused game's top screen -> text blocks.
@@ -739,13 +869,17 @@ static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &erro
     if (!grey) { error = "not enough memory for the picture"; return false; }
     // 3. read the box (or the whole screen)
     u64 t2b = osGetTime();
-    g_localOcr.setParallel(System::IsNew3DS() ? 2 : 1, RunOnCores);
+    g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
     g_fixedChars = 0;
     int used = -1;
     bool ok = kt::localReadScreen(g_localOcr, grey, 400, 240, boxes, paragraphs, error, LocalProgress, &used);
-    free(grey);  // the model stays loaded for the next read
     u64 t3 = osGetTime();
+    if (ok && g_speedTestNext) {
+        g_speedTestNext = false;
+        SpeedTest(name, grey, boxes, paragraphs);
+    }
+    free(grey);  // the model stays loaded for the next read
     LogOcr(Utils::Format("%s: load %lu ms, box %lu ms, read %lu ms (%s, %u threads, %d MHz, %u fixed), heap free %lu KB, %s",
                          name.c_str(), (unsigned long)(t2 - t1 + (t1 - t0)), (unsigned long)(t2b - t2),
                          (unsigned long)(t3 - t2b), used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(),
@@ -765,7 +899,6 @@ static void Lookup() {
     std::stable_sort(paragraphs.begin(), paragraphs.end(),
                      [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
     g_viewOpenedAt = osGetTime();
-    ShowBusy("Finding the words...");
     g_lastBlocks = paragraphs;
     static bool fontLogged = false;
     if (!fontLogged) { LogOcr(g_font.describe()); fontLogged = true; }
@@ -1104,6 +1237,15 @@ int main(void) {
     *menu += new MenuEntry(HotkeyEntryName(), nullptr, ChooseHotkey, "The button combo that reads the screen.");
     *menu += new MenuEntry(CardsEntryName(), nullptr, ChooseCards, "Make Anki cards right away with your PC.");
     *menu += new MenuEntry("How to use", nullptr, [](MenuEntry *) { MessageBox("Kotoba3DS", kHelp)(); });
+    *menu += new MenuEntry("Speed test", nullptr,
+                           [](MenuEntry *) {
+                               g_speedTestNext = true;
+                               MessageBox("Kotoba3DS",
+                                          "The next read of the screen is timed again in a few other ways "
+                                          "(about 10 seconds), then shown as usual.\n\n"
+                                          "The times go to /3ds/kotoba3ds/ocr_log.txt.")();
+                           },
+                           "Times the next read in several ways, for the developer.");
 
     *menu += HotkeyWatcher;  // runs every frame while the game plays
     menu->Run();

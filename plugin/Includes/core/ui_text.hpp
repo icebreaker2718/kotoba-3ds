@@ -4,7 +4,6 @@
 #pragma once
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace kt {
@@ -45,6 +44,17 @@ public:
         for (int yy = y; yy < y + h; yy++)
             for (int xx = x; xx < x + w; xx++) blend(xx, yy, Rgb(0, 0, 0), alpha);
     }
+    // blend() of a w x h block of alphas (row-major) at (x, y), clipped: a glyph. A canvas can do
+    // it faster than pixel by pixel; the result must be blend()'s.
+    virtual void blendBlock(int x, int y, int w, int h, const uint8_t *alpha, Rgb c) {
+        for (int dy = 0; dy < h; dy++) {
+            const int py = y + dy;
+            if (py < 0 || py >= height) continue;
+            const uint8_t *row = alpha + (size_t)dy * w;
+            for (int dx = 0; dx < w; dx++)
+                if (row[dx] && x + dx >= 0 && x + dx < width) blend(x + dx, py, c, row[dx]);
+        }
+    }
 };
 
 class TextRenderer {
@@ -64,15 +74,28 @@ public:
 private:
     GlyphSource &font_;
     std::vector<uint8_t> cell_;
+    // Scaled glyphs, kept while the renderer lives (the plugin keeps it from one lookup to the
+    // next): their pixels in one block, an open-addressing table over them, both allocated once,
+    // so the cache never splits up the free memory. Full: emptied, and filled again.
+    struct Slot {
+        uint32_t key = 0;  // cp << 8 | size; 0 = empty
+        int16_t advance = 0, ox = 0;
+        uint16_t w = 0, h = 0;
+        uint32_t off = 0;  // the pixels in slab_
+    };
     struct Scaled {
         int advance = 0, ox = 0, w = 0, h = 0;
-        std::vector<uint8_t> alpha;  // w x h
+        const uint8_t *alpha = nullptr;  // w x h
     };
-    static const size_t kCacheBytes = 160 * 1024;
-    std::unordered_map<uint64_t, Scaled> cache_;
-    size_t cacheBytes_ = 0;
+    static const size_t kCacheBytes = 144 * 1024;
+    static const unsigned kSlots = 1024;  // a power of 2
+    std::vector<Slot> slots_;
+    std::vector<uint8_t> slab_;
+    size_t slabUsed_ = 0;
+    unsigned count_ = 0;
+    Scaled found_;
     uint32_t fallback(uint32_t cp);
-    const Scaled *scaled(uint32_t cp, int size);
+    const Scaled *scaled(uint32_t cp, int size);  // valid until the next call
 };
 
 }  // namespace kt

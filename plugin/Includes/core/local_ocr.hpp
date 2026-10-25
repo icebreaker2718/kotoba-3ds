@@ -53,6 +53,9 @@ public:
     typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
     void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
     unsigned lastWorkers() const { return lastWorkers_; }
+    // VOCR's batch sizes (0 = its defaults): frames per tile and frames per output-head batch.
+    // Bigger batches use more memory; the text is the same. Takes effect at the next load().
+    void setOptions(unsigned tileFrames, unsigned headFrames) { tileFrames_ = tileFrames; headFrames_ = headFrames; }
     // With a fixer, each line's uncertain characters are passed to it (see fixOcrLine in correct.hpp).
     void setFixer(LineFixer fixer, void *user) { fixer_ = fixer; fixerUser_ = user; }  // how many the last read used
     const std::string &modelInfo() const { return info_; }
@@ -76,12 +79,23 @@ private:
     int mode_ = 0;
     unsigned workers_ = 1, lastWorkers_ = 1;
     Runner runner_ = nullptr;
+    unsigned tileFrames_ = 0, headFrames_ = 0;
     LineFixer fixer_ = nullptr;
     void *fixerUser_ = nullptr;
     std::vector<TopK> topk_;
     void *alignedAlloc(size_t bytes);
     bool loadInner(Reader &file, std::string &error);
 };
+
+// Per-layer timing of recognition, for the speed test. While on, time between VOCR's phase marks
+// is added to ticks[]: [0, n_ops) the layers (the last = the output head), [kProfInput] reading
+// the picture's columns, [kProfOther] the rest. Single-threaded use only (one worker).
+enum { kProfInput = 62, kProfOther = 63, kProfSlots = 64 };
+void ocrProfile(bool on, uint64_t (*clock)());
+const uint64_t *ocrProfileTicks();
+// The ARM11 kernel that multiplies two positions at a time (default), or one at a time as
+// before: the same text, for the speed test.
+void ocrUsePairKernel(bool on);
 
 // The top 400x240 of a CTRPF screenshot as grey bytes (malloc'd; caller frees with free()).
 uint8_t *topScreenGrey(Reader &bmp, unsigned &w, unsigned &h, std::string &error);

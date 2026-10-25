@@ -1,7 +1,12 @@
+// Built for speed (the plugin's C++ is otherwise built for size): this runs on every read.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize("O2")
+#endif
 #include "core/textbox.hpp"
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 
 namespace kt {
 
@@ -15,9 +20,10 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
     if (!rgb || n == 0) return out;
     // 1. the most common colours (5 bits per channel)
     std::vector<uint32_t> hist(32768, 0);
-    for (unsigned i = 0; i < n; i++) {
-        const uint8_t *p = rgb + i * 3;
-        hist[((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3)]++;
+    {
+        uint32_t *H = hist.data();
+        const uint8_t *p = rgb;
+        for (unsigned i = 0; i < n; i++, p += 3) H[((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3)]++;
     }
     // the most common colours, in one pass over the histogram (ties: the lower key first, as a
     // repeated "largest not yet taken" scan picks them)
@@ -46,13 +52,20 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
         cg[k] = (int)((top[k] >> 5) & 31) * 8 + 4;
         cb[k] = (int)(top[k] & 31) * 8 + 4;
     }
-    for (unsigned i = 0; i < n; i++) {
-        const uint8_t *p = rgb + i * 3;
-        uint8_t bits = 0;
-        for (size_t k = 0; k < top.size(); k++)
-            if (abs(p[0] - cr[k]) <= kTolerance && abs(p[1] - cg[k]) <= kTolerance && abs(p[2] - cb[k]) <= kTolerance)
-                bits |= (uint8_t)(1u << k);
-        near[i] = bits;
+    // per channel and value: the colours within the tolerance on that channel; a pixel is near the
+    // colours all three of its channels are
+    std::vector<uint8_t> lut(3 * 256, 0);  // R, G, B (on the heap: gcc then keeps its address in a register)
+    for (int v = 0; v < 256; v++)
+        for (size_t k = 0; k < top.size(); k++) {
+            const uint8_t bit = (uint8_t)(1u << k);
+            if (abs(v - cr[k]) <= kTolerance) lut[v] |= bit;
+            if (abs(v - cg[k]) <= kTolerance) lut[256 + v] |= bit;
+            if (abs(v - cb[k]) <= kTolerance) lut[512 + v] |= bit;
+        }
+    {
+        const uint8_t *L = lut.data(), *p = rgb;
+        uint8_t *o = near.data();
+        for (unsigned i = 0; i < n; i++, p += 3) o[i] = (uint8_t)(L[p[0]] & L[256 + p[1]] & L[512 + p[2]]);
     }
     // Component numbers: a colour's components are numbered above `base`, so the label array is
     // cleared only when the numbers run out, not once per colour. Positions on the fill stacks are
@@ -70,8 +83,16 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
         const unsigned base = last;
         unsigned next = base;
         // 2. connected areas of that colour
+        const uint8_t *nb = near.data();
+        const uint32_t bit4 = bit * 0x01010101u;
         for (unsigned start = 0; start < n && next - base < 60000; start++) {
-            if (!(near[start] & bit) || label[start] > base) continue;
+            // most pixels aren't this colour: past them 4 at a time
+            for (uint32_t q; start + 4 <= n; start += 4) {
+                memcpy(&q, nb + start, 4);
+                if (q & bit4) break;
+            }
+            if (start >= n) break;
+            if (!(nb[start] & bit) || label[start] > base) continue;
             ++next;
             unsigned area = 0, l = w, t = h, r = 0, b = 0;
             stack.clear();
