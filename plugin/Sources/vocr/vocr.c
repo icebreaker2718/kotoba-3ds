@@ -632,7 +632,91 @@ int vocr_preprocess(const vocr_model *m, const vocr_image *img, unsigned char *o
  * scalar code. Taps that fall in the top/bottom padding are skipped; columns
  * outside the line are zero-filled by the producer, so they need no checks here.
  */
+/* max(v, 0), +0 for v <= 0. Without NEON as (v + |v|) / 2 (Kotoba3DS change): the same bits for
+ * every value below 2^127 (v > 0: v + v and the halving are exact; v <= 0: -|v| + |v| = +0), also
+ * with flush-to-zero, and three VFP operations that pipeline, where the compare has to wait for
+ * the VFP and move its flags to the ARM core (on the ARM11 several cycles a value). */
+#ifdef VOCR_NEON
 static float relu_f(float v) { return v > 0.0f ? v : 0.0f; }
+#else
+static float relu_f(float v) { return (v + fabsf(v)) * 0.5f; }
+#endif
+
+/* Kotoba3DS addition: the taps of the depthwise layers and of the first convolution for 8
+ * channels at a time in ARM VFP assembly (the ARM11's VFP11): each tap's 8 inputs and 8 weights
+ * in two VLDMs (two registers a cycle) instead of 16 VLDRs, and the 8 sums in s16-s23 throughout.
+ * VMLA rounds the product before the add, as the C code's a = a + w * x, in the same tap order,
+ * so the sums are the C code's bits. acc[8] in and out; t: the first tap's input and weights, the
+ * byte steps to the next tap of a row (dx) and to the next row (dy), taps per row, rows (>= 1). */
+#if defined(__arm__) && !defined(__thumb__) && !defined(VOCR_NEON) && defined(__VFP_FP__) && !defined(__SOFTFP__) && \
+    !defined(VOCR_NO_VFP_ASM)
+#define VOCR_VFP_ASM 1
+typedef struct {
+    const float *x, *w;
+    uint32_t xs, ws, kw, ndy, xr, wr;
+} vocr_taps;
+void vocr__dw8(float *acc, const vocr_taps *t);   /* x: 8 channels of input per tap */
+void vocr__cv8(float *acc, const vocr_taps *t);   /* x: one input value per tap (one input channel) */
+__asm__(".pushsection .text.vocr__dw8,\"ax\",%progbits\n"
+        ".syntax unified\n"
+        ".arm\n"
+        ".fpu vfp\n"
+        ".align 2\n"
+        ".macro VOCR_TAPS name, scalar\n"
+        ".global \\name\n"
+        ".type \\name, %function\n"
+        "\\name:\n"
+        "    push    {r4-r9, lr}\n"
+        "    vpush   {d8-d11}\n"
+        "    vldmia  r0, {s16-s23}\n"
+        "    ldm     r1, {r2-r9}\n"
+        "1:\n"
+        "    mov     ip, r6\n"
+        "    mov     r1, r2\n"
+        "    mov     lr, r3\n"
+        "2:\n"
+        "    vldmia  lr, {s8-s15}\n"
+        ".if \\scalar\n"
+        "    vldr    s0, [r1]\n"
+        "    add     r1, r1, r4\n"
+        "    add     lr, lr, r5\n"
+        "    vmla.f32 s16, s8, s0\n"
+        "    vmla.f32 s17, s9, s0\n"
+        "    vmla.f32 s18, s10, s0\n"
+        "    vmla.f32 s19, s11, s0\n"
+        "    vmla.f32 s20, s12, s0\n"
+        "    vmla.f32 s21, s13, s0\n"
+        "    vmla.f32 s22, s14, s0\n"
+        "    vmla.f32 s23, s15, s0\n"
+        ".else\n"
+        "    vldmia  r1, {s0-s7}\n"
+        "    add     r1, r1, r4\n"
+        "    add     lr, lr, r5\n"
+        "    vmla.f32 s16, s8, s0\n"
+        "    vmla.f32 s17, s9, s1\n"
+        "    vmla.f32 s18, s10, s2\n"
+        "    vmla.f32 s19, s11, s3\n"
+        "    vmla.f32 s20, s12, s4\n"
+        "    vmla.f32 s21, s13, s5\n"
+        "    vmla.f32 s22, s14, s6\n"
+        "    vmla.f32 s23, s15, s7\n"
+        ".endif\n"
+        "    subs    ip, ip, #1\n"
+        "    bne     2b\n"
+        "    add     r2, r2, r8\n"
+        "    add     r3, r3, r9\n"
+        "    subs    r7, r7, #1\n"
+        "    bne     1b\n"
+        "    vstmia  r0, {s16-s23}\n"
+        "    vpop    {d8-d11}\n"
+        "    pop     {r4-r9, pc}\n"
+        ".size \\name, .-\\name\n"
+        ".endm\n"
+        "    VOCR_TAPS vocr__dw8, 0\n"
+        "    VOCR_TAPS vocr__cv8, 1\n"
+        ".purgem VOCR_TAPS\n"
+        ".popsection\n");
+#endif
 
 /* CONV with one input channel (the stem). win: [col][h_in]; output column t reads
  * window columns t * sw + dx. Writes output columns [t0, t1) to out. */
@@ -695,6 +779,23 @@ static VOCR_NOINLINE void k_conv1(const vocr_op *op, const float *win, float *ou
                 } else {
                     a0 = a1 = a2 = a3 = a4 = a5 = a6 = a7 = 0.0f;
                 }
+#ifdef VOCR_VFP_ASM
+                if (dy1 > dy0) {
+                    float acc[8];
+                    vocr_taps tp;
+                    acc[0] = a0, acc[1] = a1, acc[2] = a2, acc[3] = a3, acc[4] = a4, acc[5] = a5, acc[6] = a6, acc[7] = a7;
+                    tp.x = win + (size_t)(t * op->sw) * Hi + (unsigned)(r0 + (int)dy0);
+                    tp.w = op->w + (size_t)(dy0 * kw) * C + c0;
+                    tp.xs = Hi * 4u;
+                    tp.ws = C * 4u;
+                    tp.kw = kw;
+                    tp.ndy = dy1 - dy0;
+                    tp.xr = 4u;
+                    tp.wr = kw * C * 4u;
+                    vocr__cv8(acc, &tp);
+                    a0 = acc[0], a1 = acc[1], a2 = acc[2], a3 = acc[3], a4 = acc[4], a5 = acc[5], a6 = acc[6], a7 = acc[7];
+                }
+#else
                 for (dy = dy0; dy < dy1; dy++)
                     for (dx = 0; dx < kw; dx++) {
                         const float x = win[(size_t)(t * op->sw + dx) * Hi + (unsigned)(r0 + (int)dy)];
@@ -708,6 +809,7 @@ static VOCR_NOINLINE void k_conv1(const vocr_op *op, const float *win, float *ou
                         a6 = a6 + wt[6] * x;
                         a7 = a7 + wt[7] * x;
                     }
+#endif
                 if (relu) { /* straight from the registers (through s[], gcc 13 stores and reloads each) */
                     a0 = relu_f(a0), a1 = relu_f(a1), a2 = relu_f(a2), a3 = relu_f(a3);
                     a4 = relu_f(a4), a5 = relu_f(a5), a6 = relu_f(a6), a7 = relu_f(a7);
@@ -799,6 +901,23 @@ static VOCR_NOINLINE void k_dw(const vocr_op *op, const float *win, float *out, 
                 } else {
                     a0 = a1 = a2 = a3 = a4 = a5 = a6 = a7 = 0.0f;
                 }
+#ifdef VOCR_VFP_ASM
+                if (dy1 > dy0) {
+                    float acc[8];
+                    vocr_taps tp;
+                    acc[0] = a0, acc[1] = a1, acc[2] = a2, acc[3] = a3, acc[4] = a4, acc[5] = a5, acc[6] = a6, acc[7] = a7;
+                    tp.x = win + ((size_t)(t * op->sw) * Hi + (unsigned)(r0 + (int)dy0)) * C + c0;
+                    tp.w = op->w + (size_t)(dy0 * kw) * C + c0;
+                    tp.xs = Hi * C * 4u;
+                    tp.ws = C * 4u;
+                    tp.kw = kw;
+                    tp.ndy = dy1 - dy0;
+                    tp.xr = C * 4u;
+                    tp.wr = kw * C * 4u;
+                    vocr__dw8(acc, &tp);
+                    a0 = acc[0], a1 = acc[1], a2 = acc[2], a3 = acc[3], a4 = acc[4], a5 = acc[5], a6 = acc[6], a7 = acc[7];
+                }
+#else
                 for (dy = dy0; dy < dy1; dy++)
                     for (dx = 0; dx < kw; dx++) {
                         const float *x = win + ((size_t)(t * op->sw + dx) * Hi + (unsigned)(r0 + (int)dy)) * C + c0;
@@ -812,6 +931,7 @@ static VOCR_NOINLINE void k_dw(const vocr_op *op, const float *win, float *out, 
                         a6 = a6 + wt[6] * x[6];
                         a7 = a7 + wt[7] * x[7];
                     }
+#endif
                 if (relu) { /* straight from the registers (through s[], gcc 13 stores and reloads each) */
                     a0 = relu_f(a0), a1 = relu_f(a1), a2 = relu_f(a2), a3 = relu_f(a3);
                     a4 = relu_f(a4), a5 = relu_f(a5), a6 = relu_f(a6), a7 = relu_f(a7);
