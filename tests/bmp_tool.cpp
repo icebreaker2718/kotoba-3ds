@@ -15,7 +15,7 @@ private:
 int main(int, char **argv) {
     FileReader r(argv[1]);
     std::string out, err;
-    if (!topScreenRGB565(r, out, err)) { printf("error: %s\n", err.c_str()); return 1; }
+    if (!screenshotRGB565(r, out, err)) { printf("error: %s\n", err.c_str()); return 1; }
     FILE *f = fopen(argv[2], "wb"); fwrite(out.data(), 1, out.size(), f); fclose(f);
     printf("%zu bytes\n", out.size());
     return 0;

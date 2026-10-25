@@ -1,3 +1,7 @@
+// Built for speed (the plugin's C++ is otherwise built for size): the screens are painted from here.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize("O2")
+#endif
 #include "core/bmp.hpp"
 
 #include <cstdio>
@@ -10,7 +14,7 @@ namespace kt {
 static uint32_t rd32(const uint8_t *p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24); }
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 
-bool topScreenRGB565(Reader &bmp, std::string &out, std::string &error) {
+bool screenshotRGB565(Reader &bmp, std::string &out, std::string &error) {
     uint8_t h[54];
     if (bmp.size() < sizeof(h) || !bmp.read(0, h, sizeof(h)) || h[0] != 'B' || h[1] != 'M') {
         error = "the screenshot is not a BMP file";
@@ -27,7 +31,7 @@ bool topScreenRGB565(Reader &bmp, std::string &out, std::string &error) {
     bool bottomUp = height > 0;
     uint32_t H = bottomUp ? (uint32_t)height : (uint32_t)(-height);
     uint32_t W = (uint32_t)width;
-    uint32_t outW = W < 400 ? W : 400, outH = H < 240 ? H : 240;
+    uint32_t outW = W < 400 ? W : 400, outH = H < 480 ? H : 480;
     uint32_t bytesPP = bpp / 8;
     uint32_t stride = (W * bytesPP + 3) & ~3u;
 
@@ -221,6 +225,71 @@ std::string bmpFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
         }
     }
     return out;
+}
+
+void framebufferColumnToPicture(const uint8_t *fb, unsigned n, int format, unsigned bpp, unsigned picBytes, uint8_t *pic) {
+    for (unsigned i = 0; i < n; i++, fb += bpp) {
+        uint8_t rgb[3];
+        framebufferToRGB(fb, 1, format, bpp, rgb);
+        if (picBytes == 3) {
+            *pic++ = rgb[0];
+            *pic++ = rgb[1];
+            *pic++ = rgb[2];
+        } else {
+            const uint16_t v = (uint16_t)(((rgb[0] & 0xF8) << 8) | ((rgb[1] & 0xFC) << 3) | (rgb[2] >> 3));
+            *pic++ = (uint8_t)(v & 0xFF);
+            *pic++ = (uint8_t)(v >> 8);
+        }
+    }
+}
+
+void picturePixelRGB(const uint8_t *pic, unsigned picBytes, uint8_t *rgb) {
+    if (picBytes == 3) {
+        rgb[0] = pic[0];
+        rgb[1] = pic[1];
+        rgb[2] = pic[2];
+        return;
+    }
+    const unsigned v = pic[0] | (pic[1] << 8), r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+    rgb[0] = (uint8_t)((r << 3) | (r >> 2));
+    rgb[1] = (uint8_t)((g << 2) | (g >> 4));
+    rgb[2] = (uint8_t)((b << 3) | (b >> 2));
+}
+
+void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picBytes, int tone, unsigned shadeFrom,
+                                unsigned keep, int format, unsigned bpp, uint8_t *fb) {
+    if (picBytes == 3 && format == 0 && bpp == 4) {  // the common case, without the per-pixel tests
+        for (unsigned i = 0; i < n; i++, pic += 3, fb += 4) {
+            unsigned r = pic[0], g = pic[1], b = pic[2];
+            if (tone == 1) r = (r >> 3) + (r >> 4), g = (g >> 3) + (g >> 4), b = (b >> 3) + (b >> 4);
+            else if (tone == 2) r >>= 1, g >>= 1, b >>= 1;
+            if (i >= shadeFrom) r = (r * keep) >> 8, g = (g * keep) >> 8, b = (b * keep) >> 8;
+            fb[0] = 0xFF;
+            fb[1] = (uint8_t)b;
+            fb[2] = (uint8_t)g;
+            fb[3] = (uint8_t)r;
+        }
+        return;
+    }
+    for (unsigned i = 0; i < n; i++, pic += picBytes, fb += bpp) {
+        uint8_t c[3];
+        picturePixelRGB(pic, picBytes, c);
+        for (int k = 0; k < 3; k++) {
+            unsigned v = c[k];
+            if (tone == 1) v = (v >> 3) + (v >> 4);  // ~19%
+            else if (tone == 2) v >>= 1;            // 50%
+            if (i >= shadeFrom) v = (v * keep) >> 8;
+            c[k] = (uint8_t)v;
+        }
+        if (format == 0 && bpp == 4) {  // RGBA8: A, B, G, R
+            fb[0] = 0xFF;
+            fb[1] = c[2];
+            fb[2] = c[1];
+            fb[3] = c[0];
+        } else {
+            rgbToFramebuffer(c, format, fb);
+        }
+    }
 }
 
 }  // namespace kt

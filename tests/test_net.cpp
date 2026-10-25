@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
 
     FileReader shotFile(argv[2]);
     std::string compact;
-    CHECK(topScreenRGB565(shotFile, compact, err), "compact screenshot: %zu bytes from a %u-byte BMP", compact.size(), shotFile.size());
+    CHECK(screenshotRGB565(shotFile, compact, err), "compact screenshot: %zu bytes from a %u-byte BMP", compact.size(), shotFile.size());
     MemReader shot(compact);
     std::string body;
     clock_t t0 = clock();

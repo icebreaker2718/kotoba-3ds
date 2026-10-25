@@ -150,7 +150,7 @@ int main(int argc, char **argv) {
         uint8_t v = rgb[i];
         top.px[i] = view.hidden() ? v : (uint8_t)((v >> 3) + (v >> 4));  // ~19%, as the plugin
     }
-    view.drawTop(top);
+    view.drawTop(top, view.hidden() ? LookupView::Panel::Hidden : LookupView::Panel::Shown);
     view.drawBottom(bottom);
     std::vector<uint8_t> both((size_t)400 * 480 * 3, 24);
     memcpy(both.data(), top.px.data(), top.px.size());

@@ -36,8 +36,14 @@ public:
     bool prefetch();
     bool page(int dir);         // L/R: the other dictionary matches at this spot
     bool scroll(int lines);     // C-stick: the definition up/down
-    void setHidden(bool hidden) { hidden_ = hidden; }
+    void setHidden(bool hidden) { hidden_ = hidden; }  // the Hide button then reads "Show"
     bool hidden() const { return hidden_; }
+
+    // Where the panels go: the text on the touchscreen and the entry on the top screen (the
+    // default), or the other way round (then taps only reach the buttons, which stay on the
+    // touchscreen). Call before setText() or after: the layout follows.
+    void setTextOnTop(bool onTop);
+    bool textOnTop() const { return textOnTop_; }
 
     // ---- what is selected ----
     bool hasResult() const { return !so_.results.empty(); }
@@ -49,11 +55,16 @@ public:
     void setStatus(const std::string &s, Rgb c) { status_ = s; statusColor_ = c; }
 
     // ---- drawing ----
-    void drawBottom(Canvas &c);
-    // The entry panel; the caller has drawn the dimmed game (or black) underneath, and, with
-    // bandShaded, the darker band behind the entry too (topBand() rows, darkened by kBandShade).
-    void drawTop(Canvas &c, bool bandShaded = false);
-    int topBand() const;  // rows of the darker band (0 while hidden)
+    // How a screen's panel is shown: normally; see-through (the text panel without its
+    // background, the entry without its darker band: the caller paints the game lighter
+    // underneath); or hidden (nothing drawn: the game as it is).
+    enum class Panel { Shown, SeeThrough, Hidden };
+    // Each screen's panel. Under the entry the caller has drawn the dimmed game (or black), and,
+    // with bandShaded, the darker band behind it too (entryBand() rows, darkened by kBandShade).
+    // The touchscreen also gets the buttons (not when hidden).
+    void drawTop(Canvas &c, Panel p = Panel::Shown, bool bandShaded = false);
+    void drawBottom(Canvas &c, Panel p = Panel::Shown, bool bandShaded = false);
+    int entryBand() const;  // rows of the darker band behind the entry, on its screen
     static constexpr uint8_t kBandShade = 185;
 
     // Layout, for the tests: the character at (x, y) on the touchscreen, -1 if none.
@@ -92,7 +103,16 @@ private:
     struct Line { std::vector<Span> spans; int size = 16, height = 21; };
     std::vector<Line> entry_;
     int topScroll_ = 0;
-    bool hidden_ = false;
+    bool hidden_ = false, textOnTop_ = false;
+    // the layout's sizes, by where the text goes
+    int textW() const;
+    int textBottom() const;
+    int statusY() const;
+    int entryW() const;
+    int entryEnd() const;  // entry lines end above this
+    void drawTextPanel(Canvas &c, Panel p);
+    void drawEntryPanel(Canvas &c, Panel p, bool bandShaded);
+    void drawButtons(Canvas &c);
     struct Saved { int block; size_t byte, len; };
     std::vector<Saved> saved_;
     std::string status_;

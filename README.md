@@ -6,7 +6,8 @@ words you save into Anki cards with the screenshot and the sentence.
 **On the 3DS** (Luma3DS plugin): press **ZL + ZR** in any game when a line has a word you
 don't know. The game pauses, the 3DS **reads the screen itself** (on-device OCR, no PC or
 internet) and shows the text on the touchscreen: tap a word and its full entry appears on the top
-screen over the paused game. Conjugated forms are matched (食べられなかった → 食べる). **Save** the word: it goes
+screen over the paused game. The touchscreen, or both screens, can be read too, each with its
+own hotkey. Conjugated forms are matched (食べられなかった → 食べる). **Save** the word: it goes
 to `SD:/3ds/kotoba3ds/mined.tsv` with the sentence and a screenshot.
 
 **On the PC** (`tools/mine.py`): fetches the saved words over Wi-Fi (ftpd) or from the SD card
@@ -81,14 +82,15 @@ python tools/build_dict.py --jmdict JMdict_e.gz -o dict.bin  # current one from 
 | `Kotoba3DS-ocr-model.zip` (the OCR model) | unzip to the root of the SD card: `SD:/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr` |
 
 Then open the Rosalina menu (**L + Down + Select**), set **Plugin loader: [Enabled]**, and
-start a game. After a few seconds the plugin is ready; press **Select** to open it.
+start a game. After a few seconds the plugin is ready; press **Select** to open its menu.
 
 > The plugin turns off CTRPF's cheat and search tools. Only its own menu is shown.
 
 ## 3. Use it while playing
 
 1. A line has a word you don't know → press **ZL + ZR**. The game pauses and the 3DS reads the
-   top screen ("Reading the screen…", under a second).
+   top screen ("Reading the screen…", under a second). Text on the touchscreen: set a hotkey for
+   *Read the touchscreen* (or *Read both screens*) in the Select menu.
 2. The text appears in large type on the **touchscreen**. **Tap a word**: its entry shows on the
    top screen over the dimmed game (the layout follows
    [Rubi for Vita](https://github.com/bee-san/Rubi_for_vita)'s overlay), the word in yellow, its
@@ -104,17 +106,28 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    | L / R | the other matches at that spot (homographs, most common first, then shorter words), shown as 1/3 |
    | C-stick (New 3DS / 2DS) | scroll a long definition |
    | **A** (or the Save button) | save the word |
-   | X (or Hide) | hide the definition to see the game |
+   | X (or Hide) | uncover the screen that was read: see-through or hidden (*Hide (X)* in the menu); again to come back |
    | **B** (or Close) | close; the game continues |
 
    If the screen had several blocks of text (a menu and a dialogue box), they are all there, the
-   longest first, with a line between them.
-3. **Save** writes the word to `mined.tsv` with the sentence and a screenshot of the paused game
-   (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green.
+   longest first, with a line between them (both screens: the top screen's first). When the
+   touchscreen was read, its text can also go on the top screen and the entry on the touchscreen
+   (*Touchscreen text shows on*).
+3. **Save** writes the word to `mined.tsv` with the sentence and a screenshot of the screen(s)
+   that were read (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green.
 
-The **Select** menu has: *Last results* (reopen the text of your last lookup), *Saved words* (review or
-delete), *Hotkey* (if ZL + ZR does something in your game), *Anki cards* (see below),
-*How to use* and *Speed test* (the next read is timed in several ways, into `ocr_log.txt`).
+The **Select** menu (drawn like the lookup: tap, or D-pad and A) has:
+
+| Item | Does |
+|---|---|
+| *Read the top screen* / *Read the touchscreen* / *Read both screens* | each reading's hotkey: hold the button(s) you want, one or several, then let go (or *Turn off*) |
+| *Touchscreen text shows on* | the touchscreen (tap the words) or the top screen (the entry then goes on the touchscreen) |
+| *Hide (X)* | see-through, hidden, or see-through then hidden |
+| *Last lookup* | reopen the text of your last lookup |
+| *Saved words* | review them with their entry; Y deletes one |
+| *Make Anki cards* | send the saved words to your PC (below) |
+| *PC* | find your PC, or type its address |
+| *How to use* | the controls in short |
 
 **How it reads the screen.** The text box is found by its flat colour (so a box that moves
 around is fine), its lines are read, furigana and stray marks (the "next" arrow) are dropped.
@@ -132,12 +145,12 @@ On a New 3DS / 2DS the plugin runs the CPU at full speed (804 MHz + L2 cache, as
 system lets the plugin use the fourth CPU core); the game's own
 setting is restored when you close the lookup.
 
-**Cards while you play.** With `py -3.12 tools\ocr_server.py` running on your PC (same Wi-Fi,
-Anki open), every word you save also becomes a Lapis card right away, with the definition,
-audio, pitch and picture. The first time, the plugin looks for your PC automatically; you can
-also enter its address under **Anki cards** in the Select menu, or turn this off there. The word
-is always written to the SD card first, so if the PC isn't reachable nothing is lost: run
-`mine.py` later and it adds those words, skipping any that already became cards.
+**Cards from the 3DS.** Saving never needs a PC: words wait on the SD card. When you're near
+your PC, run `py -3.12 tools\ocr_server.py` there (same Wi-Fi, Anki open) and choose **Make Anki
+cards** in the Select menu: every saved word is sent and becomes a Lapis card, with the
+definition, audio, pitch and picture (words that are cards already are skipped), and you can
+then clear them from the list. The plugin finds your PC automatically; you can also type its
+address under **PC**. `mine.py` (below) still works too, over ftpd or from the SD card.
 
 ## 4. Make the Anki cards on your PC
 
@@ -239,8 +252,8 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
 /luma/plugins/default.3gx      the plugin
 /3ds/kotoba3ds/dict.bin        dictionary
 /3ds/kotoba3ds/mined.tsv       saved words (tab-separated, UTF-8)
-/3ds/kotoba3ds/shots/          screenshots (top screen above bottom screen, 400x480 BMP)
-/3ds/kotoba3ds/settings.txt    hotkey choice
+/3ds/kotoba3ds/shots/          screenshots of the screen(s) read (400x240, 320x240, or both 400x480 BMP)
+/3ds/kotoba3ds/settings.txt    hotkeys and the menu's choices
 ```
 
 ## Troubleshooting
@@ -257,7 +270,7 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
 - **"Couldn't read the screen: No OCR model found"**: unzip `Kotoba3DS-ocr-model.zip` to the
   root of the SD card (the model goes to `SD:/3ds/kotoba3ds/ocr/`).
 - **Cards aren't sent to the PC**: check `ocr_server.py` is running and that Windows Firewall
-  allows Python on private networks. Then type the address it prints under **Anki cards**. The
+  allows Python on private networks. Then type the address it prints under **PC**. The
   3DS only uses 2.4 GHz Wi-Fi. Saved words are kept either way; `mine.py` adds them later.
 - **"networking needs Luma3DS v13.2 or newer"**: plugins can only use the network on Luma
   v13.2+. Update Luma (the version shows at the top of the Rosalina menu).

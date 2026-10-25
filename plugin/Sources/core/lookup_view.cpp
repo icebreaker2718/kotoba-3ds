@@ -46,10 +46,26 @@ static bool noRowStart(uint32_t cp) {
     }
 }
 
+int LookupView::textW() const { return textOnTop_ ? kTopW : kBottomW; }
+int LookupView::textBottom() const { return textOnTop_ ? kTopH - 26 : kTextBottom; }
+int LookupView::statusY() const { return textOnTop_ ? kTopH - 22 : kStatusY; }
+int LookupView::entryW() const { return textOnTop_ ? kBottomW : kTopW; }
+int LookupView::entryEnd() const { return textOnTop_ ? kButtonY - 4 : kTopH - 6; }
+
+void LookupView::setTextOnTop(bool onTop) {
+    if (onTop == textOnTop_) return;
+    textOnTop_ = onTop;
+    layout();
+    if (selBlock_ >= 0) {
+        buildEntry();
+        keepVisible();
+    }
+}
+
 void LookupView::layout() {
     cells_.clear();
     rows_.clear();
-    const int maxW = kBottomW - 2 * kMargin;
+    const int maxW = textW() - 2 * kMargin;
     int y = 0;
     for (size_t b = 0; b < blocks_.size(); b++) {
         if (b > 0) y += kBlockGap;
@@ -232,7 +248,7 @@ void LookupView::buildEntry() {
         entry_.push_back(l);
         return;
     }
-    const int maxW = kTopW - 2 * kTopMargin - 34;  // room for the 1/3 counter
+    const int maxW = entryW() - 2 * kTopMargin - 34;  // room for the 1/3 counter
     // headword (reading)
     std::string expr = expressionFor(e, r.matchedKey);
     Line head;
@@ -265,7 +281,7 @@ void LookupView::buildEntry() {
         entry_.push_back(head);
     }
     auto small = [&](const std::string &text, Rgb c) {
-        for (const std::string &w : tr_.wrap(text, kSmall, kTopW - 2 * kTopMargin)) {
+        for (const std::string &w : tr_.wrap(text, kSmall, entryW() - 2 * kTopMargin)) {
             Line l;
             l.size = kSmall;
             l.height = kSmall + 5;
@@ -285,7 +301,7 @@ void LookupView::buildEntry() {
     if (!others.empty()) small("Also written " + others, kDim);
     // senses: "1. (v1,vt) to eat" with the number and the part of speech in grey
     for (const std::string &sense : e.senses) {
-        std::vector<std::string> lines = tr_.wrap(sense, kSenseSize, kTopW - 2 * kTopMargin);
+        std::vector<std::string> lines = tr_.wrap(sense, kSenseSize, entryW() - 2 * kTopMargin);
         for (size_t k = 0; k < lines.size(); k++) {
             Line l;
             l.size = kSenseSize;
@@ -311,7 +327,7 @@ void LookupView::buildEntry() {
 void LookupView::keepVisible() {
     int c = selectedCell();
     if (c < 0) return;
-    const int areaH = kTextBottom - kTextTop;
+    const int areaH = textBottom() - kTextTop;
     int top = rows_[cells_[c].row].y;
     // the whole selection (it may run onto the next row)
     int lastRow = cells_[c].row;
@@ -324,7 +340,7 @@ void LookupView::keepVisible() {
 }
 
 int LookupView::charAt(int x, int y) const {
-    if (y < kTextTop || y >= kTextBottom) return -1;
+    if (textOnTop_ || y < kTextTop || y >= textBottom()) return -1;
     int cy = y - kTextTop + scrollY_;
     for (const Row &r : rows_) {
         if (cy < r.y || cy >= r.y + kRowH) continue;
@@ -461,7 +477,7 @@ bool LookupView::page(int dir) {
 int LookupView::topLinesFit() const {  // from topScroll_
     int y = kTopMargin, n = 0;
     for (size_t i = topScroll_; i < entry_.size(); i++, n++) {
-        if (y + entry_[i].height > kTopH - 6) break;
+        if (y + entry_[i].height > entryEnd()) break;
         y += entry_[i].height;
     }
     return n;
@@ -471,7 +487,7 @@ bool LookupView::scroll(int lines) {
     int before = topScroll_;
     // the furthest down that still fills the screen
     int maxScroll = (int)entry_.size();
-    for (int h = 0; maxScroll > 0 && h + entry_[maxScroll - 1].height <= kTopH - 6 - kTopMargin;)
+    for (int h = 0; maxScroll > 0 && h + entry_[maxScroll - 1].height <= entryEnd() - kTopMargin;)
         h += entry_[--maxScroll].height;
     topScroll_ = std::max(0, std::min(topScroll_ + lines, maxScroll));
     return topScroll_ != before;
@@ -495,14 +511,28 @@ static void frame(Canvas &c, int x, int y, int w, int h, Rgb fill, Rgb edge) {
     c.fill(x + 1, y + 1, w - 2, h - 2, fill);
 }
 
-void LookupView::drawBottom(Canvas &c) {
-    c.fill(0, 0, kBottomW, kBottomH, kBg);
-    const int areaH = kTextBottom - kTextTop;
+void LookupView::drawTop(Canvas &c, Panel p, bool bandShaded) {
+    if (textOnTop_) drawTextPanel(c, p);
+    else drawEntryPanel(c, p, bandShaded);
+}
+
+void LookupView::drawBottom(Canvas &c, Panel p, bool bandShaded) {
+    if (p == Panel::Hidden) return;
+    if (textOnTop_) drawEntryPanel(c, p, bandShaded);
+    else drawTextPanel(c, p);
+    drawButtons(c);
+}
+
+// The text that was read, a row at a time (whole rows only), the selection highlighted.
+void LookupView::drawTextPanel(Canvas &c, Panel p) {
+    if (p == Panel::Hidden) return;
+    const int W = textW(), bottomY = textBottom(), areaH = bottomY - kTextTop;
+    if (p == Panel::Shown) c.fill(0, 0, W, textOnTop_ ? kTopH : kBottomH, kBg);
     // block separators
     for (size_t r = 1; r < rows_.size(); r++)
         if (rows_[r].block != rows_[r - 1].block) {
             int y = kTextTop + rows_[r].y - scrollY_ - kBlockGap / 2 - 1;
-            if (y >= kTextTop && y < kTextBottom) c.fill(kMargin, y, kBottomW - 2 * kMargin, 1, kRule);
+            if (y >= kTextTop && y < bottomY) c.fill(kMargin, y, W - 2 * kMargin, 1, kRule);
         }
     for (const Row &r : rows_) {
         int y = r.y - scrollY_;
@@ -521,18 +551,20 @@ void LookupView::drawBottom(Canvas &c) {
         }
     }
     // more text above / below
-    if (scrollY_ > 0) tr_.draw(c, kBottomW - 14, kTextTop - 4, "▲", 12, kDim);
-    if (contentH_ - scrollY_ > areaH) tr_.draw(c, kBottomW - 14, kTextBottom - 10, "▼", 12, kDim);
+    if (scrollY_ > 0) tr_.draw(c, W - 14, kTextTop - 4, "▲", 12, kDim);
+    if (contentH_ - scrollY_ > areaH) tr_.draw(c, W - 14, bottomY - 10, "▼", 12, kDim);
     // status, or the controls
     if (!status_.empty()) {
-        std::vector<std::string> s = tr_.wrap(status_, kStatusSize, kBottomW - 2 * kMargin);
-        if (!s.empty()) tr_.draw(c, kMargin, kStatusY, s[0], kStatusSize, statusColor_);
+        std::vector<std::string> s = tr_.wrap(status_, kStatusSize, W - 2 * kMargin);
+        if (!s.empty()) tr_.draw(c, kMargin, statusY(), s[0], kStatusSize, statusColor_);
     } else {
         std::string hint = "\uE07B\uE07C\uE049 words  \uE052\uE053 meanings  C-stick scroll";
         int w = tr_.width(hint, 13);
-        tr_.draw(c, (kBottomW - w) / 2, kStatusY + 1, hint, 13, kDim);
+        tr_.draw(c, (W - w) / 2, statusY() + 1, hint, 13, kDim);
     }
-    // buttons
+}
+
+void LookupView::drawButtons(Canvas &c) {
     const int bw = (kBottomW - 16) / 3;
     const char *labels[3] = {"\uE000 Save", hidden_ ? "\uE002 Show" : "\uE002 Hide", "\uE001 Close"};
     for (int i = 0; i < 3; i++) {
@@ -544,23 +576,25 @@ void LookupView::drawBottom(Canvas &c) {
     }
 }
 
-int LookupView::topBand() const {
-    if (hidden_) return 0;
+int LookupView::entryBand() const {
     int h = kTopMargin;
-    for (size_t i = topScroll_; i < entry_.size() && h + entry_[i].height <= kTopH - 6; i++) h += entry_[i].height;
-    return std::min(h + 6, kTopH);
+    for (size_t i = topScroll_; i < entry_.size() && h + entry_[i].height <= entryEnd(); i++) h += entry_[i].height;
+    return std::min(h + 6, textOnTop_ ? kButtonY - 4 : kTopH);
 }
 
-void LookupView::drawTop(Canvas &c, bool bandShaded) {
-    if (hidden_) return;
-    // a darker band behind the entry, so it reads over a bright speech bubble too
-    const int h = topBand();
-    if (!bandShaded) c.shade(0, 0, kTopW, h, kBandShade);
-    if (h < kTopH) c.fill(0, h, kTopW, 1, kRule);
+void LookupView::drawEntryPanel(Canvas &c, Panel p, bool bandShaded) {
+    if (p == Panel::Hidden) return;
+    const int W = entryW(), end = entryEnd();
+    if (p == Panel::Shown) {
+        // a darker band behind the entry, so it reads over a bright speech bubble too
+        const int h = entryBand();
+        if (!bandShaded) c.shade(0, 0, W, h, kBandShade);
+        if (h < (textOnTop_ ? kBottomH : kTopH)) c.fill(0, h, W, 1, kRule);
+    }
     int y = kTopMargin;
     for (size_t i = topScroll_; i < entry_.size(); i++) {
         const Line &l = entry_[i];
-        if (y + l.height > kTopH - 6) break;
+        if (y + l.height > end) break;
         int x = kTopMargin;
         for (const Span &s : l.spans) {
             int size = s.size ? s.size : l.size;  // a smaller span sits on the line's baseline
@@ -574,10 +608,10 @@ void LookupView::drawTop(Canvas &c, bool bandShaded) {
         snprintf(b, sizeof(b), "%u/%u", (unsigned)resultIdx_ + 1, (unsigned)so_.results.size());
         std::string t = std::string("\uE052") + b + "\uE053";
         int w = tr_.width(t, kSmall);
-        tr_.draw(c, kTopW - kTopMargin - w, kTopMargin + 4, t, kSmall, kDim);
+        tr_.draw(c, W - kTopMargin - w, kTopMargin + 4, t, kSmall, kDim);
     }
-    if (topScroll_ > 0) tr_.draw(c, kTopW - 18, kTopH - 40, "▲", 12, kDim);
-    if (topScroll_ + topLinesFit() < (int)entry_.size()) tr_.draw(c, kTopW - 18, kTopH - 20, "▼", 12, kDim);
+    if (topScroll_ > 0) tr_.draw(c, W - 18, end - 34, "▲", 12, kDim);
+    if (topScroll_ + topLinesFit() < (int)entry_.size()) tr_.draw(c, W - 18, end - 14, "▼", 12, kDim);
 }
 
 }  // namespace kt

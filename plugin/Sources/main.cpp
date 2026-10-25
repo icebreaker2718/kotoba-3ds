@@ -1,11 +1,11 @@
 // Kotoba3DS - in-game Japanese dictionary + Anki mining log, as a Luma3DS (CTRPF) plugin.
 //
-// In a game, press the hotkey (default ZL+ZR) on a line with a word you don't know: the game
-// pauses, the 3DS reads the top screen itself (on-device OCR, plugin/Sources/vocr) and shows the
-// text on the touchscreen: tap a word (or move with the D-pad) and its entry shows on the top
-// screen over the dimmed game (the layout follows Rubi for Vita's overlay). Saved words go to
-// SD:/3ds/kotoba3ds/mined.tsv with a screenshot; tools/mine.py on the PC (or ocr_server.py,
-// right away) turns them into Anki cards through AnkiConnect.
+// In a game, press a hotkey (default ZL+ZR: the top screen; the touchscreen and both screens can
+// have their own): the game pauses, the 3DS reads the screen itself (on-device OCR,
+// plugin/Sources/vocr) and shows the text: tap a word (or move with the D-pad) and its entry
+// shows over the dimmed game (the layout follows Rubi for Vita's overlay). Saved words go to
+// SD:/3ds/kotoba3ds/mined.tsv with a screenshot; "Make Anki cards" in the Select menu sends them
+// to tools/ocr_server.py on the PC (or tools/mine.py reads them later).
 #include <3ds.h>
 #include <CTRPluginFramework.hpp>
 
@@ -21,13 +21,14 @@
 #include "core/bmp.hpp"
 #include "core/dict.hpp"
 #include "core/correct.hpp"
+#include "core/hotkeys.hpp"
 #include "core/local_ocr.hpp"
 #include "core/lookup_view.hpp"
+#include "core/menu_view.hpp"
 #include "core/net.hpp"
 #include "core/search.hpp"
 #include "core/textbox.hpp"
 #include "core/textlines.hpp"
-#include "core/wrap.hpp"
 #include "screen_ui.hpp"
 
 extern "C" u32 __ctru_heap_size;  // libctru: the plugin's heap (what Luma gave it, minus code and CTRPF's own)
@@ -44,41 +45,19 @@ static const char *kShotDir = "/3ds/kotoba3ds/shots";
 static const char *kSettingsPath = "/3ds/kotoba3ds/settings.txt";
 static const char *kModelDir = "/3ds/kotoba3ds/ocr/";
 
-struct HotkeyChoice { const char *name; u32 keys; };
-static const HotkeyChoice kHotkeys[] = {
-    {"ZL + ZR", Key::ZL | Key::ZR},
-    {"L + R + Down", Key::L | Key::R | Key::DPadDown},
-    {"R + Down", Key::R | Key::DPadDown},
-    {"Start + Select", Key::Start | Key::Select},
-    {"Off", 0},
-};
-static const int kHotkeyCount = sizeof(kHotkeys) / sizeof(kHotkeys[0]);
-static int g_hotkey = 0;
+// What a read covers. Each has its own hotkey (0 = off).
+enum ReadMode { kReadTop = 0, kReadBottom = 1, kReadBoth = 2, kModes = 3 };
+static const char *const kModeNames[kModes] = {"Read the top screen", "Read the touchscreen", "Read both screens"};
+static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
+static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
+enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
+static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
+static std::string *g_serverPtr = nullptr;  // "192.168.1.20:7331", empty = find automatically
+static const int kPcPort = 7331;
 
-// ---------------------------------------------------------------------------
-// Dictionary on the SD card
-// ---------------------------------------------------------------------------
-class SdReader : public kt::Reader {
-public:
-    bool open(const std::string &path) {
-        if (File::Open(file_, path, File::READ) != File::SUCCESS) return false;
-        size_ = (u32)file_.GetSize();
-        return true;
-    }
-    bool read(uint32_t off, void *dst, uint32_t len) override {
-        u64 t0 = svcGetSystemTick();
-        bool ok = file_.Seek(off, File::SET) == File::SUCCESS && file_.Read(dst, len) == File::SUCCESS;
-        reads++;
-        ticks += svcGetSystemTick() - t0;
-        return ok;
-    }
-    u32 reads = 0;  // for the log: how many reads, and how long they took
-    u64 ticks = 0;
-    uint32_t size() override { return size_; }
-private:
-    File file_;
-    u32 size_ = 0;
-};
+template <typename T>
+static T &Leaky(T *&slot);
+#define g_server Leaky(g_serverPtr)
 
 // Long-lived state is created on first use and deliberately never destroyed. When the game
 // closes, the plugin's memory can already be in the middle of being torn down, and freeing
@@ -88,47 +67,6 @@ template <typename T>
 static T &Leaky(T *&slot) {
     if (!slot) slot = new T();
     return *slot;
-}
-static SdReader *g_readerPtr = nullptr;
-static kt::Dictionary *g_dictPtr = nullptr;
-static std::string *g_dictErrorPtr = nullptr;
-static std::vector<std::string> *g_lastBlocksPtr = nullptr;  // the text of the last lookup
-#define g_reader Leaky(g_readerPtr)
-#define g_dict Leaky(g_dictPtr)
-#define g_dictError Leaky(g_dictErrorPtr)
-#define g_lastBlocks Leaky(g_lastBlocksPtr)
-
-static bool EnsureDict() {
-    if (g_dict.isOpen()) return true;
-    if (!g_reader.open(kDictPath)) {
-        g_dictError = std::string("Dictionary not found:\n") + kDictPath +
-                      "\n\nBuild it on your PC with tools/build_dict.py and copy dict.bin there.";
-    } else if (!g_dict.open(&g_reader, g_dictError)) {
-        // g_dictError set by open()
-    }
-    if (!g_dict.isOpen()) {
-        MessageBox("Kotoba3DS", g_dictError)();
-        return false;
-    }
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-static std::string Timestamp() {
-    // osGetTime: ms since 1900-01-01, console local time
-    time_t t = (time_t)(osGetTime() / 1000ULL - 2208988800ULL);
-    struct tm *tm = gmtime(&t);
-    if (!tm) return "0000-00-00 00:00:00";
-    return Utils::Format("%04d-%02d-%02d %02d:%02d:%02d", tm->tm_year + 1900, tm->tm_mon + 1,
-                         tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-}
-
-static std::string TitleIdHex() {
-    std::string tid;
-    Process::GetTitleID(tid);
-    return tid;
 }
 
 static bool ReadWholeFile(const std::string &path, std::string &out, u32 maxBytes = 1024 * 1024) {
@@ -151,21 +89,17 @@ static bool WriteWholeFile(const std::string &path, const std::string &data) {
     return ok;
 }
 
-// Settings. Saved words can also go straight to the PC (tools/ocr_server.py) as Anki cards.
-static bool g_cardsEnabled = true;
-static u64 g_pcDownUntil = 0;       // after a failed attempt, don't retry for a while
-static std::string *g_serverPtr = nullptr;  // "192.168.1.20:7331", empty = find automatically
-#define g_server Leaky(g_serverPtr)
-static const int kPcPort = 7331;
-
 static void SaveSettings() {
-    WriteWholeFile(kSettingsPath, Utils::Format("hotkey=%d\ncards=%d\nserver=", g_hotkey, g_cardsEnabled ? 1 : 0) +
+    WriteWholeFile(kSettingsPath, Utils::Format("key_top=%lu\nkey_bottom=%lu\nkey_both=%lu\ntext_on_top=%d\nhide=%d\nserver=",
+                                                (unsigned long)g_combo[0], (unsigned long)g_combo[1],
+                                                (unsigned long)g_combo[2], g_textOnTop ? 1 : 0, g_hideMode) +
                                       g_server + "\n");
 }
 
 static std::string SettingValue(const std::string &s, const char *key) {
     std::string k = std::string(key) + "=";
     size_t p = s.find(k);
+    while (p != std::string::npos && p > 0 && s[p - 1] != '\n') p = s.find(k, p + 1);  // at a line start
     if (p == std::string::npos) return "";
     size_t e = s.find('\n', p);
     std::string v = s.substr(p + k.size(), e == std::string::npos ? std::string::npos : e - p - k.size());
@@ -176,14 +110,102 @@ static std::string SettingValue(const std::string &s, const char *key) {
 static void LoadSettings() {
     std::string s;
     if (!ReadWholeFile(kSettingsPath, s, 4096)) return;
-    std::string v = SettingValue(s, "hotkey");
-    if (!v.empty()) {
-        int h = atoi(v.c_str());
-        if (h >= 0 && h < kHotkeyCount) g_hotkey = h;
+    static const char *const kKeys[kModes] = {"key_top", "key_bottom", "key_both"};
+    bool any = false;
+    for (int m = 0; m < kModes; m++) {
+        std::string v = SettingValue(s, kKeys[m]);
+        if (v.empty()) continue;
+        g_combo[m] = (u32)strtoul(v.c_str(), nullptr, 10) & kt::keys::Usable;
+        any = true;
     }
-    v = SettingValue(s, "cards");
-    if (!v.empty()) g_cardsEnabled = v != "0";
+    if (!any) {  // settings from before: "hotkey=" picked one of a few combinations
+        static const u32 kOld[] = {Key::ZL | Key::ZR, Key::L | Key::R | Key::DPadDown, Key::R | Key::DPadDown,
+                                   Key::Start | Key::Select, 0};
+        std::string v = SettingValue(s, "hotkey");
+        int h = v.empty() ? 0 : atoi(v.c_str());
+        if (h >= 0 && h < 5) g_combo[0] = kOld[h] & kt::keys::Usable;  // Select now opens the menu
+    }
+    std::string v = SettingValue(s, "text_on_top");
+    if (!v.empty()) g_textOnTop = v == "1";
+    v = SettingValue(s, "hide");
+    if (!v.empty()) g_hideMode = std::max(0, std::min(2, atoi(v.c_str())));
     g_server = SettingValue(s, "server");
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary on the SD card
+// ---------------------------------------------------------------------------
+class SdReader : public kt::Reader {
+public:
+    bool open(const std::string &path) {
+        if (File::Open(file_, path, File::READ) != File::SUCCESS) return false;
+        size_ = (u32)file_.GetSize();
+        return true;
+    }
+    bool read(uint32_t off, void *dst, uint32_t len) override {
+        return file_.Seek(off, File::SET) == File::SUCCESS && file_.Read(dst, len) == File::SUCCESS;
+    }
+    uint32_t size() override { return size_; }
+private:
+    File file_;
+    u32 size_ = 0;
+};
+
+static SdReader *g_readerPtr = nullptr;
+static kt::Dictionary *g_dictPtr = nullptr;
+static std::string *g_dictErrorPtr = nullptr;
+static std::vector<std::string> *g_lastBlocksPtr = nullptr;  // the text of the last lookup
+#define g_reader Leaky(g_readerPtr)
+#define g_dict Leaky(g_dictPtr)
+#define g_dictError Leaky(g_dictErrorPtr)
+#define g_lastBlocks Leaky(g_lastBlocksPtr)
+static bool g_lastTextOnTop = false;  // how the last lookup was laid out
+
+static bool OpenDict() {
+    if (g_dict.isOpen()) return true;
+    if (!g_reader.open(kDictPath)) {
+        g_dictError = std::string("The dictionary isn't on the SD card: ") + kDictPath +
+                      "\n\nDownload dict.bin from the Kotoba3DS release and copy it there.";
+    } else if (!g_dict.open(&g_reader, g_dictError)) {
+        // g_dictError set by open()
+    }
+    return g_dict.isOpen();
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+static std::string Timestamp() {
+    // osGetTime: ms since 1900-01-01, console local time
+    time_t t = (time_t)(osGetTime() / 1000ULL - 2208988800ULL);
+    struct tm *tm = gmtime(&t);
+    if (!tm) return "0000-00-00 00:00:00";
+    return Utils::Format("%04d-%02d-%02d %02d:%02d:%02d", tm->tm_year + 1900, tm->tm_mon + 1,
+                         tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
+}
+
+static std::string TitleIdHex() {
+    std::string tid;
+    Process::GetTitleID(tid);
+    return tid;
+}
+
+static void LogOcr(const std::string &line) {  // each read's timing, for troubleshooting
+    File f;
+    if (File::Open(f, "/3ds/kotoba3ds/ocr_log.txt", File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
+        f.Write(line.c_str(), line.size());
+        f.Write("\n", 1);
+        f.Close();
+    }
+}
+
+// Free heap: what malloc has free inside the heap plus what it hasn't claimed yet (nothing is
+// allocated to find out).
+extern "C" char *fake_heap_end;
+static u32 HeapFree() {
+    struct mallinfo mi = mallinfo();
+    char *top = (char *)sbrk(0);
+    return (u32)mi.fordblks + (top && top < fake_heap_end ? (u32)(fake_heap_end - top) : 0);
 }
 
 // New 3DS: 804 MHz + L2 cache while a lookup is open (the game is paused), then back to what the
@@ -210,140 +232,20 @@ static int CpuMHz() {
 }
 
 // ---------------------------------------------------------------------------
-// Bottom-screen-only UI: the top screen keeps showing the (paused) game.
+// Drawing: the system font at any size (core/ui_text), the screens' framebuffers
 // ---------------------------------------------------------------------------
-static void Present();
-static void ShowBusy(const std::string &line1, const std::string &line2 = "") {
-    const Screen &bottom = OSD::GetBottomScreen();
-    bottom.DrawRect(16, 88, 288, 60, Color::Black, true);
-    bottom.DrawRect(16, 88, 288, 60, Color::SkyBlue, false);
-    bottom.DrawSysfont(line1, 28, 98, Color::White);
-    if (!line2.empty()) bottom.DrawSysfont(line2, 28, 120, Color::Gray);
-    Present();  // shown, and copied to the other buffer (one wait for the screen, not two)
+static SystemFont *g_fontPtr = nullptr;
+#define g_font Leaky(g_fontPtr)
+static kt::TextRenderer *g_textPtr = nullptr;
+
+static kt::TextRenderer &Text() {
+    if (!g_textPtr) g_textPtr = new kt::TextRenderer(g_font);
+    return *g_textPtr;
 }
 
-// A list on the bottom screen only. Returns the chosen index, or < 0 for B / close.
-static int BottomList(const std::vector<std::string> &items, int selected = 0) {
-    Keyboard kb(items);
-    kb.DisplayTopScreen = false;
-    if (selected > 0 && selected < (int)items.size()) kb.ChangeSelectedEntry(selected);
-    return kb.Open();
-}
-
-// Splits text into lines that fit (measured with the system font). See core/wrap.cpp.
-static float SysfontWidth(const std::string &t) { return OSD::GetTextWidth(true, t); }
-static std::vector<std::string> Wrap(const std::string &text, float maxWidth = 284.f) {
-    return kt::wrapText(text, maxWidth, SysfontWidth);
-}
-
-// Text followed by options, all on the bottom screen. Returns the option index, or -1 for B.
-static int BottomMessage(const std::string &text, const std::vector<std::string> &options) {
-    std::vector<std::string> items = Wrap(text);
-    size_t first = items.size();
-    for (const std::string &o : options) items.push_back(o);
-    int sel = (int)first;
-    while (true) {
-        int c = BottomList(items, sel);
-        if (c < 0) return -1;
-        if (c >= (int)first) return c - (int)first;
-        sel = (int)first;  // a text line: stay, move the cursor to the first option
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The paused game's top screen, kept while a lookup is open: read by the OCR, drawn (dimmed)
-// under the definitions, saved as the card's screenshot. Kept in the framebuffer's own layout,
-// 400 columns of 240 pixels from the bottom up, so it goes back with one copy per column.
-// ---------------------------------------------------------------------------
-struct TopSnapshot {
-    bool valid = false;
-    u32 bpp = 0;
-    GSPFormat format = GSP_RGBA8_OES;
-    std::vector<u8> px;
-};
-static TopSnapshot *g_snapPtr = nullptr;
-#define g_snap Leaky(g_snapPtr)
-
+static const Screen &ScreenOf(int i) { return i == 0 ? OSD::GetTopScreen() : OSD::GetBottomScreen(); }
+static u32 ScreenW(int i) { return i == 0 ? 400 : 320; }
 static u8 *Column(const Screen &s, u32 x) { return s.GetFramebuffer(x, 239); }  // its pixel at y = 239
-
-static void TakeTopSnapshot() {  // call while the game is paused and nothing is drawn on top
-    const Screen &top = OSD::GetTopScreen();
-    g_snap.bpp = top.BytesPerPixel;
-    g_snap.format = top.Format;
-    if (g_snap.bpp < 2 || g_snap.bpp > 4) { g_snap.valid = false; return; }
-    const u32 col = 240 * g_snap.bpp;
-    g_snap.px.resize(400 * col);
-    for (u32 x = 0; x < 400; x++) memcpy(&g_snap.px[x * col], Column(top, x), col);
-    g_snap.valid = true;
-}
-
-// The snapshot as R, G, B bytes, row by row from the top (malloc'd; free() it), or nullptr.
-static uint8_t *SnapshotRGB() {
-    if (!g_snap.valid) return nullptr;
-    uint8_t *rgb = (uint8_t *)malloc(400 * 240 * 3);
-    if (rgb) kt::framebufferColumnsToRGB(g_snap.px.data(), 400, 240, (int)g_snap.format, g_snap.bpp, rgb);
-    return rgb;
-}
-
-static inline void Darken(u8 *d, const u8 *s, u32 bpp, GSPFormat fmt) {
-    if (bpp >= 3) {  // 8 bits per channel: keep ~19%
-        for (u32 i = 0; i < bpp; i++) d[i] = (u8)((s[i] >> 3) + (s[i] >> 4));
-        if (fmt == GSP_RGBA8_OES) d[0] = s[0];  // alpha
-        return;
-    }
-    // 16 bits: keep 1/4 (shift each field by 2; masks drop the bits that cross into a neighbour)
-    u16 v = (u16)(s[0] | (s[1] << 8));
-    if (fmt == GSP_RGB565_OES) v = (u16)((v >> 2) & 0x39E7);
-    else if (fmt == GSP_RGBA4_OES) v = (u16)(((v >> 2) & 0x3330) | (v & 0xF));
-    else v = (u16)(((v >> 2) & 0x39CE) | (v & 1));  // RGB5A1
-    d[0] = (u8)(v & 0xFF);
-    d[1] = (u8)(v >> 8);
-}
-
-// The paused game onto the top screen's draw buffer, dimmed or as it was. With band > 0 (8-bit
-// formats only: returns whether it did), the top `band` rows are also darkened as Canvas::shade
-// would (each channel * (255 - shade) >> 8), in the same pass: the framebuffer is only written.
-static bool g_bandDone = false;
-static bool PaintGame(bool dim, int band = 0, unsigned shade = 0) {
-    const Screen &top = OSD::GetTopScreen();
-    if (!g_snap.valid || top.BytesPerPixel != g_snap.bpp) return false;
-    const u32 bpp = g_snap.bpp, col = 240 * bpp;
-    // 8 bits a channel: 4 bytes at a time, each byte to ~19% (alpha kept for RGBA8). Columns are
-    // 720 or 960 bytes and start word-aligned, in the framebuffer and in the snapshot.
-    const bool words = bpp >= 3 && ((uintptr_t)Column(top, 0) & 3) == 0 && ((uintptr_t)g_snap.px.data() & 3) == 0;
-    const u32 keep = g_snap.format == GSP_RGBA8_OES ? 0x000000FFu : 0u;  // byte 0 of each pixel = alpha
-    // the band: RGBA8 a word at a time (B and R in 16-bit lanes); the column's last `band` pixels
-    // are the screen's top rows (columns run bottom to top)
-    const bool shadeHere = band > 0 && dim && words && g_snap.format == GSP_RGBA8_OES && band <= 240;
-    const u32 sk = 255 - shade, bandFrom = shadeHere ? 240 - (u32)band : 240;
-    g_bandDone = shadeHere;
-    for (u32 x = 0; x < 400; x++) {
-        u8 *d = Column(top, x);
-        const u8 *src = &g_snap.px[x * col];
-        if (!dim) {
-            memcpy(d, src, col);
-        } else if (words) {
-            const u32 *s4 = (const u32 *)src;
-            u32 *d4 = (u32 *)d;
-            u32 k = 0;
-            for (; k < bandFrom && k < col / 4; k++) {
-                u32 w = s4[k];
-                u32 v = ((w >> 3) & 0x1F1F1F1Fu) + ((w >> 4) & 0x0F0F0F0Fu);
-                d4[k] = (v & ~keep) | (w & keep);
-            }
-            for (; k < col / 4; k++) {  // RGBA8 only (shadeHere): dimmed, then shaded
-                u32 w = s4[k];
-                u32 v = (((w >> 3) & 0x1F1F1F1Fu) + ((w >> 4) & 0x0F0F0F0Fu)) & ~0xFFu;
-                const u32 br = ((((v >> 8) & 0x00FF00FFu) * sk) >> 8) & 0x00FF00FFu;
-                const u32 g = (((v >> 16) & 0xFFu) * sk) >> 8;
-                d4[k] = (br << 8) | (g << 16) | (w & 0xFFu);
-            }
-        } else {
-            for (u32 k = 0; k < col; k += bpp) Darken(d + k, src + k, bpp, g_snap.format);
-        }
-    }
-    return true;
-}
 
 // Shows what was drawn, and copies it into the other buffers (CTRPF alternates between two per
 // screen; the right eye's too when the game's 3D is on), so one drawing serves them all.
@@ -359,108 +261,239 @@ static void Present() {
     if ((u8 *)b2.LeftFramebuffer != bottom && b2.Stride * 320 == bottomBytes) memcpy((u8 *)b2.LeftFramebuffer, bottom, bottomBytes);
 }
 
-static void ClearTopPanel() {  // the paused game as it was
-    if (!PaintGame(false)) return;
+static const kt::Rgb kPanel(15, 18, 22), kPanelEdge(70, 78, 90), kInk(237, 237, 237), kGreyInk(138, 144, 153),
+    kGood(123, 216, 143), kWarn(255, 170, 90);
+
+// "Reading the screen..." in a box in the middle of the touchscreen, shown at once.
+static void ShowBusy(const std::string &line1, const std::string &line2 = "") {
+    ScreenCanvas c(OSD::GetBottomScreen());
+    c.fill(16, 84, 288, 68, kPanelEdge);
+    c.fill(17, 85, 286, 66, kPanel);
+    kt::TextRenderer &tr = Text();
+    tr.draw(c, 30, line2.empty() ? 107 : 95, line1, 18, kInk);
+    if (!line2.empty()) tr.draw(c, 30, 121, line2, 15, kGreyInk);
     Present();
 }
 
 // ---------------------------------------------------------------------------
-// The PC (tools/ocr_server.py): saved words become Anki cards right away
+// The paused game's screens, kept while a lookup is open: drawn (dimmed) under the text and the
+// entry, saved as the card's screenshot. In the framebuffer's column order (each column bottom to
+// top), as R, G, B, or RGB565 when both screens are kept (less memory: the OCR reads the
+// framebuffers themselves, before anything is drawn on them).
 // ---------------------------------------------------------------------------
-// Top screen of a saved screenshot, 16-bit, for uploading.
-static bool CompactScreenshot(const std::string &shotName, std::string &out, std::string &error) {
-    SdReader bmp;
-    if (!bmp.open(std::string(kShotDir) + "/" + shotName)) {
-        error = "could not open " + shotName;
-        return false;
-    }
-    return kt::topScreenRGB565(bmp, out, error);
+struct Picture {
+    bool valid = false;
+    u32 w = 0, bytes = 3;
+    u8 *px = nullptr;  // malloc'd: short of memory, there is just no picture (no abort)
+};
+static Picture *g_picPtr[2] = {nullptr, nullptr};
+static Picture &Pic(int i) { return Leaky(g_picPtr[i]); }
+
+static void TakePicture(int i, u32 bytes) {  // call while the game is paused and nothing is drawn on it
+    Picture &p = Pic(i);
+    const Screen &s = ScreenOf(i);
+    p.valid = false;
+    free(p.px);
+    p.px = nullptr;
+    if (s.BytesPerPixel < 2 || s.BytesPerPixel > 4) return;
+    p.w = ScreenW(i);
+    p.bytes = bytes;
+    p.px = (u8 *)malloc((size_t)p.w * 240 * bytes);
+    if (!p.px) return;
+    for (u32 x = 0; x < p.w; x++)
+        kt::framebufferColumnToPicture(Column(s, x), 240, (int)s.Format, s.BytesPerPixel, bytes, &p.px[(size_t)x * 240 * bytes]);
+    p.valid = true;
 }
 
-// Saved address first, then automatic search. Call between netStart()/netStop().
-static bool ResolveServer(std::string &host, int &port, std::string &error) {
-    std::string pingErr;
-    port = kPcPort;
-    if (!g_server.empty() && kt::parseHostPort(g_server, host, port) && kt::netPing(host, port, 1500, pingErr))
-        return true;
-    std::string found;
-    int foundPort = kPcPort;
-    if (kt::netDiscover(kPcPort, 1500, found, foundPort, error)) {
-        host = found;
-        port = foundPort;
-        g_server = host + Utils::Format(":%d", port);  // remember it for next time
-        SaveSettings();
-        return true;
+static void DropPictures() {
+    for (int i = 0; i < 2; i++) {
+        Pic(i).valid = false;
+        free(Pic(i).px);
+        Pic(i).px = nullptr;
     }
-    if (!pingErr.empty()) error = pingErr;
-    return false;
 }
 
-// Sends one mined.tsv line to the PC, which turns it into an Anki card in the background.
-// Returns a short status for the "Saved" notification.
-static std::string SendCardToPc(const std::string &line, const std::string &shot) {
-    if (!g_cardsEnabled) return "";
-    if (g_pcDownUntil && osGetTime() < g_pcDownUntil) return "PC offline, run mine.py later";
-    std::string err, host;
-    int port = kPcPort;
-    if (!kt::netStart(err)) return "no network, run mine.py later";
-    bool ok = false, sent = false;
-    std::string reply;
-    std::vector<std::string> headers = {"X-Title-Id: " + TitleIdHex(), "X-Shot-Name: " + shot};
-    if (ResolveServer(host, port, err)) {
-        kt::MemReader body(line + "\n");
-        ok = kt::netPost(host, port, "/mine", headers, body, 1500, 6000, reply, err);
-        if (ok && reply.compare(0, 9, "NEED_SHOT") == 0 && !shot.empty()) {
-            // the PC hasn't seen this screenshot: upload it, then ask again
-            ShowBusy("Sending the screenshot to your PC...");
-            std::string compact, r2;
-            if (CompactScreenshot(shot, compact, err) &&
-                [&] { kt::MemReader body2(compact); return kt::netPost(host, port, "/shot", headers, body2, 1500, 10000, r2, err); }()) {
-                kt::MemReader again(line + "\n");
-                ok = kt::netPost(host, port, "/mine", headers, again, 1500, 6000, reply, err);
-            } else {
-                ok = false;
+// The kept picture onto screen i's draw buffer: tone 0 as it was, 1 dimmed (behind the lookup),
+// 2 half (see-through); its top `band` rows darkened further. False (nothing drawn) without one.
+static bool PaintScreen(int i, int tone, int band = 0, unsigned shade = 0) {
+    Picture &p = Pic(i);
+    const Screen &s = ScreenOf(i);
+    if (!p.valid || p.w != ScreenW(i) || s.BytesPerPixel < 2) return false;
+    const u32 from = band > 0 ? 240 - (u32)std::min(band, 240) : 240, keep = 255 - shade;
+    for (u32 x = 0; x < p.w; x++)
+        kt::pictureColumnToFramebuffer(&p.px[(size_t)x * 240 * p.bytes], 240, p.bytes, tone, from, keep, (int)s.Format,
+                                       s.BytesPerPixel, Column(s, x));
+    return true;
+}
+
+static void RestoreScreens() {  // the paused game as it was, where it was kept
+    bool any = PaintScreen(0, 0);
+    any |= PaintScreen(1, 0);
+    if (any) Present();
+}
+
+// ---------------------------------------------------------------------------
+// The plugin's own screens (core/menu_view): a list on the touchscreen, its explanation above
+// ---------------------------------------------------------------------------
+static void DrawMenu(kt::MenuView &m) {
+    ScreenCanvas top(OSD::GetTopScreen()), bottom(OSD::GetBottomScreen());
+    m.drawTop(top);
+    m.drawBottom(bottom);
+    Present();
+}
+
+// What happened on a menu screen.
+struct MenuEvent {
+    enum Type { kChoose, kButton, kKey } type = kKey;
+    int index = -1;  // kChoose: the row; kButton: the button
+    u32 key = 0;     // kKey: B, Y, Left, Right, or a key from `keys`
+};
+
+// Shows the screen and waits: A or a tapped row chooses, a tapped button, or B / Left / Right /
+// any of `keys`. Up / down (held: repeating) move the highlight.
+static MenuEvent MenuInput(kt::MenuView &m, u32 keys = 0) {
+    DrawMenu(m);
+    bool touchWas = true;  // a touch held from before doesn't count
+    u32 repeatKey = 0;
+    u64 repeatAt = 0;
+    const u32 kUp = Key::DPadUp | Key::CPadUp, kDown = Key::DPadDown | Key::CPadDown;
+    while (true) {
+        Controller::Update();
+        u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
+        u64 now = osGetTime();
+        MenuEvent ev;
+        if (down & Key::A) {
+            if (m.selected() >= 0) {
+                ev.type = MenuEvent::kChoose;
+                ev.index = m.selected();
+                return ev;
             }
         }
-        sent = ok && reply.compare(0, 2, "OK") == 0;
+        u32 k = down & (Key::B | Key::Y | Key::DPadLeft | Key::DPadRight | Key::CPadLeft | Key::CPadRight | keys);
+        if (k) {
+            ev.key = k;
+            return ev;
+        }
+        u32 mv = down & (kUp | kDown);
+        if (mv) {
+            repeatKey = mv;
+            repeatAt = now + 300;
+        } else if (repeatKey && (held & repeatKey) && now >= repeatAt) {
+            mv = held & repeatKey;
+            repeatAt = now + 90;
+        } else if (!(held & repeatKey)) {
+            repeatKey = 0;
+        }
+        bool moved = false;
+        if (mv & kDown) moved = m.move(1);
+        else if (mv & kUp) moved = m.move(-1);
+        bool touch = Touch::IsDown();
+        if (touch && !touchWas) {
+            UIntVector p = Touch::GetPosition();
+            int button = -1, row = m.tap((int)p.x, (int)p.y, button);
+            if (button >= 0) {
+                ev.type = MenuEvent::kButton;
+                ev.index = button;
+                return ev;
+            }
+            if (row >= 0) {
+                m.select(row);
+                DrawMenu(m);
+                ev.type = MenuEvent::kChoose;
+                ev.index = row;
+                return ev;
+            }
+        }
+        touchWas = touch;
+        if (moved) DrawMenu(m);
+        else Sleep(Milliseconds(16));
     }
-    kt::netStop();
-    if (sent) {
-        g_pcDownUntil = 0;
-        return "card sent to PC";
+}
+
+// A message with a Close button (B or A also close it).
+static void Notice(const std::string &title, const std::string &text, const std::string &help = "") {
+    kt::MenuView m(Text());
+    m.setTitle(title);
+    m.setMessage(text);
+    m.setHelp(help);
+    m.setButtons({" Close"});
+    while (true) {
+        MenuEvent ev = MenuInput(m, Key::A);
+        if (ev.type == MenuEvent::kButton || (ev.key & (Key::A | Key::B))) return;
     }
-    g_pcDownUntil = osGetTime() + 2 * 60 * 1000;
-    return "PC not reachable, run mine.py later";
+}
+
+// A question: the choices as rows (A or a tap picks one). -1 for B.
+static int Ask(const std::string &title, const std::string &question, const std::vector<std::string> &choices) {
+    kt::MenuView m(Text());
+    m.setTitle(title);
+    m.setHelp(question);
+    std::vector<kt::MenuItem> items;
+    for (const std::string &c : choices) {
+        kt::MenuItem it;
+        it.label = c;
+        items.push_back(it);
+    }
+    m.setItems(items);
+    m.setButtons({" Choose", " Back"});
+    while (true) {
+        MenuEvent ev = MenuInput(m);
+        if (ev.type == MenuEvent::kChoose) return ev.index;
+        if ((ev.type == MenuEvent::kButton && ev.index == 1) || (ev.key & Key::B)) return -1;
+        if (ev.type == MenuEvent::kButton && ev.index == 0) return m.selected();
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Saving
+// Saving words
 // ---------------------------------------------------------------------------
-static int CountSaved() {
-    std::string s;
-    if (!ReadWholeFile(kLogPath, s)) return 0;
-    int n = 0;
-    size_t start = 0;
-    while (start < s.size()) {
-        size_t e = s.find('\n', start);
-        if (e == std::string::npos) e = s.size();
-        if (e > start && s[start] != '#') n++;
-        start = e + 1;
+static bool g_readTop = true, g_readBottom = false;  // what the open lookup read
+
+static void SplitTabs(const std::string &line, std::vector<std::string> &cols) {
+    cols.clear();
+    size_t s = 0;
+    while (true) {
+        size_t p = line.find('\t', s);
+        cols.push_back(line.substr(s, p == std::string::npos ? std::string::npos : p - s));
+        if (p == std::string::npos) break;
+        s = p + 1;
     }
+}
+
+// mined.tsv's lines (the header and comments too, in order).
+static std::vector<std::string> SavedLines() {
+    std::string data;
+    ReadWholeFile(kLogPath, data);
+    std::vector<std::string> lines;
+    size_t s = 0;
+    while (s < data.size()) {
+        size_t e = data.find('\n', s);
+        if (e == std::string::npos) e = data.size();
+        std::string l = data.substr(s, e - s);
+        while (!l.empty() && l.back() == '\r') l.pop_back();
+        if (!l.empty()) lines.push_back(l);
+        s = e + 1;
+    }
+    return lines;
+}
+
+static int CountSaved() {
+    int n = 0;
+    for (const std::string &l : SavedLines()) n += l[0] != '#';
     return n;
 }
 
-// The screenshot of the current lookup: written from the paused game's picture the first time
-// a word from it is saved (no screenshot is taken for lookups that save nothing).
+// The screenshot of the current lookup: the screen(s) that were read (top 400x240, touchscreen
+// 320x240, both 400x480 with the touchscreen centred under the top screen), written from the
+// kept pictures the first time a word of the lookup is saved.
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
 
-// Written straight from the snapshot, 16 rows at a time (no 288 KB picture in memory). A BMP
-// stores its rows bottom first, and the snapshot's columns run bottom to top, so file row r is
-// pixel r of every column.
 static std::string SaveScreenshot() {
     if (!g_lookupShot.empty()) return g_lookupShot;
-    if (!g_snap.valid) return "";
+    const bool top = g_readTop && Pic(0).valid, bottom = g_readBottom && Pic(1).valid;
+    if (!top && !bottom) return "";
+    const u32 W = top ? 400 : 320, H = top && bottom ? 480 : 240;
     std::string ts = Timestamp();  // "2026-10-24 14:30:05"
     std::string name;
     for (char c : ts) name += (c == ' ') ? '_' : (c == ':' ? '-' : c);
@@ -468,20 +501,27 @@ static std::string SaveScreenshot() {
     File f;
     if (File::Open(f, std::string(kShotDir) + "/" + name, File::WRITE | File::CREATE | File::TRUNCATE) != File::SUCCESS)
         return "";
-    std::string header = kt::bmpHeader(400, 240);
+    std::string header = kt::bmpHeader(W, H);
     bool ok = f.Write(header.data(), header.size()) == File::SUCCESS;
-    const u32 bpp = g_snap.bpp, rowBytes = 400 * 3;  // 1200: already a multiple of 4
+    const u32 rowBytes = W * 3;  // 1200 or 960: already a multiple of 4
     std::vector<u8> chunk(16 * rowBytes);
-    for (u32 r0 = 0; ok && r0 < 240; r0 += 16) {
-        for (u32 r = r0; r < r0 + 16; r++)
-            for (u32 x = 0; x < 400; x++) {
+    // A BMP stores its rows bottom first, and a picture's columns run bottom to top: file row r
+    // is pixel r of every column (of the touchscreen first, when both are in it).
+    for (u32 r0 = 0; ok && r0 < H; r0 += 16) {
+        std::fill(chunk.begin(), chunk.end(), 0);
+        for (u32 r = r0; r < r0 + 16; r++) {
+            const bool fromBottom = bottom && (!top || r < 240);
+            const Picture &p = Pic(fromBottom ? 1 : 0);
+            const u32 k = r % 240, x0 = (fromBottom && top) ? 40 : 0;
+            for (u32 x = 0; x < p.w; x++) {
                 uint8_t rgb[3];
-                kt::framebufferToRGB(&g_snap.px[(x * 240 + r) * bpp], 1, (int)g_snap.format, bpp, rgb);
-                u8 *o = &chunk[(r - r0) * rowBytes + x * 3];
+                kt::picturePixelRGB(p.px + ((size_t)x * 240 + k) * p.bytes, p.bytes, rgb);
+                u8 *o = &chunk[(r - r0) * rowBytes + (x0 + x) * 3];
                 o[0] = rgb[2];  // B, G, R
                 o[1] = rgb[1];
                 o[2] = rgb[0];
             }
+        }
         ok = f.Write(chunk.data(), chunk.size()) == File::SUCCESS;
     }
     f.Close();
@@ -490,10 +530,9 @@ static std::string SaveScreenshot() {
     return name;
 }
 
-// Saves a word to mined.tsv (and sends it to the PC). `status` gets the line to show.
+// Saves a word to mined.tsv. `status` gets the line to show.
 static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string &query, const std::string &sentence,
                      std::string &status) {
-    ShowBusy("Saving...");
     std::string shot = SaveScreenshot();
     bool fresh = File::Exists(kLogPath) != 1;
     File f;
@@ -504,8 +543,7 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
     std::string text;
     if (fresh)
         text += "#time\ttitle_id\texpression\treading\tdefinition\tscreenshot\tquery\tinflection\tentry\tsentence\n";
-    std::string line = kt::mineLogLine(Timestamp(), TitleIdHex(), e, r, shot, query, sentence);
-    text += line + "\n";
+    text += kt::mineLogLine(Timestamp(), TitleIdHex(), e, r, shot, query, sentence) + "\n";
     bool ok = f.Write(text.data(), text.size()) == File::SUCCESS;
     f.Close();
     if (!ok) {
@@ -513,24 +551,17 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
         return false;
     }
     int n = CountSaved();
-    std::string pc = SendCardToPc(line, shot);  // saved on the SD card first, so nothing is lost
-    status = "Saved " + kt::cardExpressionFor(e, r.matchedKey) + Utils::Format(" (%d word%s)", n, n == 1 ? "" : "s") +
-             (pc.empty() ? "" : " · " + pc);
+    status = "Saved " + kt::cardExpressionFor(e, r.matchedKey) + Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s");
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// The lookup screens (core/lookup_view): the text on the touchscreen, the entry on the top screen
+// The lookup screens (core/lookup_view): the text that was read, and the selected word's entry
 // ---------------------------------------------------------------------------
-static void LogOcr(const std::string &line);
-static SystemFont *g_fontPtr = nullptr;
-#define g_font Leaky(g_fontPtr)
-static kt::TextRenderer *g_textPtr = nullptr;
 static kt::LookupView *g_viewPtr = nullptr;
 
 static kt::LookupView &View() {
-    if (!g_textPtr) g_textPtr = new kt::TextRenderer(g_font);
-    if (!g_viewPtr) g_viewPtr = new kt::LookupView(g_dict, *g_textPtr);
+    if (!g_viewPtr) g_viewPtr = new kt::LookupView(g_dict, Text());
     return *g_viewPtr;
 }
 
@@ -542,27 +573,43 @@ static void DropView() {
     g_viewPtr = nullptr;
 }
 
+// X / Hide: what the screen(s) that were read show. 0 the lookup, 1 see-through, 2 the game.
+static int g_hide = 0;
+static int NextHide(int h) {
+    if (g_hideMode == kHideSeeThrough) return h ? 0 : 1;
+    if (g_hideMode == kHideHidden) return h ? 0 : 2;
+    return (h + 1) % 3;
+}
+
+static kt::LookupView::Panel PanelFor(int screen) {
+    const bool read = screen == 0 ? g_readTop : g_readBottom;
+    if (!read || g_hide == 0) return kt::LookupView::Panel::Shown;
+    return g_hide == 1 ? kt::LookupView::Panel::SeeThrough : kt::LookupView::Panel::Hidden;
+}
+
 // Draws both screens once and shows them. Returns the milliseconds it took.
-static u64 g_drawTicks[4];  // since the view opened: the dimmed game, the entry, the text, showing it
 static u32 DrawLookup(kt::LookupView &v) {
-    u64 t0 = svcGetSystemTick();
-    g_bandDone = false;
-    if (!PaintGame(!v.hidden(), v.topBand(), kt::LookupView::kBandShade))
-        OSD::GetTopScreen().DrawRect(0, 0, 400, 240, Color(15, 18, 22));
-    u64 t1 = svcGetSystemTick();
-    ScreenCanvas tc(OSD::GetTopScreen());
-    v.drawTop(tc, g_bandDone);
-    u64 t2 = svcGetSystemTick();
-    ScreenCanvas bc(OSD::GetBottomScreen());
-    v.drawBottom(bc);
-    u64 t3 = svcGetSystemTick();
+    using Panel = kt::LookupView::Panel;
+    u64 t0 = osGetTime();
+    v.setHidden(g_hide != 0);
+    for (int s = 0; s < 2; s++) {
+        const Panel p = PanelFor(s);
+        const bool entryHere = (s == 0) != v.textOnTop();
+        ScreenCanvas c(ScreenOf(s));
+        bool bandDone = false;
+        if (p == Panel::Hidden) {
+            PaintScreen(s, 0);
+        } else if (p == Panel::SeeThrough) {
+            if (!PaintScreen(s, 2)) c.fill(0, 0, ScreenW(s), 240, kPanel);
+        } else if (entryHere) {  // the game dimmed under the entry, the band behind it darker still
+            bandDone = PaintScreen(s, 1, v.entryBand(), kt::LookupView::kBandShade);
+            if (!bandDone) c.fill(0, 0, ScreenW(s), 240, kPanel);
+        }
+        if (s == 0) v.drawTop(c, p, bandDone);
+        else v.drawBottom(c, p, bandDone);
+    }
     Present();
-    u64 t4 = svcGetSystemTick();
-    g_drawTicks[0] += t1 - t0;
-    g_drawTicks[1] += t2 - t1;
-    g_drawTicks[2] += t3 - t2;
-    g_drawTicks[3] += t4 - t3;
-    return (u32)((t4 - t0) / 268112);
+    return (u32)(osGetTime() - t0);
 }
 
 static void SaveSelected(kt::LookupView &v) {
@@ -571,32 +618,25 @@ static void SaveSelected(kt::LookupView &v) {
     kt::Entry e;
     std::string status;
     if (!g_dict.entry(r->entryId, e)) {
-        v.setStatus("Could not read this entry.", kt::Rgb(255, 170, 90));
+        v.setStatus("Could not read this entry.", kWarn);
         return;
     }
     bool ok = SaveWord(e, *r, r->surface.empty() ? v.query() : r->surface, v.sentence(), status);
     if (ok) v.markSaved();
-    bool pcProblem = status.find("run mine.py later") != std::string::npos;
-    v.setStatus(status, !ok || pcProblem ? kt::Rgb(255, 170, 90) : kt::Rgb(123, 216, 143));
+    v.setStatus(status, ok ? kGood : kWarn);
 }
 
-// Timings of the lookup screens, written to ocr_log.txt when they close.
-struct ViewStats {
-    u32 moves = 0, prefetched = 0, moveReads = 0;
-    u64 moveReadTicks = 0;
-    u64 lookSum = 0, lookMax = 0, drawSum = 0, drawMax = 0, draws = 0;
-};
-
-// Runs the lookup screens until B / Close. Tap a character; D-pad or Circle Pad: words and rows;
-// L/R: matches; C-stick: scroll; A save, X hide.
-static u64 g_viewOpenedAt = 0;  // when the read finished (Lookup), for the log
+// Runs the lookup screens until B / Close. Tap a character (text on the touchscreen); D-pad or
+// Circle Pad: words and rows; L/R: matches; C-stick: scroll; A save, X hide.
+static u64 g_viewOpenedAt = 0;  // when the read finished, for the log
 static void RunLookupView(kt::LookupView &v) {
-    ViewStats st;
+    g_hide = 0;
     OSD::SwapBuffers();  // let CTRPF finish any pending redraw of its own first
-    memset(g_drawTicks, 0, sizeof(g_drawTicks));
-    u32 firstMs = DrawLookup(v);
+    DrawLookup(v);
     u64 openMs = g_viewOpenedAt ? osGetTime() - g_viewOpenedAt : 0;
     g_viewOpenedAt = 0;
+    u32 moves = 0, draws = 0;
+    u64 drawSum = 0;
     bool touchWas = true;  // a touch held from before doesn't count
     u32 repeatKey = 0;
     u64 repeatAt = 0;
@@ -606,14 +646,11 @@ static void RunLookupView(kt::LookupView &v) {
     while (true) {
         Controller::Update();
         u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
-        bool changed = false;
+        bool changed = false, moved = false;
         u64 t0 = osGetTime();
-        const u32 reads0 = g_reader.reads;
-        const u64 readTicks0 = g_reader.ticks;
-        bool moved = false;
         if (down & Key::B) break;
         if (down & Key::A) { SaveSelected(v); changed = true; }
-        if (down & Key::X) { v.setHidden(!v.hidden()); changed = true; }
+        if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
         if (down & Key::L) moved |= v.page(-1);
         if (down & Key::R) moved |= v.page(1);
         // moving: on the press, then repeating while held
@@ -638,49 +675,32 @@ static void RunLookupView(kt::LookupView &v) {
         // touch: acts on the press
         bool touch = Touch::IsDown();
         if (touch && !touchWas) {
-            UIntVector p = Touch::GetPosition();
-            kt::LookupView::Button b = kt::LookupView::kNone;
-            moved |= v.tap((int)p.x, (int)p.y, b);
-            if (b == kt::LookupView::kClose) break;
-            if (b == kt::LookupView::kSave) { SaveSelected(v); changed = true; }
-            if (b == kt::LookupView::kHide) { v.setHidden(!v.hidden()); changed = true; }
+            if (PanelFor(1) == kt::LookupView::Panel::Hidden) {  // the touchscreen shows the game: a tap brings the lookup back
+                g_hide = 0;
+                changed = true;
+            } else {
+                UIntVector p = Touch::GetPosition();
+                kt::LookupView::Button b = kt::LookupView::kNone;
+                moved |= v.tap((int)p.x, (int)p.y, b);
+                if (b == kt::LookupView::kClose) break;
+                if (b == kt::LookupView::kSave) { SaveSelected(v); changed = true; }
+                if (b == kt::LookupView::kHide) { g_hide = NextHide(g_hide); changed = true; }
+            }
         }
         touchWas = touch;
-        if (moved) {
-            u64 ms = osGetTime() - t0;
-            st.moveReads += g_reader.reads - reads0;
-            st.moveReadTicks += g_reader.ticks - readTicks0;
-            st.moves++;
-            st.lookSum += ms;
-            if (ms > st.lookMax) st.lookMax = ms;
-        }
+        if (moved) moves++;
         if (moved || changed) {
-            u32 ms = DrawLookup(v);
-            st.draws++;
-            st.drawSum += ms;
-            if (ms > st.drawMax) st.drawMax = ms;
+            drawSum += DrawLookup(v);
+            draws++;
             continue;  // straight back to the buttons
         }
         // idle: look up the words the next press could go to, one per pass
-        if (!held && v.prefetch()) { st.prefetched++; continue; }
+        if (!held && v.prefetch()) continue;
         Sleep(Milliseconds(10));
     }
-    ClearTopPanel();  // the game as it was
-    {
-        const u64 n = st.draws + 1;  // the first draw too
-        LogOcr(Utils::Format("view: opened in %lu ms (first draw %lu ms), %lu moves, look-up avg %lu ms (max %lu), "
-                             "draw avg %lu ms (max %lu: game %lu, entry %lu, text %lu, show %lu ms avg), %lu looked up ahead, "
-                             "dictionary reads per move %lu.%lu (%lu us each)",
-                             (unsigned long)openMs, (unsigned long)firstMs, (unsigned long)st.moves,
-                             (unsigned long)(st.moves ? st.lookSum / st.moves : 0), (unsigned long)st.lookMax,
-                             (unsigned long)(st.draws ? st.drawSum / st.draws : 0), (unsigned long)st.drawMax,
-                             (unsigned long)(g_drawTicks[0] / n / 268112), (unsigned long)(g_drawTicks[1] / n / 268112),
-                             (unsigned long)(g_drawTicks[2] / n / 268112), (unsigned long)(g_drawTicks[3] / n / 268112),
-                             (unsigned long)st.prefetched,
-                             (unsigned long)(st.moves ? st.moveReads / st.moves : 0),
-                             (unsigned long)(st.moves ? st.moveReads * 10 / st.moves % 10 : 0),
-                             (unsigned long)(st.moveReads ? st.moveReadTicks / st.moveReads / 268 : 0)));
-    }
+    RestoreScreens();
+    LogOcr(Utils::Format("view: opened in %lu ms, %lu moves, draw avg %lu ms", (unsigned long)openMs,
+                         (unsigned long)moves, (unsigned long)(draws ? drawSum / draws : 0)));
 }
 
 // ---------------------------------------------------------------------------
@@ -699,31 +719,13 @@ static std::string FindModel() {
 }
 
 static void LocalProgress(unsigned i, unsigned n) {
-    ShowBusy("Reading the screen on the 3DS...", Utils::Format("line %u of %u", i + 1, n));
+    ShowBusy("Reading the screen...", Utils::Format("line %u of %u", i + 1, n));
 }
 
 // OCR misreads the dictionary can fix: 造跡 -> 遺跡 (遺 was the recognizer's second guess).
 static unsigned g_fixedChars = 0;
 static void FixLine(std::string &text, const std::vector<kt::OcrAlt> &alts, void *) {
     g_fixedChars += kt::fixOcrLine(g_dict, text, alts);
-}
-
-// Free heap: what malloc has free inside the heap plus what it hasn't claimed yet (nothing is
-// allocated to find out).
-extern "C" char *fake_heap_end;
-static u32 HeapFree() {
-    struct mallinfo mi = mallinfo();
-    char *top = (char *)sbrk(0);
-    return (u32)mi.fordblks + (top && top < fake_heap_end ? (u32)(fake_heap_end - top) : 0);
-}
-
-static void LogOcr(const std::string &line) {  // timings, to see how fast this console is
-    File f;
-    if (File::Open(f, "/3ds/kotoba3ds/ocr_log.txt", File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
-        f.Write(line.c_str(), line.size());
-        f.Write("\n", 1);
-        f.Close();
-    }
 }
 
 // Runs job(arg) on n CPU cores at once (CTRPF tasks: the New 3DS's extra app core 2, and core 0,
@@ -755,9 +757,7 @@ static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
     }
 }
 static void Nothing(void *) {}
-static unsigned g_ocrWorkers = 0;  // 0 = as many as this console has (New 3DS: 2 or 3, Old: 1)
-static unsigned OcrWorkers() {
-    if (g_ocrWorkers) return g_ocrWorkers;
+static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, Old 1
     if (!System::IsNew3DS()) return 1;
     if (g_core3 < 0) {  // once: may this process run a thread on core 3?
         Thread t = threadCreate(Nothing, nullptr, 4096, 0x18, 3, false);
@@ -783,321 +783,577 @@ static bool LoadModel(const std::string &name, std::string &error) {
     return true;
 }
 
-// ---- Speed test (menu): the next read is timed again in other ways, written to ocr_log.txt ----
-static bool g_speedTestNext = false;
-static uint64_t Ticks() { return svcGetSystemTick(); }
-static std::string Ms(u64 ticks) {  // "12.3" (the ARM11's tick is 268,111,856 per second)
-    u64 tenths = (ticks * 10 + 134056) / 268112;
-    return Utils::Format("%lu.%lu", (unsigned long)(tenths / 10), (unsigned long)(tenths % 10));
-}
-
-static void SpeedTest(const std::string &model, const uint8_t *grey, const std::vector<kt::TextBox> &boxes,
-                      const std::vector<std::string> &ref) {
-    struct Config {
-        const char *name;
-        unsigned workers;  // 0 = the usual
-        bool pairs, profile;
-    };
-    // (VOCR's other batch sizes were within 2% of its defaults on the console, and loading the
-    // model again with them split up the memory: no longer tried)
-    static const Config kConfigs[] = {
-        {"usual", 0, true, false},
-        {"usual again", 0, true, false},
-        {"old kernel", 0, false, false},
-        {"1 worker", 1, true, true},
-        {"1 worker, old kernel", 1, false, false},
-        {"2 workers", 2, true, false},
-        {"3 workers", 3, true, false},
-    };
-    LogOcr(Utils::Format("speed test: %d MHz, core 3 %s, heap free %lu KB", CpuMHz(),
-                         g_core3 > 0 ? "usable" : "not usable", (unsigned long)(HeapFree() / 1024)));
-    {   // the steps before the OCR
-        u64 t0 = Ticks();
-        uint8_t *rgb = SnapshotRGB();
-        u64 t1 = Ticks();
-        if (rgb) {
-            std::vector<kt::TextBox> b = kt::findTextBoxes(rgb, 400, 240);
-            u64 t2 = Ticks();
-            uint8_t *g = kt::greyFromRGB(rgb, 400, 240);
-            u64 t3 = Ticks();
-            free(g);
-            free(rgb);
-            LogOcr("speed: screen -> RGB " + Ms(t1 - t0) + " ms, text box " + Ms(t2 - t1) + " ms, grey " + Ms(t3 - t2) + " ms");
+// The OCR's input for screen i, straight from its framebuffer (call before anything is drawn on
+// it): the text boxes found by their colour, and the grey picture (malloc'd; nullptr on failure).
+static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes) {
+    const Screen &s = ScreenOf(i);
+    const u32 W = ScreenW(i), bpp = s.BytesPerPixel;
+    if (bpp < 2 || bpp > 4) return nullptr;
+    uint8_t *rgb = (uint8_t *)malloc((size_t)W * 240 * 3);
+    if (!rgb) return nullptr;
+    u8 *base = Column(s, 0);
+    if (W > 1 && Column(s, 1) - base == (int)(240 * bpp)) {  // columns back to back: in one go
+        kt::framebufferColumnsToRGB(base, W, 240, (int)s.Format, bpp, rgb);
+    } else {
+        for (u32 x = 0; x < W; x++) {
+            const u8 *col = Column(s, x);
+            for (u32 k = 0; k < 240; k++) kt::framebufferToRGB(col + k * bpp, 1, (int)s.Format, bpp, &rgb[((239 - k) * W + x) * 3]);
         }
     }
-    std::string e;
-    (void)model;
-    for (const Config &c : kConfigs) {
-        if (c.workers == 3 && g_core3 <= 0) continue;
-        if (c.workers > 1 && !System::IsNew3DS()) continue;
-        ShowBusy("Speed test...", c.name);
-        kt::ocrUsePairKernel(c.pairs);
-        g_localOcr.setParallel(c.workers ? c.workers : OcrWorkers(), RunOnCores);
-        std::vector<std::string> paras;
-        if (c.profile) kt::ocrProfile(true, Ticks);
-        u64 t0 = Ticks();
-        bool ok = kt::localReadScreen(g_localOcr, grey, 400, 240, boxes, paras, e);
-        u64 t1 = Ticks();
-        if (c.profile) kt::ocrProfile(false, Ticks);
-        LogOcr(Utils::Format("speed: %s: ", c.name) + Ms(t1 - t0) +
-               Utils::Format(" ms, %u threads, %s", g_localOcr.lastWorkers(), ok && paras == ref ? "same text" : "DIFFERENT TEXT"));
-        if (c.profile) {  // where the time goes: each layer (VOCR5_N: 19 = the output head), input, the rest
-            const uint64_t *t = kt::ocrProfileTicks();
-            std::string line = "speed: layers (ms):";
-            for (int i = 0; i < kt::kProfSlots; i++) {
-                if (!t[i]) continue;
-                line += i == kt::kProfInput ? " input " : i == kt::kProfOther ? " other " : Utils::Format(" %d:", i);
-                line += Ms(t[i]);
-            }
-            LogOcr(line);
-        }
-    }
-    kt::ocrUsePairKernel(true);
-    g_localOcr.setParallel(OcrWorkers(), RunOnCores);
+    boxes = kt::findTextBoxes(rgb, W, 240);
+    uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
+    free(rgb);
+    return grey;
 }
 
-// Reads the paused game's top screen -> text blocks.
-static bool ReadSnapshot(std::vector<std::string> &paragraphs, std::string &error) {
+// Reads the screens of `mode` -> text blocks (the top screen's first, each screen's longest
+// first). Call with the game paused and nothing drawn yet.
+static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string &error) {
     u64 t0 = osGetTime();
     std::string name = FindModel();
     if (name.empty()) {
-        error = "No OCR model found.\nUnzip Kotoba3DS-ocr-model.zip to the root of the SD card\n"
-                "(it goes to /3ds/kotoba3ds/ocr/).";
+        error = "No OCR model found.\nUnzip Kotoba3DS-ocr-model.zip to the root of the SD card (it goes to /3ds/kotoba3ds/ocr/).";
         return false;
     }
-    ShowBusy("Reading the screen...");
     // What stays for the whole session goes first, while the plugin's memory is still in one
-    // piece, side by side: the lookup screens' glyph cache, then the model with the workers'
-    // working memory (loaded at the first read and kept: 1.2 MB from the SD card each time was
-    // 150-250 ms). A read's pictures then come and go above them.
-    if (!g_textPtr) g_textPtr = new kt::TextRenderer(g_font);
-    g_textPtr->reserve();
+    // piece, side by side: the glyph cache, then the model with the workers' working memory
+    // (loaded at the first read and kept: 1.2 MB from the SD card each time was 150-250 ms).
+    // A read's pictures then come and go above them.
+    Text().reserve();
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
-    u64 t1 = osGetTime();
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
+    u64 t1 = osGetTime();
+    // the screens' pictures for the OCR, before anything is drawn on them
+    const bool screens[2] = {mode != kReadBottom, mode != kReadTop};
+    uint8_t *grey[2] = {nullptr, nullptr};
+    std::vector<kt::TextBox> boxes[2];
+    for (int s = 0; s < 2; s++)
+        if (screens[s]) grey[s] = ScreenGrey(s, boxes[s]);
     u64 t2 = osGetTime();
-    // 2. the picture: find the text box (by its colour), then grey for the OCR. Short of memory
-    //    with the model kept? Free it and try once more (it is loaded again next time).
-    uint8_t *rgb = SnapshotRGB();
-    if (!rgb) {
-        g_localOcr.unload();
-        rgb = SnapshotRGB();
-        if (!rgb) { error = "not enough memory to copy the screen"; return false; }
-        if (!LoadModel(name, error)) { free(rgb); return false; }
-    }
-    std::vector<kt::TextBox> boxes = kt::findTextBoxes(rgb, 400, 240);
-    uint8_t *grey = kt::greyFromRGB(rgb, 400, 240);
-    free(rgb);
-    if (!grey) { error = "not enough memory for the picture"; return false; }
-    // 3. read the box (or the whole screen)
-    u64 t2b = osGetTime();
+    ShowBusy("Reading the screen...");
     g_fixedChars = 0;
-    int used = -1;
-    bool ok = kt::localReadScreen(g_localOcr, grey, 400, 240, boxes, paragraphs, error, LocalProgress, &used);
-    u64 t3 = osGetTime();
-    if (ok && g_speedTestNext) {
-        g_speedTestNext = false;
-        SpeedTest(name, grey, boxes, paragraphs);
+    bool any = false;
+    std::string firstError;
+    for (int s = 0; s < 2; s++) {
+        if (!screens[s]) continue;
+        if (!grey[s]) {
+            if (firstError.empty()) firstError = "not enough memory for the picture";
+            continue;
+        }
+        std::vector<std::string> paras;
+        std::string err;
+        if (kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], paras, err, LocalProgress)) {
+            std::stable_sort(paras.begin(), paras.end(),  // the longest first (the dialogue, usually)
+                             [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
+            blocks.insert(blocks.end(), paras.begin(), paras.end());
+            any = true;
+        } else if (firstError.empty()) {
+            firstError = err;
+        }
+        free(grey[s]);
+        grey[s] = nullptr;
     }
-    free(grey);  // the model stays loaded for the next read
-    LogOcr(Utils::Format("%s: load %lu ms, box %lu ms, read %lu ms (%s, %u threads, %d MHz, %u fixed), heap free %lu KB, %s",
-                         name.c_str(), (unsigned long)(t2 - t1 + (t1 - t0)), (unsigned long)(t2b - t2),
-                         (unsigned long)(t3 - t2b), used >= 0 ? "text box" : "whole screen", g_localOcr.lastWorkers(),
-                         CpuMHz(), g_fixedChars, (unsigned long)(HeapFree() / 1024),
-                         ok ? paragraphs[0].c_str() : error.c_str()));
-    return ok;
+    u64 t3 = osGetTime();
+    if (!any) error = firstError.empty() ? "no text found" : firstError;
+    LogOcr(Utils::Format("%s: %s, model %lu ms, box %lu ms, read %lu ms (%u threads, %d MHz, %u fixed), heap free %lu KB, %s",
+                         name.c_str(), kModeNames[mode], (unsigned long)(t1 - t0), (unsigned long)(t2 - t1),
+                         (unsigned long)(t3 - t2), g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
+                         (unsigned long)(HeapFree() / 1024), any ? blocks[0].c_str() : error.c_str()));
+    return any;
 }
 
-static void Lookup() {
-    std::vector<std::string> paragraphs;
-    std::string error;
-    if (!ReadSnapshot(paragraphs, error)) {
-        BottomMessage("Couldn't read the screen:\n" + error, {"[ Close ]"});
-        return;
-    }
-    // the longest block first (the dialogue, usually)
-    std::stable_sort(paragraphs.begin(), paragraphs.end(),
-                     [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
-    g_viewOpenedAt = osGetTime();
-    g_lastBlocks = paragraphs;
-    static bool fontLogged = false;
-    if (!fontLogged) { LogOcr(g_font.describe()); fontLogged = true; }
+static void OpenLookup(const std::vector<std::string> &blocks, bool textOnTop) {
+    g_lastBlocks = blocks;
+    g_lastTextOnTop = textOnTop;
     kt::LookupView &v = View();
-    v.setText(paragraphs);
+    v.setTextOnTop(textOnTop);
+    v.setText(blocks);
     RunLookupView(v);
     DropView();
 }
 
-static void ReleaseLookupMemory() {
-    g_snap.valid = false;
-    std::vector<u8>().swap(g_snap.px);
-    g_lookupShot = "";
-}
-
-// The hotkey: pause the game, read the screen, look up a word. Called every frame.
-static void HotkeyWatcher(void) {
-    u32 keys = kHotkeys[g_hotkey].keys;
-    if (!keys || !Controller::IsKeysPressed(keys)) return;
-    if (!EnsureDict()) return;
+// A hotkey: pause the game, read its screen(s), look a word up.
+static void ReadAndLookUp(int mode) {
     Process::Pause();
     BoostCpu();
-    TakeTopSnapshot();  // the paused game: read, and drawn under the definitions
-    Lookup();
-    ReleaseLookupMemory();
+    g_readTop = mode != kReadBottom;
+    g_readBottom = mode != kReadTop;
+    g_lookupShot = "";
+    // the game's screens as they are, for drawing under the lookup and the card's screenshot:
+    // the top screen always (the entry goes over it), the touchscreen when it is read
+    const u32 bytes = g_readBottom ? 2 : 3;
+    TakePicture(0, bytes);
+    if (g_readBottom) TakePicture(1, bytes);
+    std::vector<std::string> blocks;
+    std::string error;
+    if (!OpenDict()) {
+        Notice("Kotoba3DS", g_dictError);
+    } else if (!ReadScreens(mode, blocks, error)) {
+        Notice("Couldn't read the screen", error);
+    } else {
+        g_viewOpenedAt = osGetTime();
+        OpenLookup(blocks, g_readBottom && g_textOnTop);
+    }
+    RestoreScreens();
+    DropPictures();
+    g_lookupShot = "";
     RestoreCpu();
     Process::Play();
 }
 
 // ---------------------------------------------------------------------------
-// Saved words
+// Anki cards: saved words to tools/ocr_server.py on the PC, all at once from the menu
 // ---------------------------------------------------------------------------
-static void SplitTabs(const std::string &line, std::vector<std::string> &cols) {
-    cols.clear();
-    size_t s = 0;
-    while (true) {
-        size_t p = line.find('\t', s);
-        cols.push_back(line.substr(s, p == std::string::npos ? std::string::npos : p - s));
-        if (p == std::string::npos) break;
-        s = p + 1;
+// Saved address first, then automatic search. Call between netStart()/netStop().
+static bool ResolveServer(std::string &host, int &port, std::string &error) {
+    std::string pingErr;
+    port = kPcPort;
+    if (!g_server.empty() && kt::parseHostPort(g_server, host, port) && kt::netPing(host, port, 1500, pingErr))
+        return true;
+    std::string found;
+    int foundPort = kPcPort;
+    if (kt::netDiscover(kPcPort, 1500, found, foundPort, error)) {
+        host = found;
+        port = foundPort;
+        g_server = host + Utils::Format(":%d", port);  // remember it for next time
+        SaveSettings();
+        return true;
     }
+    if (!pingErr.empty()) error = pingErr;
+    return false;
 }
 
-static void SavedWords(MenuEntry *) {
-    while (true) {
-        std::string data;
-        ReadWholeFile(kLogPath, data);
-        std::vector<std::string> lines;
-        size_t s = 0;
-        while (s < data.size()) {
-            size_t e = data.find('\n', s);
-            if (e == std::string::npos) e = data.size();
-            if (e > s) lines.push_back(data.substr(s, e - s));
-            s = e + 1;
+// One saved word (a mined.tsv line) to the PC, which makes the card in the background.
+// 1: sent, 2: it was a card already, 0: failed (error says why).
+static int SendWordToPc(const std::string &host, int port, const std::string &line, std::string &error) {
+    std::vector<std::string> cols;
+    SplitTabs(line, cols);
+    cols.resize(10);
+    const std::string &title = cols[1], &shot = cols[5];
+    std::vector<std::string> headers = {"X-Title-Id: " + title, "X-Shot-Name: " + shot};
+    std::string reply;
+    kt::MemReader body(line + "\n");
+    if (!kt::netPost(host, port, "/mine", headers, body, 1500, 6000, reply, error)) return 0;
+    if (reply.compare(0, 9, "NEED_SHOT") == 0 && !shot.empty()) {
+        // the PC hasn't seen this screenshot: upload it, then ask again
+        SdReader bmp;
+        std::string compact, r2;
+        if (!bmp.open(std::string(kShotDir) + "/" + shot)) {
+            error = "screenshot " + shot + " is missing";
+            return 0;
         }
-        std::vector<int> idx;  // indexes of word lines, newest first
+        if (!kt::screenshotRGB565(bmp, compact, error)) return 0;
+        kt::MemReader body2(compact);
+        if (!kt::netPost(host, port, "/shot", headers, body2, 1500, 10000, r2, error)) return 0;
+        kt::MemReader again(line + "\n");
+        if (!kt::netPost(host, port, "/mine", headers, again, 1500, 6000, reply, error)) return 0;
+    }
+    if (reply.compare(0, 2, "OK") != 0) {
+        size_t nl = reply.find('\n');
+        error = nl == std::string::npos ? reply : reply.substr(nl + 1);
+        while (!error.empty() && (error.back() == '\n' || error.back() == '\r')) error.pop_back();
+        if (error.empty()) error = "the PC said no";
+        return 0;
+    }
+    return reply.find("already") != std::string::npos ? 2 : 1;
+}
+
+static const char *kCardsHelp =
+    "Sends your saved words to tools/ocr_server.py on your PC, which makes them into Anki cards "
+    "(with the definition, audio and the screenshot). The PC must be on the same Wi-Fi, with Anki open.\n\n"
+    "Words that are cards already are skipped. Without a PC nearby, keep saving: they wait here, "
+    "or tools/mine.py can read them from the SD card later.";
+
+static void MakeCards() {
+    std::vector<std::string> lines = SavedLines();
+    std::vector<int> words;
+    for (int i = 0; i < (int)lines.size(); i++)
+        if (lines[i][0] != '#') words.push_back(i);
+    if (words.empty()) {
+        Notice("Make Anki cards", "No saved words yet.\n\nIn a lookup, A saves the selected word.", kCardsHelp);
+        return;
+    }
+    kt::MenuView m(Text());
+    m.setTitle("Make Anki cards");
+    m.setHelp(kCardsHelp);
+    m.setMessage("Looking for your PC...");
+    DrawMenu(m);
+    std::string err, host;
+    int port = kPcPort;
+    if (!kt::netStart(err) || !ResolveServer(host, port, err)) {
+        kt::netStop();
+        Notice("Make Anki cards",
+               "Couldn't reach your PC:\n" + err +
+                   "\n\nStart ocr_server.py on the PC (same Wi-Fi), or set its address under \"PC\".",
+               kCardsHelp);
+        return;
+    }
+    int sent = 0, already = 0, failed = 0;
+    std::string firstError;
+    std::vector<int> done;  // lines that are cards now
+    for (size_t k = 0; k < words.size(); k++) {
+        m.setMessage(Utils::Format("Sending word %u of %u to %s...", (unsigned)(k + 1), (unsigned)words.size(),
+                                   g_server.c_str()));
+        DrawMenu(m);
+        std::string e;
+        int r = SendWordToPc(host, port, lines[words[k]], e);
+        if (r == 1) sent++;
+        else if (r == 2) already++;
+        else {
+            failed++;
+            if (firstError.empty()) firstError = e;
+            if (failed >= 3 && sent + already == 0) break;  // the PC isn't taking them: stop trying
+        }
+        if (r) done.push_back(words[k]);
+    }
+    kt::netStop();
+    std::string result = Utils::Format("%d new card%s", sent, sent == 1 ? "" : "s");
+    if (already) result += Utils::Format(", %d already in Anki", already);
+    if (failed) result += Utils::Format(", %d failed:\n%s", failed, firstError.c_str());
+    if (done.empty()) {
+        Notice("Make Anki cards", result, kCardsHelp);
+        return;
+    }
+    int c = Ask("Make Anki cards",
+                result + "\n\nRemove the " + Utils::Format("%u", (unsigned)done.size()) +
+                    " word(s) that are cards now from Saved words? (Their screenshots stay on the SD card.)",
+                {"Remove them", "Keep them"});
+    if (c != 0) return;
+    std::string out;
+    for (int i = 0; i < (int)lines.size(); i++)
+        if (std::find(done.begin(), done.end(), i) == done.end()) out += lines[i] + "\n";
+    WriteWholeFile(kLogPath, out);
+}
+
+// ---------------------------------------------------------------------------
+// Saved words: the list, each word's entry above it, Y deletes
+// ---------------------------------------------------------------------------
+static void SavedWords() {
+    kt::MenuView m(Text());
+    m.setTitle("Saved words");
+    m.setButtons({" Delete", " Back"});
+    int armed = -1;  // the line a first Y asked about
+    while (true) {
+        std::vector<std::string> lines = SavedLines();
+        std::vector<int> idx;  // word lines, newest first
         for (int i = (int)lines.size() - 1; i >= 0; i--)
             if (lines[i][0] != '#') idx.push_back(i);
-        if (idx.empty()) {
-            MessageBox("Kotoba3DS", "No saved words yet.\nLook a word up and choose Yes to save it.")();
-            return;
-        }
-        std::vector<std::string> labels;
+        std::vector<kt::MenuItem> items;
         std::vector<std::string> cols;
         for (int i : idx) {
             SplitTabs(lines[i], cols);
-            cols.resize(9);
-            labels.push_back(cols[2] + "【" + cols[3] + "】" + (cols[5].empty() ? "" : "  ◎"));
+            cols.resize(10);
+            kt::MenuItem it;
+            it.label = cols[2] + (cols[3].empty() || cols[3] == cols[2] ? "" : "【" + cols[3] + "】");
+            it.value = cols[0].size() >= 10 ? cols[0].substr(5, 5) : cols[0];  // "10-24"
+            std::string def = cols[4];
+            for (size_t p; (p = def.find("<br>")) != std::string::npos;) def.replace(p, 4, "\n");
+            for (size_t p; (p = def.find("<b>")) != std::string::npos;) def.erase(p, 3);
+            for (size_t p; (p = def.find("</b>")) != std::string::npos;) def.erase(p, 4);
+            it.help = it.label + "\n" + def + (cols[9].empty() ? "" : "\n\n「" + cols[9] + "」");
+            items.push_back(it);
         }
-        Keyboard kb(Utils::Format("%d saved words (newest first)\n◎ = has a screenshot\n", (int)idx.size()) +
-                        "Run tools/mine.py on your PC to make the Anki cards.",
-                    labels);
-        int c = kb.Open();
-        if (c < 0) return;
-        SplitTabs(lines[idx[c]], cols);
-        cols.resize(9);
-        std::string def = cols[4];
-        for (size_t p; (p = def.find("<br>")) != std::string::npos;) def.replace(p, 4, "\n");
-        std::string body = cols[2] + "【" + cols[3] + "】\n" + def + "\n\n" + std::string(Color::Gray) +
-                           "Saved " + cols[0] + (cols[5].empty() ? "" : "\n" + cols[5]);
-        if (MessageBox(std::string(Color::Orange) + "Delete this saved word?", body, DialogType::DialogYesNo)()) {
-            lines.erase(lines.begin() + idx[c]);
-            std::string out;
-            for (const std::string &l : lines) out += l + "\n";
-            WriteWholeFile(kLogPath, out);
+        m.setItems(items);
+        if (items.empty()) {
+            m.setMessage("No saved words yet.\n\nIn a lookup, A saves the selected word.");
+            m.setButtons({" Back"});
         }
+        MenuEvent ev = MenuInput(m);
+        const bool back = (ev.key & Key::B) || (ev.type == MenuEvent::kButton && (items.empty() || ev.index == 1));
+        if (back) return;
+        const bool del = (ev.key & Key::Y) || (ev.type == MenuEvent::kButton && ev.index == 0);
+        if (!del || items.empty()) {
+            armed = -1;
+            m.setStatus("", kInk);
+            continue;
+        }
+        const int line = idx[m.selected()];
+        if (armed != line) {  // the first press asks
+            armed = line;
+            m.setStatus("Press  again to delete " + items[m.selected()].label, kWarn);
+            continue;
+        }
+        lines.erase(lines.begin() + line);
+        std::string out;
+        for (const std::string &l : lines) out += l + "\n";
+        WriteWholeFile(kLogPath, out);
+        armed = -1;
+        m.setStatus("Deleted.", kGreyInk);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Menu
+// Hotkeys: hold the buttons, let go
 // ---------------------------------------------------------------------------
-static std::string HotkeyEntryName() { return std::string("Hotkey: ") + kHotkeys[g_hotkey].name; }
-
-static void ChooseHotkey(MenuEntry *entry) {
-    std::vector<std::string> opts;
-    for (const HotkeyChoice &h : kHotkeys) opts.push_back(h.name);
-    Keyboard kb("Hotkey\nPressed in-game on a line: pauses the game, reads the screen and opens the\n"
-                "lookup. Pick a combo your game doesn't use.",
-                opts);
-    kb.ChangeSelectedEntry(g_hotkey);
-    int c = kb.Open();
-    if (c < 0) return;
-    g_hotkey = c;
-    SaveSettings();
-    entry->Name() = HotkeyEntryName();
-}
-
-static std::string CardsEntryName() {
-    if (!g_cardsEnabled) return "Anki cards: with mine.py";
-    return "Anki cards: send to PC " + (g_server.empty() ? std::string("(find automatically)") : g_server);
-}
-
-static void ChooseCards(MenuEntry *entry) {
-    std::vector<std::string> opts = {
-        g_cardsEnabled ? "Stop sending saved words to the PC (use mine.py later)" : "Send saved words to the PC right away",
-        "Find my PC automatically now",
-        "Type the address (shown by ocr_server.py)",
-        "Forget the saved address",
-    };
-    Keyboard kb("Anki cards\nWith tools/ocr_server.py running on your PC (same Wi-Fi), each saved word\n"
-                "becomes an Anki card right away. Otherwise run tools/mine.py later.\n" +
-                    std::string(Color::Gray) + "PC: " + (g_server.empty() ? std::string("not set") : g_server),
-                opts);
-    int c = kb.Open();
-    if (c < 0) return;
-    std::string err;
-    if (c == 0) {
-        g_cardsEnabled = !g_cardsEnabled;
-    } else if (c == 1) {
-        std::string host;
-        int port = kPcPort;
-        bool ok = kt::netStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
-        kt::netStop();
-        if (ok) {
-            g_server = host + Utils::Format(":%d", port);
-            g_cardsEnabled = true;
-            MessageBox("Kotoba3DS", "Found your PC at " + g_server)();
-        } else {
-            MessageBox("Kotoba3DS", "Couldn't find it automatically:\n" + err +
-                                        "\n\nCheck ocr_server.py is running, or type its address.")();
-        }
-    } else if (c == 2) {
-        Keyboard in("Type the address shown by ocr_server.py, e.g. 192.168.1.20:7331");
-        std::string addr = g_server;
-        if (in.Open(addr, addr) >= 0) {
-            std::string host;
-            int port;
-            if (!kt::parseHostPort(addr, host, port)) {
-                MessageBox("Kotoba3DS", "That doesn't look like an address (example: 192.168.1.20:7331).")();
-            } else {
-                g_server = host + Utils::Format(":%d", port);
-                g_cardsEnabled = true;
-                bool ok = kt::netStart(err) && kt::netPing(host, port, 2000, err);
-                kt::netStop();
-                MessageBox("Kotoba3DS", ok ? "Connected to " + g_server
-                                           : "Saved " + g_server + ", but it didn't answer:\n" + err)();
+static void RecordHotkey(int mode) {
+    kt::MenuView m(Text());
+    m.setTitle(kModeNames[mode]);
+    m.setHelp("Hold the button or buttons you want (one works too), then let go.\n\n"
+              "Pick buttons your game doesn't need at that moment: the game sees them as well. "
+              "Select opens this menu, so it can't be used.\n\n"
+              "Tap \"Turn off\" for no hotkey, \"Cancel\" to keep it as it is.");
+    m.setButtons({"Turn off", "Cancel"});
+    const std::string now = "Now: " + kt::keyComboName(g_combo[mode]);
+    m.setMessage("Hold the buttons...\n\n" + now);
+    DrawMenu(m);
+    u32 held = 0;
+    bool released = false;  // wait for the A that chose this to be let go
+    bool touchWas = true;
+    while (true) {
+        Controller::Update();
+        const u32 down = Controller::GetKeysDown() & (kt::keys::Usable | Key::Select);
+        bool touch = Touch::IsDown();
+        if (touch && !touchWas) {
+            UIntVector p = Touch::GetPosition();
+            int button = -1;
+            m.tap((int)p.x, (int)p.y, button);
+            if (button == 1) return;
+            if (button == 0) {
+                g_combo[mode] = 0;
+                SaveSettings();
+                return;
             }
         }
-    } else {
-        g_server = "";
+        touchWas = touch;
+        if (!released) {
+            released = down == 0;
+        } else if (down) {
+            if ((held | down) != held) {
+                held |= down;
+                m.setMessage(kt::keyComboName(held) + "\n\n(let go to keep it)");
+                DrawMenu(m);
+            }
+        } else if (held) {  // all let go: that's the hotkey
+            if (held & Key::Select) {
+                m.setMessage("Select opens this menu: pick other buttons.\n\n" + now);
+                m.setStatus("", kInk);
+                DrawMenu(m);
+                held = 0;
+                continue;
+            }
+            g_combo[mode] = held;
+            for (int o = 0; o < kModes; o++)  // two modes can't share one hotkey
+                if (o != mode && g_combo[o] == held) g_combo[o] = 0;
+            SaveSettings();
+            return;
+        }
+        Sleep(Milliseconds(16));
     }
-    g_pcDownUntil = 0;
-    SaveSettings();
-    entry->Name() = CardsEntryName();
 }
 
-static const char *kHelp =
-    "1. In a game, press the hotkey (ZL+ZR) when a line with a word you don't\n"
-    "   know is on screen. The game pauses and the 3DS reads the text.\n"
-    "2. The text shows on the touchscreen. Tap a word (or move with the D-pad\n"
-    "   or Circle Pad) and its entry shows on the top screen.\n"
-    "   L/R: other meanings, C-stick: scroll, X: hide it to see the game.\n"
-    "3. A saves the word to mined.tsv with a screenshot. B closes.\n"
-    "4. Anki cards: with tools/ocr_server.py running on your PC they're made\n"
-    "   right away; otherwise run tools/mine.py later.\n\n"
-    "Needs: /3ds/kotoba3ds/dict.bin and the OCR model in /3ds/kotoba3ds/ocr/.";
+// ---------------------------------------------------------------------------
+// The PC's address
+// ---------------------------------------------------------------------------
+static void ChoosePc() {
+    std::string help = "Your PC runs tools/ocr_server.py (same Wi-Fi). Its address is found automatically "
+                       "the first time; set it here if that doesn't work (ocr_server.py shows it).";
+    while (true) {
+        int c = Ask("PC", help + "\n\nNow: " + (g_server.empty() ? std::string("found automatically") : g_server),
+                    {"Find my PC now", "Type its address", "Forget the address"});
+        if (c < 0) return;
+        std::string err;
+        if (c == 0) {
+            kt::MenuView m(Text());
+            m.setTitle("PC");
+            m.setMessage("Looking for your PC...");
+            DrawMenu(m);
+            std::string host;
+            int port = kPcPort;
+            bool ok = kt::netStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
+            kt::netStop();
+            if (ok) {
+                g_server = host + Utils::Format(":%d", port);
+                SaveSettings();
+                Notice("PC", "Found your PC at " + g_server);
+            } else {
+                Notice("PC", "Couldn't find it:\n" + err + "\n\nCheck ocr_server.py is running, or type its address.");
+            }
+        } else if (c == 1) {
+            Keyboard in("The address ocr_server.py shows, e.g. 192.168.1.20:7331");
+            std::string addr = g_server;
+            if (in.Open(addr, addr) >= 0) {
+                std::string host;
+                int port;
+                if (!kt::parseHostPort(addr, host, port)) {
+                    Notice("PC", "That doesn't look like an address (example: 192.168.1.20:7331).");
+                } else {
+                    g_server = host + Utils::Format(":%d", port);
+                    SaveSettings();
+                    bool ok = kt::netStart(err) && kt::netPing(host, port, 2000, err);
+                    kt::netStop();
+                    Notice("PC", ok ? "Connected to " + g_server : "Saved " + g_server + ", but it didn't answer:\n" + err);
+                }
+            }
+        } else {
+            g_server = "";
+            SaveSettings();
+        }
+    }
+}
 
+// ---------------------------------------------------------------------------
+// How to use
+// ---------------------------------------------------------------------------
+static void HowToUse() {
+    struct Page { const char *title, *text; };
+    static const Page kPages[] = {
+        {"Reading a screen",
+         "In a game, press a hotkey when there is text you want to read. The game pauses and the 3DS "
+         "reads the screen itself: no PC or internet needed.\n\n"
+         "Each of \"Read the top screen\", \"Read the touchscreen\" and \"Read both screens\" can have "
+         "its own hotkey (Select, then the item). The top screen's is ZL + ZR at first."},
+        {"Looking words up",
+         "The text shows on the touchscreen (or on the top screen: \"Touchscreen text shows on\"). "
+         "Tap a word, or move with the D-pad or Circle Pad; its entry shows on the other screen.\n\n"
+         "L / R: other meanings of the same spot. C-stick: scroll a long entry. B: back to the game."},
+        {"Seeing the game",
+         "X (or Hide) uncovers the screen that was read: see-through (the text over the game) or "
+         "hidden (the game alone), as set under \"Hide (X)\". X again brings the lookup back; so "
+         "does a tap on a hidden touchscreen."},
+        {"Saving words, Anki cards",
+         "A saves the selected word with its sentence and a screenshot (SD:/3ds/kotoba3ds/mined.tsv). "
+         "\"Saved words\" lists them; Y deletes one.\n\n"
+         "\"Make Anki cards\" sends them to tools/ocr_server.py on your PC (same Wi-Fi, Anki open). "
+         "tools/mine.py can also read them from the SD card."},
+        {"Files",
+         "The dictionary: SD:/3ds/kotoba3ds/dict.bin. The OCR model: SD:/3ds/kotoba3ds/ocr/ "
+         "(from Kotoba3DS-ocr-model.zip). Both come with the Kotoba3DS release."},
+    };
+    kt::MenuView m(Text());
+    m.setTitle("How to use");
+    std::vector<kt::MenuItem> items;
+    for (const Page &p : kPages) {
+        kt::MenuItem it;
+        it.label = p.title;
+        it.help = std::string(p.text);
+        items.push_back(it);
+    }
+    m.setItems(items);
+    m.setButtons({" Back"});
+    while (true) {
+        MenuEvent ev = MenuInput(m);
+        if ((ev.key & Key::B) || ev.type == MenuEvent::kButton) return;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Select menu
+// ---------------------------------------------------------------------------
+static const char *const kHideNames[] = {"See-through", "Hidden", "See-through, then hidden"};
+
+static void Settings() {
+    kt::MenuView m(Text());
+    m.setTitle("Kotoba3DS");
+    m.setButtons({" Choose", " Close"});
+    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kLast, kSaved, kCards, kPc, kHelp, kRows };
+    while (true) {
+        const int saved = CountSaved();
+        std::vector<kt::MenuItem> items(kRows);
+        static const char *const kKeyHelp[kModes] = {
+            "The button(s) that pause the game and read the top screen.",
+            "The button(s) that pause the game and read the touchscreen.",
+            "The button(s) that pause the game and read both screens: the top screen's text first.",
+        };
+        for (int mode = 0; mode < kModes; mode++) {
+            items[mode].label = kModeNames[mode];
+            items[mode].value = kt::keyComboName(g_combo[mode]);
+            items[mode].help = std::string(kKeyHelp[mode]) + "\n\nA: set the buttons (hold them, then let go).";
+        }
+        items[kTextWhere].label = "Touchscreen text shows on";
+        items[kTextWhere].value = g_textOnTop ? "the top screen" : "the touchscreen";
+        items[kTextWhere].help =
+            "When the touchscreen was read, its text can show where it was (tap the words) or on the "
+            "top screen (move with the D-pad), so the touchscreen shows the entry.\n\nA,  or : change.";
+        items[kHide].label = "Hide (X)";
+        items[kHide].value = kHideNames[g_hideMode];
+        items[kHide].help =
+            "What X (or Hide) does to the screen that was read: see-through shows the text over the game, "
+            "hidden shows the game alone. Both: the first press see-through, the second hidden.\n\n"
+            "A,  or : change.";
+        items[kLast].label = "Last lookup";
+        items[kLast].dim = g_lastBlocks.empty();
+        items[kLast].help = "Opens the text of your last lookup again.";
+        items[kSaved].label = "Saved words";
+        items[kSaved].value = Utils::Format("%d", saved);
+        items[kSaved].help = "The words you saved, newest first, with their entry. Y deletes one.";
+        items[kCards].label = "Make Anki cards";
+        items[kCards].dim = saved == 0;
+        items[kCards].help = kCardsHelp;
+        items[kPc].label = "PC";
+        items[kPc].value = g_server.empty() ? "find automatically" : g_server;
+        items[kPc].help = "The address of your PC running tools/ocr_server.py, for \"Make Anki cards\".";
+        items[kHelp].label = "How to use";
+        items[kHelp].help = "The buttons, the settings and the files, in short.";
+        m.setItems(items);
+        MenuEvent ev = MenuInput(m);
+        if ((ev.key & Key::B) || (ev.type == MenuEvent::kButton && ev.index == 1)) return;
+        int row = ev.type == MenuEvent::kChoose ? ev.index : (ev.type == MenuEvent::kButton ? m.selected() : -1);
+        const int dir = (ev.key & (Key::DPadLeft | Key::CPadLeft)) ? -1 : (ev.key & (Key::DPadRight | Key::CPadRight)) ? 1 : 0;
+        if (dir) row = m.selected();
+        if (row < 0) continue;
+        if (row <= kKeyBoth) {
+            if (!dir) RecordHotkey(row);
+        } else if (row == kTextWhere) {
+            g_textOnTop = !g_textOnTop;
+            SaveSettings();
+        } else if (row == kHide) {
+            g_hideMode = (g_hideMode + (dir < 0 ? 2 : 1)) % 3;
+            SaveSettings();
+        } else if (dir) {
+            continue;
+        } else if (row == kLast) {
+            if (g_lastBlocks.empty()) continue;
+            if (!OpenDict()) {
+                Notice("Kotoba3DS", g_dictError);
+                continue;
+            }
+            g_readTop = g_readBottom = false;  // nothing of the game to show under it
+            std::vector<std::string> blocks = g_lastBlocks;
+            OpenLookup(blocks, g_lastTextOnTop);
+        } else if (row == kSaved) {
+            SavedWords();
+        } else if (row == kCards) {
+            MakeCards();
+        } else if (row == kPc) {
+            ChoosePc();
+        } else if (row == kHelp) {
+            HowToUse();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Every frame while the game plays: the hotkeys, and Select (the menu)
+// ---------------------------------------------------------------------------
+static bool g_openMenu = false;
+static kt::HotkeyDispatcher *g_hotkeysPtr = nullptr;
+#define g_hotkeys Leaky(g_hotkeysPtr)
+
+static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's own menu instead
+    g_openMenu = true;
+    return false;
+}
+
+static void Watcher(void) {
+    if (g_openMenu) {
+        g_openMenu = false;
+        Process::Pause();
+        Settings();
+        g_hotkeys.reset();
+        Process::Play();
+        return;
+    }
+    for (int m = 0; m < kModes; m++) g_hotkeys.set(m, g_combo[m]);
+    int mode = g_hotkeys.update(Controller::GetKeysDown(true), Controller::GetKeysPressed(), osGetTime());
+    if (mode < 0) return;
+    ReadAndLookUp(mode);
+    g_hotkeys.reset();
+}
+
+// ---------------------------------------------------------------------------
+// Start of the game
+// ---------------------------------------------------------------------------
 // Runs before the game's first instruction: records the game's memory budget as the game will
 // see it (Nintendo's SDK sizes the game's heap from these), for games that crash at start.
 static void LogBootMemory() {
@@ -1223,52 +1479,23 @@ void PatchProcess(FwkSettings &settings) {
 
 
 int main(void) {
-    PluginMenu *menu = new PluginMenu("Kotoba3DS", 2, 0, 0,
-                                      "In-game Japanese dictionary that reads the screen and saves words for Anki.\n\n"
-                                      "Press the hotkey (ZL+ZR) in a game to look a word up.");
+    PluginMenu *menu = new PluginMenu("Kotoba3DS", 3, 0, 0,
+                                      "In-game Japanese dictionary that reads the screen and saves words for Anki.");
     menu->SynchronizeWithFrame(true);
+    menu->OnOpening = OnMenuOpening;  // Select: the plugin's own menu, not CTRPF's list
 
     Directory::Create(kRootDir);
     Directory::Create(kShotDir);
     LoadSettings();
-    {   // what this game leaves the plugin (the OCR needs ~2.5 MB at its peak)
-        LogOcr(Utils::Format("start: game %s, plugin heap %lu KB, heap free %lu KB", TitleIdHex().c_str(),
-                             (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(HeapFree() / 1024)));
-    }
+    LogOcr(Utils::Format("start: game %s, plugin heap %lu KB, heap free %lu KB", TitleIdHex().c_str(),
+                         (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(HeapFree() / 1024)));
     {   // CTRPF's own screenshot hotkey stays off: the plugin makes its screenshots itself
         bool *enabled = nullptr;
         u32 *hotkey = nullptr;
         PluginMenu::ScreenshotSettings(&enabled, &hotkey);
         if (enabled) *enabled = false;
     }
-
-    *menu += new MenuEntry("Last results", nullptr,
-                           [](MenuEntry *) {
-                               if (g_lastBlocks.empty()) {
-                                   MessageBox("Kotoba3DS", "No lookup yet.")();
-                               } else if (EnsureDict()) {
-                                   kt::LookupView &v = View();
-                                   v.setText(g_lastBlocks);
-                                   RunLookupView(v);
-                                   DropView();
-                               }
-                           },
-                           "Reopen the text of your last lookup.");
-    *menu += new MenuEntry("Saved words", nullptr, SavedWords, "Review or delete saved words.");
-    *menu += new MenuEntry(HotkeyEntryName(), nullptr, ChooseHotkey, "The button combo that reads the screen.");
-    *menu += new MenuEntry(CardsEntryName(), nullptr, ChooseCards, "Make Anki cards right away with your PC.");
-    *menu += new MenuEntry("How to use", nullptr, [](MenuEntry *) { MessageBox("Kotoba3DS", kHelp)(); });
-    *menu += new MenuEntry("Speed test", nullptr,
-                           [](MenuEntry *) {
-                               g_speedTestNext = true;
-                               MessageBox("Kotoba3DS",
-                                          "The next read of the screen is timed again in a few other ways "
-                                          "(about 10 seconds), then shown as usual.\n\n"
-                                          "The times go to /3ds/kotoba3ds/ocr_log.txt.")();
-                           },
-                           "Times the next read in several ways, for the developer.");
-
-    *menu += HotkeyWatcher;  // runs every frame while the game plays
+    *menu += Watcher;  // runs every frame while the game plays
     menu->Run();
     // Don't `delete menu` (or free anything else) here: the game is exiting and the
     // plugin heap may already be unusable. See the note at Leaky().

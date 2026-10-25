@@ -8,8 +8,8 @@
 namespace kt {
 
 // Output: "K3RGB565 <w> <h>\n" followed by w*h little-endian RGB565 pixels, rows top to bottom.
-// Reads at most the top 400x240 of the picture (the top screen).
-bool topScreenRGB565(Reader &bmp, std::string &out, std::string &error);
+// Reads at most 400x480 (a screenshot of one screen, or of both).
+bool screenshotRGB565(Reader &bmp, std::string &out, std::string &error);
 
 // The top screen (up to 400x240) as R, G, B bytes, malloc'd (free() it). nullptr on failure.
 uint8_t *topScreenRGB888(Reader &bmp, unsigned &w, unsigned &h, std::string &error);
@@ -30,5 +30,16 @@ std::string bmpHeader(unsigned w, unsigned h);
 void rgbToFramebuffer(const uint8_t *rgb, int format, uint8_t *px);
 
 std::string bmpFromRGB(const uint8_t *rgb, unsigned w, unsigned h);
+
+// A screen's picture kept while a lookup is open, in the framebuffer's column order (each
+// column bottom to top), packed as R, G, B (picBytes 3) or RGB565 (picBytes 2, when both
+// screens are kept). n pixels of one column at a time.
+void framebufferColumnToPicture(const uint8_t *fb, unsigned n, int format, unsigned bpp, unsigned picBytes, uint8_t *pic);
+// Back to the framebuffer: tone 0 as it was, 1 dimmed to ~19% (behind the lookup), 2 to 50%
+// (see-through); pixels from shadeFrom on (the screen's top rows) also darkened, c * keep >> 8.
+void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picBytes, int tone, unsigned shadeFrom,
+                                unsigned keep, int format, unsigned bpp, uint8_t *fb);
+// One picture pixel -> R, G, B.
+void picturePixelRGB(const uint8_t *pic, unsigned picBytes, uint8_t *rgb);
 
 }  // namespace kt

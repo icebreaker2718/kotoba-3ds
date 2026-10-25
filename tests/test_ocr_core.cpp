@@ -149,6 +149,44 @@ int main(int argc, char **argv) {
         }
     }
 
+    {   // the pictures kept for a lookup: back to the framebuffer as they were, dimmed as before
+        for (int fmt = 0; fmt < 5; fmt++) {
+            const unsigned bpp = fmt == 0 ? 4 : (fmt == 1 ? 3 : 2);
+            std::vector<uint8_t> col(240 * bpp), back(240 * bpp), pic(240 * 3), pic2(240 * 2);
+            for (size_t i = 0; i < col.size(); i++) col[i] = (uint8_t)(i * 53 + 7 * fmt);
+            if (fmt == 0) for (unsigned k = 0; k < 240; k++) col[k * 4] = 0xFF;  // RGBA8's alpha
+            // through R, G, B: a pixel comes back as the format holds it (16-bit: their own bits)
+            framebufferColumnToPicture(col.data(), 240, fmt, bpp, 3, pic.data());
+            pictureColumnToFramebuffer(pic.data(), 240, 3, 0, 240, 255, fmt, bpp, back.data());
+            bool same = true;
+            for (unsigned k = 0; k < 240; k++) {
+                uint8_t a[3], b[3];
+                framebufferToRGB(&col[k * bpp], 1, fmt, bpp, a);
+                framebufferToRGB(&back[k * bpp], 1, fmt, bpp, b);
+                same &= !memcmp(a, b, 3);
+            }
+            check(same, "picture -> framebuffer as it was, format " + std::to_string(fmt));
+        }
+        std::vector<uint8_t> col(240 * 4), pic(240 * 3), back(240 * 4);
+        for (size_t i = 0; i < col.size(); i++) col[i] = (uint8_t)(i * 97 + 3);
+        framebufferColumnToPicture(col.data(), 240, 0, 4, 3, pic.data());
+        pictureColumnToFramebuffer(pic.data(), 240, 3, 1, 200, 70, 0, 4, back.data());
+        bool dim = true;
+        for (unsigned k = 0; k < 240; k++)
+            for (int b = 1; b < 4; b++) {
+                unsigned v = col[k * 4 + b], d = (v >> 3) + (v >> 4);
+                if (k >= 200) d = (d * 70) >> 8;
+                dim &= back[k * 4 + b] == d;
+            }
+        check(dim, "dimmed (~19%) and the band darker, as the plugin always drew them");
+        std::vector<uint8_t> p565(240 * 2);
+        framebufferColumnToPicture(col.data(), 240, 0, 4, 2, p565.data());
+        uint8_t a[3], b[3];
+        picturePixelRGB(p565.data(), 2, a);
+        framebufferToRGB(col.data(), 1, 0, 4, b);
+        check(abs(a[0] - b[0]) < 8 && abs(a[1] - b[1]) < 4 && abs(a[2] - b[2]) < 8, "RGB565 pictures: close to the screen");
+    }
+
     if (argc > 1) {
         FileReader dr(argv[1]);
         Dictionary d;

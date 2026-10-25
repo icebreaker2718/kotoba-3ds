@@ -418,9 +418,8 @@ def pos_codes_of(definition):
 # ---------------------------------------------------------------------------
 def top_screen(bmp_bytes):
     from PIL import Image
-    img = Image.open(io.BytesIO(bmp_bytes)).convert("RGB")
-    # CTRPF saves 400x480 (top screen above bottom screen) or 400x240 (top only)
-    return img.crop((0, 0, 400, 240)) if img.height >= 480 else img
+    # the screen(s) the plugin read: top 400x240, touchscreen 320x240, or both 400x480
+    return Image.open(io.BytesIO(bmp_bytes)).convert("RGB")
 
 
 def encode_picture(img, cfg):

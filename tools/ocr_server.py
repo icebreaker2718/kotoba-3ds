@@ -117,14 +117,14 @@ LAST_DIR = os.path.join(HERE, "cache", "last_screens")
 
 
 def decode_screen(data):
-    """Top screen as an RGB image, from the plugin's compact RGB565 upload or any image file."""
+    """A screenshot as an RGB image (the top screen, the touchscreen, or both, as the plugin saved
+    it), from the plugin's compact RGB565 upload or any image file."""
     from PIL import Image
     if data.startswith(b"K3RGB565 "):
         nl = data.index(b"\n")
         w, h = (int(v) for v in data[9:nl].split())
         return Image.frombytes("RGB", (w, h), data[nl + 1:nl + 1 + w * h * 2], "raw", "BGR;16")
-    img = Image.open(io.BytesIO(data)).convert("RGB")
-    return img.crop((0, 0, 400, 240)) if img.height >= 480 else img
+    return Image.open(io.BytesIO(data)).convert("RGB")
 
 
 class Reader:
@@ -400,7 +400,7 @@ def serve(cfg, port=PORT, engine="manga-ocr", preload=True, log=print, ready=Non
     log("Address for the plugin: " + (", ".join(f"{ip}:{port}" for ip in ips) or f"<this PC's IP>:{port}"))
     log("(If Windows asks, allow Python on private networks.)  Ctrl+C to stop.")
     if maker:
-        log("Words you save in-game become Anki cards right away (keep Anki open).")
+        log("On the 3DS: Select > Make Anki cards sends your saved words here (keep Anki open).")
     if ready:
         ready.set()
     try:

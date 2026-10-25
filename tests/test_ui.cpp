@@ -1,3 +1,4 @@
+#include <algorithm>
 // Tests of the lookup screens (core/lookup_view, core/ui_text) with a made-up font of plain
 // boxes: layout, tapping, moving between words and rows, paging, buttons, drawing.
 //   test_ui dict.bin
@@ -10,6 +11,8 @@
 #include "core/bmp.hpp"
 #include "core/kana.hpp"
 #include "core/lookup_view.hpp"
+#include "core/menu_view.hpp"
+#include "core/hotkeys.hpp"
 #include "core/ui_text.hpp"
 
 using namespace kt;
@@ -270,10 +273,46 @@ int main(int argc, char **argv) {
         check(!v.scroll(1) && (scrolled == 0 || v.scroll(-1000)), "and back to the top");
         v.setHidden(true);
         RgbCanvas t2(400, 240);
-        v.drawTop(t2);
+        v.drawTop(t2, LookupView::Panel::Hidden);
         bool blank = true;
         for (uint8_t p : t2.px) blank &= p == 0;
         check(blank, "hidden: nothing drawn over the game");
+        RgbCanvas t3(400, 240);
+        v.drawTop(t3, LookupView::Panel::SeeThrough);
+        check(t3.at(0, 0).r == 0 && t3.at(0, 0).g == 0, "see-through: no band behind the entry");
+        bool text = false;
+        for (uint8_t p : t3.px) text |= p > 100;
+        check(text, "see-through: the entry is still drawn");
+        RgbCanvas b3(320, 240);
+        v.drawBottom(b3, LookupView::Panel::Hidden);
+        blank = true;
+        for (uint8_t p : b3.px) blank &= p == 0;
+        check(blank, "a hidden touchscreen panel: nothing drawn, not even the buttons");
+        v.setHidden(false);
+    }
+    {   // the panels swapped: the text on the top screen (400 wide), the entry and buttons below
+        v.setText({"この先に宝箱があるらしいぞ。気をつけて進むんだ。"});
+        v.setTextOnTop(true);
+        int widest = 0;
+        for (const LookupView::Cell &cl : v.cells()) widest = std::max(widest, cl.x + cl.w);
+        check(widest > 320 && widest <= 400, "the text is laid out for the top screen");
+        LookupView::Button b;
+        check(!v.tap(60, 30, b) && b == LookupView::kNone, "a tap on the entry doesn't select text");
+        v.tap(300, 215, b);
+        check(b == LookupView::kClose, "the buttons are still on the touchscreen");
+        check(v.moveWord(1) && v.hasResult(), "the D-pad moves through the text");
+        RgbCanvas top(400, 240), bottom(320, 240);
+        v.drawTop(top);
+        v.drawBottom(bottom);
+        check(top.at(399, 120).r == 15 && top.at(399, 120).g == 18, "the text panel fills the top screen");
+        bool entry = false;
+        for (int y = 10; y < 190 && !entry; y++)
+            for (int x = 10; x < 310 && !entry; x++) entry = bottom.at(x, y).r > 200;
+        check(entry, "the entry is drawn on the touchscreen");
+        v.setTextOnTop(false);
+        widest = 0;
+        for (const LookupView::Cell &cl : v.cells()) widest = std::max(widest, cl.x + cl.w);
+        check(widest <= 320, "and back on the touchscreen");
     }
     {   // text with nothing in the dictionary, and long text that scrolls on the touchscreen
         v.setText({"ABC"});
@@ -293,6 +332,55 @@ int main(int argc, char **argv) {
         for (int ty = 8; ty < 182 && c2 != sc; ty += 5) c2 = v.charAt(last.x + last.w / 2, ty);
         check(c2 == sc, "the text scrolled so the selection is on screen");
         (void)bt;
+    }
+    {   // hotkeys: names, and one that is part of another waits for it
+        check(keyComboName(keys::ZL | keys::ZR) == "ZL + ZR" && keyComboName(0) == "Off" &&
+                  keyComboName(keys::Y) == "Y", "hotkey names: " + keyComboName(keys::L | keys::R | keys::Down));
+        HotkeyDispatcher d;
+        d.set(0, keys::ZL | keys::ZR);
+        d.set(1, keys::ZL);
+        d.set(2, keys::Y);
+        check(d.update(keys::Y, keys::Y, 0) == 2, "a hotkey part of no other: at once");
+        check(d.update(keys::ZL, keys::ZL, 1000) == -1, "ZL (part of ZL + ZR) waits");
+        check(d.update(keys::ZL | keys::ZR, keys::ZR, 1100) == 0, "then ZR: ZL + ZR");
+        check(d.update(keys::ZL, keys::ZL, 2000) == -1 && d.update(0, 0, 2080) == 1, "ZL let go quickly: ZL");
+        check(d.update(keys::ZL, keys::ZL, 3000) == -1 && d.update(keys::ZL, 0, 3100) == -1 &&
+                  d.update(keys::ZL, 0, 3300) == 1, "ZL held: ZL after a moment");
+        check(d.update(keys::ZL | keys::ZR, keys::ZL | keys::ZR, 4000) == 0, "both at once: the longer one");
+        check(d.update(keys::A, keys::A, 5000) == -1, "other buttons: nothing");
+    }
+    {   // the menu screens
+        MenuView m(tr);
+        m.setTitle("Kotoba3DS");
+        std::vector<MenuItem> items;
+        for (int i = 0; i < 12; i++) {
+            MenuItem it;
+            it.label = "Item " + std::to_string(i);
+            it.value = i % 2 ? "on" : "";
+            it.help = "Help for item " + std::to_string(i);
+            items.push_back(it);
+        }
+        m.setItems(items);
+        m.setButtons({"\uE000 Choose", "\uE001 Close"});
+        int b = -1;
+        check(m.tap(100, MenuView::kRowTop + MenuView::kRowH + 5, b) == 1 && b == -1, "a tap on a row");
+        check(m.tap(250, 220, b) == -1 && b == 1, "a tap on the second button");
+        while (m.move(1)) {}
+        check(m.selected() == 11 && m.scroll() > 0, "the list scrolls to the last item");
+        check(m.tap(100, MenuView::kRowTop + 2, b) == m.scroll(), "taps count from the first row shown");
+        RgbCanvas top(400, 240), bottom(320, 240);
+        m.drawTop(top);
+        m.drawBottom(bottom);
+        bool help = false;
+        for (int y = 50; y < 80 && !help; y++)
+            for (int x = 14; x < 200 && !help; x++) help = top.at(x, y).r > 200;
+        check(help, "the highlighted item's help is on the top screen");
+        MenuView q(tr);
+        q.setMessage("No saved words yet.");
+        q.setButtons({"\uE001 Back"});
+        RgbCanvas qb(320, 240);
+        q.drawBottom(qb);
+        check(q.selected() == -1, "a message screen has no rows");
     }
     printf(fails ? "%d FAILED\n" : "ALL PASSED\n", fails);
     return fails ? 1 : 0;
