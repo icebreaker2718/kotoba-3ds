@@ -129,6 +129,7 @@ The **Select** menu (drawn like the lookup: tap, or D-pad / Circle Pad and A) ha
 | *Read the top screen* / *Read the touchscreen* / *Read both screens* | each reading's hotkey: hold the button(s) you want, one or several, then let go (or *Turn off*) |
 | *Touchscreen text shows on* | the touchscreen (tap the words) or the top screen (the entry then goes on the touchscreen) |
 | *Hide (X)* | see-through, hidden, or see-through then hidden |
+| *Saved words are written* | in kanji (the word's usual kanji form, even when the game wrote it in kana: ちょっと → 一寸) or as in the game (kana stays kana: たべた → たべる) |
 | *Last lookup* | reopen the text of your last lookup |
 | *Saved words* | review them with their entry; Y deletes one |
 | *Make Anki cards* | send the saved words to your PC (below) |

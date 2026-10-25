@@ -166,6 +166,21 @@ static void testSearch(Dictionary &d, FileReader &fr) {
         }
         CHECK(ok, "%s -> card says %s (top result gave %s)", c.query, c.card, got.c_str());
     }
+    // "as in the game": kana stays kana (in its dictionary form), katakana stays katakana, kanji kanji
+    struct { const char *text, *card; } written[] = {
+        {"ちょっと", "ちょっと"}, {"たべた", "たべる"}, {"食べた", "食べる"}, {"ケーキ", "ケーキ"},
+    };
+    for (auto &c : written) {
+        SearchOutput w = scanAt(d, c.text, 0);
+        Entry we;
+        std::string got;
+        if (!w.results.empty() && d.entry(w.results[0].entryId, we)) {
+            std::string col = mineLogLine("t", "tid", we, w.results[0], "", c.text, "", false);
+            size_t a2 = col.find('\t', col.find('\t') + 1) + 1;
+            got = col.substr(a2, col.find('\t', a2) - a2);
+        }
+        CHECK(got == c.card, "as in the game: %s -> %s (got %s)", c.text, c.card, got.c_str());
+    }
     // no kanji form: stays kana
     SearchOutput kk = search(d, "ここ");
     for (const Result &kr : kk.results) {
