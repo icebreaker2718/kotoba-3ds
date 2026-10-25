@@ -215,13 +215,13 @@ these placeholders: `{expression} {reading} {furigana} {audio} {definition_html}
 {freq_sort} {game} {game_tag} {time} {inflection} {query} {title_id}`. For example, set
 `"IsWordAndSentenceCard": "x"` to make every card a word+sentence card.
 
-### Cards whose sentence missed the word
-If a card's sentence doesn't contain the word you looked up (OCR misread it, or the wrong line
-was read), the card is given **flag 1 (red)** and the tag `check_sentence`, so you can find
-them in the Anki browser (*Flag → Red*, or search `tag:check_sentence`) and fix the sentence.
-Conjugated forms count as found (食べる in 食べられなかった). Change the flag with
-`"flag_missing_word"` in the `anki` section (0 turns it off; 2 = orange, 3 = green, 4 = blue…)
-and the tag with `"missing_word_tag"` (`""` for none).
+### Cards to finish by hand
+A card whose word isn't in any of your dictionaries (it gets the 3DS's short definition instead)
+is tagged `no_definition`; one for which no audio source had a recording is tagged `no_audio`.
+Either way its card also gets **flag 1 (red)**, so you can find them in the Anki browser
+(*Flag → Red*, or search `tag:no_definition` / `tag:no_audio`) and add what's missing. Change
+the tags with `"missing_definition_tag"` and `"missing_audio_tag"` in the `anki` section (`""`
+for none), and the flag with `"flag_missing"` (0 turns it off; 2 = orange, 3 = green, 4 = blue…).
 
 ### Word audio
 `audio.sources` is tried in order for each word, until one has a recording:

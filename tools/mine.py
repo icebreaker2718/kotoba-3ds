@@ -68,10 +68,11 @@ DEFAULT_CONFIG = {
         },
         "tags": ["{game_tag}"],
         "allow_duplicates": False,
-        "_comment_flag": "When the card's sentence doesn't contain the looked-up word (OCR misread, or "
-                         "the wrong line was read), flag the card (1 = red, 0 = off) and add this tag.",
-        "flag_missing_word": 1,
-        "missing_word_tag": "check_sentence",
+        "_comment_flag": "Cards whose word isn't in any of your dictionaries, or that got no word audio, get "
+                         "these tags (\"\" for none) and this flag (1 = red, 0 = off), to fix in the Anki browser.",
+        "missing_definition_tag": "no_definition",
+        "missing_audio_tag": "no_audio",
+        "flag_missing": 1,
     },
     "dictionaries": {
         "_comment": "Put Yomitan .zip dictionaries in the folder below and they are found automatically "
@@ -141,6 +142,12 @@ def load_config(path):
     au = cfg.get("audio")
     if isinstance(au, dict) and au.get("sources") == ["jpod101"]:
         au["sources"] = list(DEFAULT_CONFIG["audio"]["sources"])
+    # the flag used to mark sentences without the word (no longer checked): keep its value
+    an = cfg.get("anki")
+    if isinstance(an, dict) and "flag_missing_word" in an:
+        an.setdefault("flag_missing", an["flag_missing_word"])
+        for old in ("flag_missing_word", "missing_word_tag", "_comment_flag"):
+            an.pop(old, None)
     # fill in keys added in newer versions
     for k, v in DEFAULT_CONFIG.items():
         if isinstance(v, dict):
@@ -365,10 +372,19 @@ class Enricher:
         print("Audio: " + (", ".join(names) if au.get("enabled") else "off"))
 
     def definition_html(self, expression, reading, fallback_text):
+        return self.lookup_definition(expression, reading, fallback_text)[0]
+
+    def lookup_definition(self, expression, reading, fallback_text):
+        """-> (definition HTML, whether one of the dictionaries had the word). Without, the 3DS's
+        own definition (fallback_text) is used."""
         for d in self.glossaries:
             h = d.html(expression, reading)
             if h:
-                return h
+                return h, True
+        return self._fallback_html(fallback_text), False
+
+    @staticmethod
+    def _fallback_html(fallback_text):
         if not fallback_text:
             return ""
         senses = [re.sub(r"^\d+\. ", "", line) for line in fallback_text.split("<br>")]
@@ -501,28 +517,9 @@ def highlight(sentence, expression, reading):
     return sentence
 
 
-def sentence_has_word(sentence, row):
-    """Does the (plain or bolded) sentence contain the looked-up word, in any common form?
-    Conjugated forms are found by the dictionary form minus its last kana (食べる -> 食べ)."""
-    text = re.sub(r"<[^>]+>", "", sentence or "")
-    if not text:
-        return False
-    expr, reading, query = row["expression"], row["reading"], row.get("query", "")
-    if any(w and w in text for w in (expr, reading)):
-        return True
-    if query and not query.isascii() and query in text:  # what was tapped on the console
-        return True
-    for word, min_stem in ((expr, 1 if KANJI.search(expr or "") else 2), (reading, 2)):
-        if word and len(word) >= 2 and HIRAGANA.match(word[-1]):
-            stem = word[:-1]
-            if len(stem) >= min_stem and (KANJI.search(stem) or len(stem) >= 2) and stem in text:
-                return True
-    return False
-
-
 def flag_note(cfg, note_id, log=print):
     """Flags the new note's cards (AnkiConnect setSpecificValueOfCard)."""
-    flag = int(cfg["anki"].get("flag_missing_word", 1) or 0)
+    flag = int(cfg["anki"].get("flag_missing", 1) or 0)
     if not flag or not note_id:
         return
     try:
@@ -575,12 +572,15 @@ def build_tags(cfg, row):
 
 
 def enrich_row(enricher, row, log=print):
-    """-> (extra field values, list of (filename, bytes) media)"""
+    """-> (extra field values, list of (filename, bytes) media, what was missing: a list of
+    "definition" (no dictionary had the word) and "audio" (no recording found), for those set up)"""
     expr, reading = row["expression"], row["reading"]
     pos, cats = enricher.pitch(expr, reading, pos_codes_of(row["definition"]))
     freq_html, freq_sort = enricher.frequency(expr, reading)
+    definition, found = enricher.lookup_definition(expr, reading, row["definition"])
+    missing = [] if found or not enricher.glossaries else ["definition"]
     extra = {
-        "definition_html": enricher.definition_html(expr, reading, row["definition"]),
+        "definition_html": definition,
         "pitch_position": pos,
         "pitch_categories": cats,
         "frequency": freq_html,
@@ -593,7 +593,9 @@ def enrich_row(enricher, row, log=print):
         name = f"kotoba3ds_{source}_{hashlib.md5((expr + '|' + reading).encode()).hexdigest()[:12]}.{ext}"
         media.append((name, data))
         extra["audio"] = f"[sound:{name}]"
-    return extra, media
+    elif enricher.cfg.get("audio", {}).get("enabled") and enricher.cfg.get("audio", {}).get("sources"):
+        missing.append("audio")
+    return extra, media, missing
 
 
 def make_card(cfg, enricher, row, img=None, dry_run=False, log=print):
@@ -611,17 +613,18 @@ def make_card(cfg, enricher, row, img=None, dry_run=False, log=print):
         picture_html = f'<img src="{fname}">'
     if row["sentence"]:  # already read on the console ("Read screen"): bold what was tapped
         sentence = sentence_from_device(row)
-    extra, more_media = enrich_row(enricher, row, log)
+    extra, more_media, missing = enrich_row(enricher, row, log)
     fields = build_fields(cfg, row, sentence, picture_html, extra)
     tags = build_tags(cfg, row)
-    # a sentence was expected (there's a screenshot or the console read one) but lacks the word
-    suspect = bool(img is not None or row["sentence"]) and not sentence_has_word(sentence, row)
-    if suspect and cfg["anki"].get("missing_word_tag"):
-        tags.append(cfg["anki"]["missing_word_tag"])
+    # tagged (and flagged) for fixing in Anki: no dictionary had the word, or no audio was found
+    for what in missing:
+        tag = cfg["anki"].get(f"missing_{what}_tag", "")
+        if tag:
+            tags.append(tag)
+    note = "  ⚑ no " + " and no ".join("dictionary entry" if m == "definition" else "audio" for m in missing) if missing else ""
     if dry_run:
         filled = [k for k, v in fields.items() if v]
-        log(f"  would add {label}: fills {', '.join(filled)}" + ("" if extra.get("audio") else "  (no audio found)")
-            + ("  (sentence lacks the word: would be flagged)" if suspect else ""))
+        log(f"  would add {label}: fills {', '.join(filled)}" + (note + " - would be flagged" if note else ""))
         return "dry"
     try:
         for name, blob in ([media] if media else []) + more_media:
@@ -639,13 +642,13 @@ def make_card(cfg, enricher, row, img=None, dry_run=False, log=print):
             return "duplicate"
         log(f"  {label}: {e}")
         return "unreachable" if "Can't reach" in str(e) else "failed"
-    if suspect:
+    if missing:
         flag_note(cfg, note_id, log)
     bits = [x for x, ok in (("audio", extra.get("audio")), ("pitch", extra.get("pitch_position")),
                             ("picture", picture_html)) if ok]
     log(f"  added {label}" + (f"  「{re.sub('<.*?>', '', sentence)}」" if sentence else "")
         + (f"  [{', '.join(bits)}]" if bits else "")
-        + ("  ⚑ sentence doesn't contain the word - flagged to check" if suspect else ""))
+        + (note + " - flagged" if note else ""))
     return "added"
 
 

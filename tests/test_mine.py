@@ -205,24 +205,24 @@ check(all(t[f] == "" for f in ("IsWordAndSentenceCard", "IsClickCard", "IsSenten
                                "SentenceFurigana", "SelectionText")), "card-type flags left empty")
 check("1. (n) cat" not in k["MainDefinition"] and "cat" in k["MainDefinition"],
       "word missing from Jitendex falls back to the 3DS definition")
-hs = by["走る"]
-check("check_sentence" in hs["tags"] and "<b>" not in hs["fields"]["Sentence"],
-      f"sentence without the word -> tagged {hs['tags']}")
-nid = notes.index(hs) + 1
+# words no dictionary has, or without audio: tagged and flagged, the others not
+for w in ("食べる", "静か"):
+    check(not {"no_definition", "no_audio"} & set(by[w]["tags"]), f"{w}: found in the dictionary, with audio: not tagged {by[w]['tags']}")
+check({"no_definition", "no_audio"} <= set(by["猫"]["tags"]), f"猫: no entry, no audio -> both tags {by['猫']['tags']}")
+nid = notes.index(by["猫"]) + 1
 check(flags.get(nid * 10) == (["flags"], ["1"], True), f"...and its card gets flag 1 (red) {flags}")
-check(len(flags) == 1, "only that card is flagged")
-check(all("check_sentence" not in by[w]["tags"] for w in ("食べる", "静か", "猫", "宝箱")),
-      "words found in their sentence (or with no sentence) are not tagged")
-for sent, row, want in (("もう何も食べられなかった", ("食べる", "たべる", ""), True),
-                        ("一緒に行こう", ("行く", "いく", ""), True),
-                        ("早く走れ！", ("走る", "はしる", ""), True),
-                        ("ご飯を食事した", ("飲む", "のむ", ""), False),
-                        ("しずかな夜", ("静か", "しずか", ""), True),
-                        ("この先に宝箱", ("宝", "たから", "宝"), True),
-                        ("", ("猫", "ねこ", ""), False),
-                        ("あのね", ("猫", "ねこ", ""), False)):
-    got = mine.sentence_has_word(sent, {"expression": row[0], "reading": row[1], "query": row[2]})
-    check(got == want, f"sentence_has_word({sent!r}, {row[0]}) == {want}")
+check(all(notes[c // 10 - 1]["fields"]["Expression"] not in ("食べる", "静か") for c in flags), "complete cards aren't flagged")
+# an older config: its flag setting is kept under the new name, the old keys dropped
+oldp = os.path.join(work, "old_config.json")
+old = json.loads(json.dumps(cfg))
+old["anki"]["flag_missing_word"] = 3
+old["anki"]["missing_word_tag"] = "check_sentence"
+for k in ("flag_missing", "missing_definition_tag", "missing_audio_tag"):
+    old["anki"].pop(k, None)
+json.dump(old, open(oldp, "w"))
+oc = mine.load_config(oldp)
+check(oc["anki"]["flag_missing"] == 3 and "missing_word_tag" not in oc["anki"] and oc["anki"]["missing_audio_tag"] == "no_audio",
+      "older config: flag kept, sentence check gone, new tags added")
 aud = [v for n, v in media.items() if n.endswith(".mp3")]
 check(aud and aud[0] == MP3, "audio bytes stored in Anki media")
 
