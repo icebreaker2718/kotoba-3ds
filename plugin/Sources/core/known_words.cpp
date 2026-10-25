@@ -66,6 +66,11 @@ void KnownWords::add(const std::string &word) {
     extra_.insert(std::lower_bound(extra_.begin(), extra_.end(), word), word);
 }
 
+void KnownWords::remove(const std::string &word) {
+    auto it = std::lower_bound(extra_.begin(), extra_.end(), word);
+    if (it != extra_.end() && *it == word) extra_.erase(it);
+}
+
 bool KnownWords::has(const std::string &word) const {
     if (word.empty()) return false;
     const char *w = word.c_str(), *pool = pool_;

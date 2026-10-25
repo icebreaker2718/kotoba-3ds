@@ -627,6 +627,25 @@ bool LookupView::checkKnown() {
     return false;
 }
 
+std::vector<std::string> LookupView::selectedForms() {
+    std::vector<std::string> forms;
+    size_t len;
+    if (selBlock_ >= 0) formsOf(so_, forms, len);
+    return forms;
+}
+
+void LookupView::refreshKnown() {
+    if (!known_) return;
+    for (std::vector<Mark> &ms : marks_)
+        for (Mark &m : ms) {
+            if (!m.state) continue;
+            m.state = 1;
+            if (m.counts)
+                for (const std::string &f : m.forms)
+                    if (known_->has(f)) { m.state = 2; break; }
+        }
+}
+
 bool LookupView::isKnown(const Cell &c) const {
     if ((size_t)c.block >= marks_.size()) return false;
     for (const Mark &m : marks_[c.block])
@@ -740,7 +759,7 @@ void LookupView::drawTextPanel(Canvas &c, Panel p) {
         std::vector<std::string> s = tr_.wrap(status_, kStatusSize, W - 2 * kMargin);
         if (!s.empty()) tr_.draw(c, kMargin, statusY(), s[0], kStatusSize, statusColor_);
     } else {
-        std::string hint = "\uE049 words  \uE079\uE07A scroll  \uE07B\uE07C\uE052\uE053 meanings";
+        std::string hint = "\uE049 words  \uE079\uE07A scroll  \uE07B\uE07C\uE052\uE053 meanings  \uE003 known";
         int w = tr_.width(hint, 13);
         tr_.draw(c, (W - w) / 2, statusY() + 1, hint, 13, kDim);
     }

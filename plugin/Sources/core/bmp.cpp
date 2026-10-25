@@ -295,7 +295,8 @@ void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picByte
 // ---------------------------------------------------------------------------
 // QOI
 // ---------------------------------------------------------------------------
-QoiEncoder::QoiEncoder(unsigned w, unsigned h, Sink sink, void *user) : sink_(sink), user_(user) {
+QoiEncoder::QoiEncoder(unsigned w, unsigned h, Sink sink, void *user, uint8_t *buf, size_t cap)
+    : sink_(sink), user_(user), buf_(buf), cap_(cap) {
     const uint8_t head[14] = {'q', 'o', 'i', 'f', (uint8_t)(w >> 24), (uint8_t)(w >> 16), (uint8_t)(w >> 8), (uint8_t)w,
                               (uint8_t)(h >> 24), (uint8_t)(h >> 16), (uint8_t)(h >> 8), (uint8_t)h, 3, 0};
     for (uint8_t b : head) put(b);

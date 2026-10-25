@@ -61,6 +61,11 @@ public:
     const std::string &sentence() const;          // the block the selection is in
     std::string selectedText() const;             // the highlighted characters
     void markSaved();                             // shows the selection (and the word elsewhere) as saved (green)
+    // The spellings the selected word is known under (for marking it known by hand); empty if
+    // there is no word here.
+    std::vector<std::string> selectedForms();
+    // The known words changed: every word checked already is shown again as known or not.
+    void refreshKnown();
     void setStatus(const std::string &s, Rgb c) { status_ = s; statusColor_ = c; }
 
     // ---- drawing ----

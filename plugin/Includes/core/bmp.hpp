@@ -43,23 +43,24 @@ void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picByte
 void picturePixelRGB(const uint8_t *pic, unsigned picBytes, uint8_t *rgb);
 
 // A QOI image (qoiformat.org: lossless, about a third of a BMP's size for game screens), written
-// a pixel at a time, rows from the top; the bytes come out through `sink` in pieces.
+// a pixel at a time, rows from the top; the bytes come out through `sink` in pieces of up to
+// `cap` bytes, gathered in `buf` (the caller's: a CTRPF task has only 4 KB of stack).
 class QoiEncoder {
 public:
     using Sink = bool (*)(const uint8_t *data, size_t n, void *user);  // false: stop (write failed)
-    QoiEncoder(unsigned w, unsigned h, Sink sink, void *user);
+    QoiEncoder(unsigned w, unsigned h, Sink sink, void *user, uint8_t *buf, size_t cap);
     void push(uint8_t r, uint8_t g, uint8_t b);
     bool finish();  // the end marker, and what is still buffered; false if the sink failed
 private:
     Sink sink_;
     void *user_;
     bool ok_ = true;
-    uint8_t buf_[8192];
-    size_t n_ = 0;
+    uint8_t *buf_;
+    size_t cap_, n_ = 0;
     uint32_t index_[64] = {};
     uint32_t prev_ = 0xFF;  // 0xRRGGBBAA: opaque black
     unsigned run_ = 0;
-    void put(uint8_t b) { buf_[n_++] = b; if (n_ == sizeof(buf_)) flush(); }
+    void put(uint8_t b) { buf_[n_++] = b; if (n_ == cap_) flush(); }
     void flush();
 };
 

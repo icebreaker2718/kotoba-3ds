@@ -25,7 +25,8 @@ int main(int, char **argv) {
         if (!in || fread(rgb.data(), 1, rgb.size(), in) != rgb.size()) return 1;
         fclose(in);
         FILE *f = fopen(argv[5], "wb");
-        QoiEncoder q(w, h, toFile, f);
+        static uint8_t buf[5000];
+        QoiEncoder q(w, h, toFile, f, buf, sizeof(buf));
         for (size_t i = 0; i < (size_t)w * h; i++) q.push(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
         bool ok = q.finish();
         fclose(f);

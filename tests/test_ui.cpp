@@ -385,6 +385,21 @@ int main(int argc, char **argv) {
         tapCell(s, cellOf(s, "ケ"));
         s.markSaved();
         check(s.cellKnown(cellOf(s, "ケ", 1)) && kw.has("ケーキ"), "saving a word turns it green elsewhere too");
+        // Y: marked known by hand, and taken back
+        LookupView y(dict, tr);
+        KnownWords k3;
+        y.setKnown(&k3);
+        y.setText({"こんにちは、今日はこんにちは"});
+        guard = 0;
+        while (y.prefetch() && guard++ < 1000) {}
+        std::vector<std::string> forms = y.selectedForms();
+        check(!forms.empty() && !y.cellKnown(cellOf(y, "こ", 1)), "a word to mark: " + (forms.empty() ? std::string() : forms[0]));
+        for (const std::string &f : forms) k3.add(f);
+        y.refreshKnown();
+        check(y.cellKnown(cellOf(y, "こ", 1)), "marked known: green everywhere");
+        for (const std::string &f : forms) k3.remove(f);
+        y.refreshKnown();
+        check(!y.cellKnown(cellOf(y, "こ", 1)) && k3.size() == 0, "unmarked: white again");
     }
     {   // hotkeys: names, and one that is part of another waits for it
         check(keyComboName(keys::ZL | keys::ZR) == "ZL + ZR" && keyComboName(0) == "Off" &&

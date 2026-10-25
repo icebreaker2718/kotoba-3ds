@@ -107,6 +107,7 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    | D-pad ▲ ▼ (or C-stick) | scroll a long definition |
    | D-pad ◀ ▶ (or L / R) | the other matches at that spot (homographs, most common first, then shorter words), shown as 1/3 |
    | **A** (or the Save button) | save the word |
+   | Y | mark the word known without saving it (grammar, words you know); Y again takes it back |
    | X (or Hide) | uncover the screen that was read: see-through or hidden (*Hide (X)* in the menu); again to come back |
    | **B** (or Close) | close; the game continues |
 
@@ -117,8 +118,9 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
 3. **Save** writes the word to `mined.tsv` with the sentence and a screenshot of the screen(s)
    that were read (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green. The screenshot is
    written once the lookup closes, while the game goes on, so saving is instant.
-4. **Words you know are green**: the words you saved before, and the words of your Anki cards
-   once *Known words* has their list (below), wherever they are in the text.
+4. **Words you know are green**: the words you saved before, the ones you marked with **Y**
+   (kept in `SD:/3ds/kotoba3ds/marked.txt`), and the words of your Anki cards once *Known words*
+   has their list (below), wherever they are in the text.
 
 The **Select** menu (drawn like the lookup: tap, or D-pad / Circle Pad and A) has:
 

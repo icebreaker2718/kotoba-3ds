@@ -25,8 +25,11 @@ public:
     // the list keeps buf (no copy) and frees it. fileSize > len: the file was longer (then the
     // last, partial line is dropped).
     bool adopt(char *buf, size_t len, size_t fileSize);
-    // One more word (a word saved just now).
+    // One more word (a word saved just now). reserve(): room for that many without allocating.
     void add(const std::string &word);
+    void reserve(size_t n) { extra_.reserve(n); }
+    // Takes back a word add()ed (not one of the list's).
+    void remove(const std::string &word);
     bool has(const std::string &word) const;
     size_t size() const { return count_ + extra_.size(); }
     bool truncated() const { return truncated_; }
