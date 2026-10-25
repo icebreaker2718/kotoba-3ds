@@ -219,6 +219,24 @@ std::string cardExpressionFor(const Entry &e, const std::string &matchedKey) {
     return seen;
 }
 
+std::string writtenExpressionFor(const Entry &e, const Result &r) {
+    bool kanji = false, katakana = false, hiragana = false;
+    for (size_t i = 0; i < r.surface.size();) {
+        uint32_t cp = utf8Next(r.surface, i);
+        if (isKanjiCp(cp) || cp == 0x3005) kanji = true;
+        else if (cp >= 0x30A1 && cp <= 0x30FA) katakana = true;
+        else if (cp >= 0x3041 && cp <= 0x3096) hiragana = true;
+    }
+    if (kanji || r.surface.empty() || r.matchedKey.empty()) return expressionFor(e, r.matchedKey);
+    if (!katakana || hiragana) return r.matchedKey;  // the key is in hiragana
+    std::string out;  // written in katakana: the key back in katakana
+    for (size_t i = 0; i < r.matchedKey.size();) {
+        uint32_t cp = utf8Next(r.matchedKey, i);
+        utf8Append(out, cp >= 0x3041 && cp <= 0x3096 ? cp + 0x60 : cp);
+    }
+    return out;
+}
+
 static std::string truncateUtf8(const std::string &s, size_t maxBytes) {
     if (s.size() <= maxBytes) return s;
     size_t cut = maxBytes;
@@ -273,8 +291,9 @@ static std::string clean(const std::string &s) {
 
 std::string mineLogLine(const std::string &timestamp, const std::string &titleId, const Entry &e,
                         const Result &r, const std::string &screenshot, const std::string &query,
-                        const std::string &sentence) {
-    std::string expr = cardExpressionFor(e, r.matchedKey);  // kanji even if seen in kana
+                        const std::string &sentence, bool kanjiForm) {
+    // kanji even if seen in kana, or as it was written
+    std::string expr = kanjiForm ? cardExpressionFor(e, r.matchedKey) : writtenExpressionFor(e, r);
     std::string cols[] = {timestamp, titleId, expr, e.reading, ankiDefinition(e), screenshot,
                           query, r.reasons, std::to_string(e.id), sentence};
     std::string line;

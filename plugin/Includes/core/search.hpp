@@ -41,6 +41,10 @@ std::string expressionFor(const Entry &e, const std::string &matchedKey);
 // up in kana (ちょっと -> 一寸). Words with no kanji form stay in kana.
 std::string cardExpressionFor(const Entry &e, const std::string &matchedKey);
 
+// The spelling as the game wrote it, in its dictionary form: kanji when it was in kanji, else the
+// kana (katakana when written in katakana): たべた -> たべる, 食べた -> 食べる, ケーキ -> ケーキ.
+std::string writtenExpressionFor(const Entry &e, const Result &r);
+
 // One line for the results list: "食べる【たべる】 to eat; to live on…"
 std::string summaryLine(const Entry &e, const Result &r, size_t maxBytes = 110);
 
@@ -52,9 +56,10 @@ std::string ankiDefinition(const Entry &e);
 
 // One TSV line for mined.tsv (no trailing newline). Tabs/newlines in fields are stripped.
 // Columns: time, titleId, expression, reading, definition, screenshot, query, reasons, entryId,
-//          sentence (OCR'd line, empty for manual lookups)
+//          sentence (OCR'd line, empty for manual lookups). The expression: the word's kanji form
+//          (cardExpressionFor), or with kanjiForm false as it was written (writtenExpressionFor).
 std::string mineLogLine(const std::string &timestamp, const std::string &titleId,
                         const Entry &e, const Result &r, const std::string &screenshot,
-                        const std::string &query, const std::string &sentence = "");
+                        const std::string &query, const std::string &sentence = "", bool kanjiForm = true);
 
 }  // namespace kt

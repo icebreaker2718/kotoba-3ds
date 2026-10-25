@@ -53,6 +53,7 @@ static const char *kMarkedPath = "/3ds/kotoba3ds/marked.txt";  // words marked k
 enum ReadMode { kReadTop = 0, kReadBottom = 1, kReadBoth = 2, kModes = 3 };
 static const char *const kModeNames[kModes] = {"Read the top screen", "Read the touchscreen", "Read both screens"};
 static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
+static bool g_kanjiForm = true;  // saved words in their kanji form (or as the game wrote them)
 static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
 enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
 static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
@@ -94,9 +95,11 @@ static bool WriteWholeFile(const std::string &path, const std::string &data) {
 }
 
 static void SaveSettings() {
-    WriteWholeFile(kSettingsPath, Utils::Format("key_top=%lu\nkey_bottom=%lu\nkey_both=%lu\ntext_on_top=%d\nhide=%d\nserver=",
+    WriteWholeFile(kSettingsPath, Utils::Format("key_top=%lu\nkey_bottom=%lu\nkey_both=%lu\ntext_on_top=%d\nhide=%d\n"
+                                                "kanji_form=%d\nserver=",
                                                 (unsigned long)g_combo[0], (unsigned long)g_combo[1],
-                                                (unsigned long)g_combo[2], g_textOnTop ? 1 : 0, g_hideMode) +
+                                                (unsigned long)g_combo[2], g_textOnTop ? 1 : 0, g_hideMode,
+                                                g_kanjiForm ? 1 : 0) +
                                       g_server + "\n");
 }
 
@@ -133,6 +136,8 @@ static void LoadSettings() {
     if (!v.empty()) g_textOnTop = v == "1";
     v = SettingValue(s, "hide");
     if (!v.empty()) g_hideMode = std::max(0, std::min(2, atoi(v.c_str())));
+    v = SettingValue(s, "kanji_form");
+    if (!v.empty()) g_kanjiForm = v != "0";
     g_server = SettingValue(s, "server");
 }
 
@@ -726,7 +731,7 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
     std::string text;
     if (fresh)
         text += "#time\ttitle_id\texpression\treading\tdefinition\tscreenshot\tquery\tinflection\tentry\tsentence\n";
-    line = kt::mineLogLine(Timestamp(), TitleIdHex(), e, r, shot, query, sentence);
+    line = kt::mineLogLine(Timestamp(), TitleIdHex(), e, r, shot, query, sentence, g_kanjiForm);
     text += line + "\n";
     bool ok = f.Write(text.data(), text.size()) == File::SUCCESS;
     f.Close();
@@ -735,7 +740,7 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
         return false;
     }
     int n = CountSaved();
-    status = "Saved " + kt::cardExpressionFor(e, r.matchedKey) + Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s");
+    status = "Saved " + (g_kanjiForm ? kt::cardExpressionFor(e, r.matchedKey) : kt::writtenExpressionFor(e, r)) + Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s");
     LogOcr(Utils::Format("saved a word in %lu ms", (unsigned long)(osGetTime() - t0)));
     return true;
 }
@@ -1620,7 +1625,7 @@ static void Settings() {
     kt::MenuView m(Text());
     m.setTitle("Kotoba3DS");
     m.setButtons({" Choose", " Close"});
-    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kLast, kSaved, kCards, kKnown, kPc, kHelp, kRows };
+    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kLast, kSaved, kCards, kKnown, kPc, kHelp, kRows };
     FinishScreenshot();  // "Make Anki cards" may send it
     while (true) {
         LoadKnown();
@@ -1646,6 +1651,13 @@ static void Settings() {
         items[kHide].help =
             "What X (or Hide) does to the screen that was read: see-through shows the text over the game, "
             "hidden shows the game alone. Both: the first press see-through, the second hidden.\n\n"
+            "A,  or : change.";
+        items[kSpelling].label = "Saved words are written";
+        items[kSpelling].value = g_kanjiForm ? "in kanji" : "as in the game";
+        items[kSpelling].help =
+            "How a word you save is written (on its Anki card too). In kanji: its usual kanji form, "
+            "even when the game wrote it in kana (ちょっと -> 一寸). As in the game: in kanji only when "
+            "the game wrote it in kanji, else in kana (たべた -> たべる).\n\n"
             "A,  or : change.";
         items[kLast].label = "Last lookup";
         items[kLast].dim = g_lastBlocks.empty();
@@ -1678,6 +1690,9 @@ static void Settings() {
             SaveSettings();
         } else if (row == kHide) {
             g_hideMode = (g_hideMode + (dir < 0 ? 2 : 1)) % 3;
+            SaveSettings();
+        } else if (row == kSpelling) {
+            g_kanjiForm = !g_kanjiForm;
             SaveSettings();
         } else if (dir) {
             continue;
