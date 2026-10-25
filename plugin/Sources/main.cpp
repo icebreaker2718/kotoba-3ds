@@ -36,6 +36,13 @@ extern "C" u32 __ctru_heap_size;  // libctru: the plugin's heap (what Luma gave 
 
 namespace CTRPluginFramework {
 extern FS_Archive _sdmcArchive;  // CTRPF's SD card archive (File uses it)
+// CTRPF's own record of the system's sleep request (the lid closed), as its menus use it: in
+// libctrpf, though its header isn't installed with it.
+class SystemImpl {
+public:
+    static bool WantsToSleep(void);
+    static void ReadyToSleep(void);
+};
 
 // ---------------------------------------------------------------------------
 // Paths & settings
@@ -371,6 +378,10 @@ struct MenuEvent {
 
 // Shows the screen and waits: A or a tapped row chooses, a tapped button, or B / Left / Right /
 // any of `keys`. Up / down (held: repeating) move the highlight.
+// The lid was closed (the system wants to sleep): the game must go on to answer it, or the
+// console hangs with the screens off. Every screen of the plugin closes, as if B were pressed.
+static bool SleepRequested() { return SystemImpl::WantsToSleep(); }
+
 static MenuEvent MenuInput(kt::MenuView &m, u32 keys = 0) {
     DrawMenu(m);
     bool touchWas = true;  // a touch held from before doesn't count
@@ -382,6 +393,10 @@ static MenuEvent MenuInput(kt::MenuView &m, u32 keys = 0) {
         u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
         u64 now = osGetTime();
         MenuEvent ev;
+        if (SleepRequested()) {
+            ev.key = Key::B;
+            return ev;
+        }
         if (down & Key::A) {
             if (m.selected() >= 0) {
                 ev.type = MenuEvent::kChoose;
@@ -885,7 +900,7 @@ static void RunLookupView(kt::LookupView &v) {
         u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
         bool changed = false, moved = false;
         u64 t0 = osGetTime();
-        if (down & Key::B) break;
+        if ((down & Key::B) || SleepRequested()) break;
         if (down & Key::A) { SaveOrUndo(v); changed = true; }
         if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
         if (down & Key::Y) { MarkKnown(v); changed = true; }
@@ -1140,13 +1155,20 @@ static void OpenLookup(const std::vector<std::string> &blocks, bool textOnTop) {
 // and skips the line you were reading.
 static void WaitForRelease() {
     const u64 until = osGetTime() + 3000;  // a button held on purpose doesn't keep the game paused
-    while (osGetTime() < until) {
+    while (osGetTime() < until && !SleepRequested()) {
         Controller::Update();
         if (!Controller::GetKeysDown(true) && !Touch::IsDown()) break;
         Sleep(Milliseconds(10));
     }
+    if (SleepRequested()) return;
     Sleep(Milliseconds(80));
     Controller::Update();  // the game's next reading is "nothing pressed"
+}
+
+// The game goes on; if the lid was closed meanwhile, the system's sleep goes ahead now.
+static void ResumeGame() {
+    Process::Play();
+    if (SleepRequested()) SystemImpl::ReadyToSleep();
 }
 
 // A hotkey: pause the game, read its screen(s), look a word up.
@@ -1176,7 +1198,7 @@ static void ReadAndLookUp(int mode) {
     g_lookupShot = "";
     RestoreCpu();
     WaitForRelease();
-    Process::Play();
+    ResumeGame();
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,7 +1295,7 @@ static void MakeCards() {
     int sent = 0, already = 0, failed = 0;
     std::string firstError;
     std::vector<int> done;  // lines that are cards now
-    for (size_t k = 0; k < words.size(); k++) {
+    for (size_t k = 0; k < words.size() && !SleepRequested(); k++) {
         m.setMessage(Utils::Format("Sending word %u of %u to %s...", (unsigned)(k + 1), (unsigned)words.size(),
                                    g_server.c_str()));
         DrawMenu(m);
@@ -1472,6 +1494,7 @@ static void RecordHotkey(int mode) {
     bool released = false;  // wait for the A that chose this to be let go
     bool touchWas = true;
     while (true) {
+        if (SleepRequested()) return;
         Controller::Update();
         const u32 down = Controller::GetKeysDown() & (kt::keys::Usable | Key::Select);
         bool touch = Touch::IsDown();
@@ -1732,13 +1755,14 @@ static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's o
 }
 
 static void Watcher(void) {
+    if (SleepRequested()) return;  // the console is going to sleep: not now
     if (g_openMenu) {
         g_openMenu = false;
         Process::Pause();
         Settings();
         g_hotkeys.reset();
         WaitForRelease();
-        Process::Play();
+        ResumeGame();
         return;
     }
     for (int m = 0; m < kModes; m++) g_hotkeys.set(m, g_combo[m]);
