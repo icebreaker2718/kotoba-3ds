@@ -380,7 +380,21 @@ struct MenuEvent {
 // any of `keys`. Up / down (held: repeating) move the highlight.
 // The lid was closed (the system wants to sleep): the game must go on to answer it, or the
 // console hangs with the screens off. Every screen of the plugin closes, as if B were pressed.
-static bool SleepRequested() { return SystemImpl::WantsToSleep(); }
+// The paused game can't answer the system's sleep query (that takes its main thread, which the
+// pause holds), so the lid itself is watched: closed, and the plugin lets the game go on at once.
+static bool LidClosed() {
+    static bool ptmOk = R_SUCCEEDED(ptmuInit());
+    static u64 lastAt = 0;
+    static bool closed = false;
+    const u64 now = osGetTime();
+    if (ptmOk && now - lastAt >= 30) {  // a quick question to the power service, ~30 times a second at most
+        lastAt = now;
+        u8 shell = 1;
+        closed = R_SUCCEEDED(PTMU_GetShellState(&shell)) && shell == 0;
+    }
+    return closed;
+}
+static bool SleepRequested() { return LidClosed() || SystemImpl::WantsToSleep(); }
 
 static MenuEvent MenuInput(kt::MenuView &m, u32 keys = 0) {
     DrawMenu(m);
@@ -1167,8 +1181,9 @@ static void WaitForRelease() {
 
 // The game goes on; if the lid was closed meanwhile, the system's sleep goes ahead now.
 static void ResumeGame() {
+    if (SleepRequested()) LogOcr("lid closed: the plugin closed, the game goes on (to sleep)");
     Process::Play();
-    if (SleepRequested()) SystemImpl::ReadyToSleep();
+    if (SystemImpl::WantsToSleep()) SystemImpl::ReadyToSleep();
 }
 
 // A hotkey: pause the game, read its screen(s), look a word up.
