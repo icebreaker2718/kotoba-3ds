@@ -134,7 +134,9 @@ class Anki(BaseHTTPRequestHandler):
         elif a == "createDeck": res = 1
         elif a == "storeMediaFile": media[p["filename"]] = base64.b64decode(p["data"]); res = p["filename"]
         elif a == "findCards": res = [int(p["query"].split(":")[1]) * 10]
-        elif a == "setSpecificValueOfCard": flags[p["card"]] = (p["keys"], p["newValues"], p.get("warning_check")); res = [True]
+        elif a == "setSpecificValueOfCard":  # like Anki: a flag must be a number
+            flags[p["card"]] = (p["keys"], p["newValues"], p.get("warning_check"))
+            res = [True if isinstance(v, int) else [False, "flags must be an int"] for v in p["newValues"]]
         elif a == "findNotes": res = list(range(1, len(notes) + len(other_notes) + 1))
         elif a == "notesInfo":
             alln = notes + other_notes
@@ -218,7 +220,7 @@ for w in ("食べる", "静か"):
     check(not {"no_definition", "no_audio"} & set(by[w]["tags"]), f"{w}: found in the dictionary, with audio: not tagged {by[w]['tags']}")
 check({"no_definition", "no_audio"} <= set(by["猫"]["tags"]), f"猫: no entry, no audio -> both tags {by['猫']['tags']}")
 nid = notes.index(by["猫"]) + 1
-check(flags.get(nid * 10) == (["flags"], ["1"], True), f"...and its card gets flag 1 (red) {flags}")
+check(flags.get(nid * 10) == (["flags"], [1], True), f"...and its card gets flag 1 (red) {flags}")
 check(all(notes[c // 10 - 1]["fields"]["Expression"] not in ("食べる", "静か") for c in flags), "complete cards aren't flagged")
 # an older config: its flag setting is kept under the new name, the old keys dropped
 oldp = os.path.join(work, "old_config.json")

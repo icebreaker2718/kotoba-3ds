@@ -640,8 +640,14 @@ def flag_note(cfg, note_id, log=print):
         return
     try:
         for card in anki(cfg, "findCards", query=f"nid:{note_id}") or []:
-            anki(cfg, "setSpecificValueOfCard", card=card, keys=["flags"], newValues=[str(flag)],
-                 warning_check=True)
+            # A number, not the "1" AnkiConnect's docs show: it sets the value as given, and Anki
+            # won't save a text flag. AnkiConnect reports a failed key in the result (as
+            # [False, "why"]), not as an error, so that is checked too.
+            res = anki(cfg, "setSpecificValueOfCard", card=card, keys=["flags"], newValues=[flag],
+                       warning_check=True)
+            bad = [r for r in (res or []) if r is not True]
+            if bad:
+                log(f"    (couldn't flag the card: {bad})")
     except AnkiError as e:
         log(f"    (couldn't flag the card - update AnkiConnect? {e})")
 
