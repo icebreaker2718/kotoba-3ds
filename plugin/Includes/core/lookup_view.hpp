@@ -83,7 +83,7 @@ private:
     SearchOutput so_;
     size_t resultIdx_ = 0;
     // the entry on the top screen
-    struct Span { std::string text; Rgb color; };
+    struct Span { std::string text; Rgb color; int size = 0; };  // size 0 = the line's
     struct Line { std::vector<Span> spans; int size = 16, height = 21; };
     std::vector<Line> entry_;
     int topScroll_ = 0;

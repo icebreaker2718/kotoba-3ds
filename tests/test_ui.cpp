@@ -123,6 +123,28 @@ int main(int argc, char **argv) {
     std::string err;
     if (!dict.open(&dr, err)) { printf("dictionary: %s\n", err.c_str()); return 1; }
     LookupView v(dict, tr);
+    {   // frequency ranks (dict.bin built with --freq): shown, and homographs listed most common first
+        SearchOutput so = scanAt(dict, "しょうか", 0);
+        std::vector<uint32_t> ranks;
+        for (const Result &r : so.results) {
+            if (r.surface != "しょうか") break;
+            Entry e;
+            if (dict.entry(r.entryId, e)) ranks.push_back(e.freqRank);
+        }
+        bool ranked = !ranks.empty() && ranks[0] > 0;
+        if (ranked) {
+            bool ordered = true;
+            for (size_t i = 1; i < ranks.size(); i++)
+                if (ranks[i] && ranks[i] < ranks[i - 1]) ordered = false;
+            check(ordered, "homographs in frequency order (しょうか: #" + std::to_string(ranks[0]) + " first)");
+            v.setText({"しょうか"});
+            RgbCanvas top(400, 240);
+            v.drawTop(top);  // the rank is drawn on the headword line
+            check(v.result() != nullptr, "ranked entry shown");
+        } else {
+            printf("note: this dict.bin has no frequency ranks (built without --freq)\n");
+        }
+    }
 
     const char *line = "また明日、一緒に見に行こう！今度は友達も一緒に来るよ。楽しみだね。";
     v.setText({line});

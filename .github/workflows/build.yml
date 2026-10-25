@@ -73,14 +73,21 @@ jobs:
           curl -fsSL -o jitendex-yomitan.zip \
             https://github.com/stephenmk/stephenmk.github.io/releases/latest/download/jitendex-yomitan.zip \
             || rm -f jitendex-yomitan.zip
+          # JPDB's frequency ranks (anime, VNs, games, novels), from Kuuuube's Yomitan dictionaries
+          curl -fsSL -o jpdb-freq.zip \
+            https://github.com/Kuuuube/yomitan-dictionaries/raw/main/dictionaries/JPDB_v2.2_Frequency_Kana_2024-10-13.zip \
+            || rm -f jpdb-freq.zip
 
       - name: Build dict.bin
         run: |
+          FREQ=""
+          if [ -s jpdb-freq.zip ]; then FREQ="--freq jpdb-freq.zip"
+          else echo "::warning title=JPDB::frequency list download failed, building without ranks"; fi
           if [ -s jitendex-yomitan.zip ]; then
-            python tools/build_dict.py --yomitan jitendex-yomitan.zip -o dict.bin
+            python tools/build_dict.py --yomitan jitendex-yomitan.zip $FREQ -o dict.bin
           else
             echo "::warning title=Jitendex::download failed, building from the bundled JMdict instead"
-            python tools/build_dict.py -o dict.bin
+            python tools/build_dict.py $FREQ -o dict.bin
           fi
 
       - uses: actions/upload-artifact@v4

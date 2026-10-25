@@ -223,18 +223,29 @@ void LookupView::buildEntry() {
     head.size = kHeadSize;
     head.height = kHeadSize + 8;
     head.spans.push_back({expr, kWord});
-    if (!e.reading.empty() && e.reading != expr) head.spans.push_back({" (" + e.reading + ")", kReading});
-    if (tr_.width(expr + " (" + e.reading + ")", kHeadSize) > maxW) {  // too long: reading on its own line
+    const bool showReading = !e.reading.empty() && e.reading != expr;
+    if (showReading) head.spans.push_back({" (" + e.reading + ")", kReading});
+    // how common it is (JPDB rank, as Rubi shows it): "#1,234"
+    std::string rank;
+    if (e.freqRank) {
+        std::string n = std::to_string(e.freqRank);
+        for (int i = (int)n.size() - 3; i > 0; i -= 3) n.insert((size_t)i, ",");
+        rank = " #" + n;
+    }
+    int headW = tr_.width(expr + (showReading ? " (" + e.reading + ")" : ""), kHeadSize) + tr_.width(rank, kSmall + 2);
+    if (headW > maxW) {  // too long: reading (and rank) on a line of their own
         head.spans.resize(1);
         entry_.push_back(head);
-        if (!e.reading.empty() && e.reading != expr) {
+        if (showReading || !rank.empty()) {
             Line rd;
             rd.size = kSenseSize + 2;
             rd.height = kSenseLine + 2;
-            rd.spans.push_back({e.reading, kReading});
+            if (showReading) rd.spans.push_back({e.reading, kReading});
+            if (!rank.empty()) rd.spans.push_back({showReading ? rank : rank.substr(1), kDim, kSmall + 2});
             entry_.push_back(rd);
         }
     } else {
+        if (!rank.empty()) head.spans.push_back({rank, kDim, kSmall + 2});
         entry_.push_back(head);
     }
     auto small = [&](const std::string &text, Rgb c) {
@@ -529,7 +540,10 @@ void LookupView::drawTop(Canvas &c) {
         const Line &l = entry_[i];
         if (y + l.height > kTopH - 6) break;
         int x = kTopMargin;
-        for (const Span &s : l.spans) x = tr_.draw(c, x, y + (l.height - l.size) / 2, s.text, l.size, s.color);
+        for (const Span &s : l.spans) {
+            int size = s.size ? s.size : l.size;  // a smaller span sits on the line's baseline
+            x = tr_.draw(c, x, y + (l.height - l.size) / 2 + (l.size - size) * 4 / 5, s.text, size, s.color);
+        }
         y += l.height;
     }
     // which match of how many (L/R for the others)

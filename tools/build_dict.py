@@ -234,10 +234,11 @@ def pri_score(tags):
 
 
 class Entry:
-    __slots__ = ("idseq", "kanji", "kana", "senses")
+    __slots__ = ("idseq", "kanji", "kana", "senses", "freq")
 
     def __init__(self, idseq):
         self.idseq = idseq
+        self.freq = 0     # frequency rank (1 = most common), 0 = not in the list
         self.kanji = []   # (text, info_codes, pri_tags)
         self.kana = []    # (text, info_codes, pri_tags, nokanji)
         self.senses = []  # (pos_codes, misc_codes, glosses)
@@ -439,28 +440,67 @@ def load_yomitan(path, freq=None):
         yield e
 
 
+class Frequency:
+    """A Yomitan frequency dictionary (rank-based, e.g. JPDB): lower = more common.
+
+    by_pair[(expression, reading)]: rows that name their reading (JPDB: a kanji word, with a
+        second row marked ㋕ for how often it is written in kana)
+    by_term[expression]: rows without a reading (JPDB: kana words, one row per homograph)
+    """
+
+    def __init__(self, path):
+        import yomitan
+        self.by_pair, self.by_term = {}, {}
+        for expr, mode, data in yomitan.iter_meta(path):
+            if mode != "freq":
+                continue
+            reading = data.get("reading") if isinstance(data, dict) else None
+            v = data
+            if isinstance(v, dict) and "frequency" in v:
+                v = v["frequency"]
+            if isinstance(v, dict):
+                v = v.get("value")
+            if not isinstance(v, (int, float)) or v <= 0:
+                continue
+            v = int(v)
+            if reading:
+                self.by_pair[(expr, reading)] = min(self.by_pair.get((expr, reading), 10 ** 9), v)
+                self.by_term[expr] = min(self.by_term.get(expr, 10 ** 9), v)  # for the old pri tags
+            else:
+                self.by_term[expr] = min(self.by_term.get(expr, 10 ** 9), v)
+
+    def __len__(self):
+        return len(self.by_term)
+
+    def __contains__(self, expr):
+        return expr in self.by_term
+
+    def __getitem__(self, expr):
+        return self.by_term[expr]
+
+    def rank(self, e):
+        """The entry's rank: its best (kanji form, reading) pair, kanji or kana written; for a
+        word with no kanji, its kana forms. A kanji word never takes a bare kana row's rank (that
+        row could be any homograph's: しょうか is 消化 and 唱歌 and ...)."""
+        readings = [r[0] for r in e.kana]
+        if e.kanji:
+            vals = [self.by_pair[(k[0], r)] for k in e.kanji for r in readings if (k[0], r) in self.by_pair]
+        else:
+            vals = [self.by_pair[(r, r)] for r in readings if (r, r) in self.by_pair]
+            vals += [self.by_term[r] for r in readings if r in self.by_term]
+        return min(vals) if vals else 0
+
+
 def load_frequency(path):
-    """Yomitan frequency dictionary -> {expression: rank} (lower = more common)."""
-    import yomitan
-    out = {}
-    for expr, mode, data in yomitan.iter_meta(path):
-        if mode != "freq":
-            continue
-        v = data
-        if isinstance(v, dict) and "frequency" in v:
-            v = v["frequency"]
-        if isinstance(v, dict):
-            v = v.get("value")
-        if isinstance(v, (int, float)) and v > 0:
-            out[expr] = min(out.get(expr, 10 ** 9), int(v))
-    return out
+    return Frequency(path)
 
 
 # ----------------------------------------------------------------------------
 # Entry blob
 # ----------------------------------------------------------------------------
 # Line 0 (machine fields, TAB separated):
-#   expression \t reading \t posCodes(comma) \t kanjiForms(｜) \t kanaForms(｜)
+#   expression \t reading \t posCodes(comma) \t kanjiForms(｜) \t kanaForms(｜) \t freqRank
+#   (freqRank: 1 = most common in the --freq list, empty = not in it or no list)
 # Line 1: headline, e.g. 食べる・喰べる【たべる】
 # Lines 2..: numbered senses for display, e.g. "1. (v1,vt) to eat"
 SEP = "｜"  # full-width vertical bar, never appears in headwords
@@ -488,7 +528,8 @@ def entry_blob(e: Entry) -> str:
         head = "・".join(shown_r)
     lines = [
         "\t".join([expr, reading, ",".join(all_pos),
-                   SEP.join(k[0] for k in e.kanji), SEP.join(r[0] for r in e.kana)]),
+                   SEP.join(k[0] for k in e.kanji), SEP.join(r[0] for r in e.kana),
+                   str(e.freq) if e.freq else ""]),
         head,
     ]
     prev_pos = None
@@ -539,14 +580,20 @@ def load_radkfile(path):
 # ----------------------------------------------------------------------------
 # Writer
 # ----------------------------------------------------------------------------
-def build(entries, rads, out_path):
+def build(entries, rads, out_path, freq=None):
     entries = list(entries)
     print(f"{len(entries)} entries", file=sys.stderr)
 
     def entry_rank(e):
         return min([pri_score(k[2]) for k in e.kanji] + [pri_score(r[2]) for r in e.kana] + [100])
 
-    entries.sort(key=lambda e: (entry_rank(e), e.idseq))
+    if freq is not None:
+        for e in entries:
+            e.freq = freq.rank(e)
+        print(f"frequency ranks: {sum(1 for e in entries if e.freq)} entries", file=sys.stderr)
+    # entry ids in order of commonness: the plugin lists a spot's matches (homographs) by id, so
+    # the most common comes first. Ranked entries by rank, then the rest by JMdict's priority tags.
+    entries.sort(key=lambda e: ((0, e.freq) if e.freq else (1, entry_rank(e)), e.idseq))
 
     # keys
     keys = {}  # (keybytes, entryId) -> form score
@@ -663,7 +710,8 @@ def main():
     freq = None
     if a.freq:
         freq = load_frequency(a.freq)
-        print(f"frequency list: {len(freq)} words", file=sys.stderr)
+        print(f"frequency list: {len(freq.by_pair)} word/reading pairs, {len(freq.by_term)} words",
+              file=sys.stderr)
     if a.yomitan:
         def chained():
             for p in a.yomitan:
@@ -685,7 +733,7 @@ def main():
         rads = []
     else:
         rads = load_radkfile(rk)
-    build(entries, rads, a.out)
+    build(entries, rads, a.out, freq)
 
 
 if __name__ == "__main__":

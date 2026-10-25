@@ -59,8 +59,10 @@ Keep the project path free of spaces.
 ```sh
 pip install jamdict jamdict-data        # provides RADKFILE (kanji parts) + a fallback JMdict
 
-# From Jitendex (recommended) - download jitendex-yomitan.zip from https://jitendex.org
-python tools/build_dict.py --yomitan jitendex-yomitan.zip -o dict.bin
+# From Jitendex (recommended) - download jitendex-yomitan.zip from https://jitendex.org - with
+# JPDB's frequency ranks (shown as #1,234 on the 3DS; homographs listed most common first) from
+# https://github.com/Kuuuube/yomitan-dictionaries (JPDB v2.2 Frequency Kana)
+python tools/build_dict.py --yomitan jitendex-yomitan.zip --freq JPDB_v2.2_Frequency_Kana_2024-10-13.zip -o dict.bin
 
 # Any Yomitan term dictionary works the same way; repeat --yomitan to combine several, and
 # add --freq <frequency dictionary .zip> to list common words first.
@@ -90,7 +92,8 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
 2. The text appears in large type on the **touchscreen**. **Tap a word**: its entry shows on the
    top screen over the dimmed game (the layout follows
    [Rubi for Vita](https://github.com/bee-san/Rubi_for_vita)'s overlay), the word in yellow, its
-   reading in blue, any conjugation under it. Conjugated forms are matched whole
+   reading in blue, how common it is (its [JPDB](https://jpdb.io) frequency rank, e.g. #1,234), any
+   conjugation under it. Conjugated forms are matched whole
    (食べられなかった → 食べる).
 
    | Control | Does |
@@ -98,7 +101,7 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    | Tap a character | look up the word starting there |
    | D-pad or Circle Pad ◀ ▶ | previous / next word (held: keeps going) |
    | D-pad or Circle Pad ▲ ▼ | the row above / below |
-   | L / R | the other matches at that spot (homographs, shorter words), shown as 1/3 |
+   | L / R | the other matches at that spot (homographs, most common first, then shorter words), shown as 1/3 |
    | C-stick (New 3DS / 2DS) | scroll a long definition |
    | **A** (or the Save button) | save the word |
    | X (or Hide) | hide the definition to see the game |

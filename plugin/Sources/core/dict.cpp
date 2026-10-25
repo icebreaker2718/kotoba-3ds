@@ -1,5 +1,7 @@
 #include "core/dict.hpp"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <cstring>
 #include <iterator>
@@ -194,7 +196,7 @@ bool Dictionary::entry(uint32_t id, Entry &e) {
     splitInto(blob, "\n", lines);
     if (lines.size() < 2) return false;
     splitInto(lines[0], "\t", fields);
-    fields.resize(5);
+    fields.resize(6);  // the 6th (frequency rank) is missing in dict.bin files built before it
     e = Entry();
     e.id = id;
     e.expression = fields[0];
@@ -202,6 +204,7 @@ bool Dictionary::entry(uint32_t id, Entry &e) {
     e.pos = fields[2];
     splitInto(fields[3], "\xEF\xBD\x9C", e.kanjiForms);  // U+FF5C
     splitInto(fields[4], "\xEF\xBD\x9C", e.kanaForms);
+    e.freqRank = (uint32_t)strtoul(fields[5].c_str(), nullptr, 10);
     e.headline = lines[1];
     e.senses.assign(lines.begin() + 2, lines.end());
     return true;

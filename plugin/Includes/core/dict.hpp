@@ -30,6 +30,7 @@ struct Entry {
     std::vector<std::string> kanjiForms, kanaForms;
     std::string headline;     // 食べる・喰べる【たべる】
     std::vector<std::string> senses;  // "1. (v1,vt) to eat"
+    uint32_t freqRank = 0;    // rank in the frequency list dict.bin was built with (JPDB), 0 = none
 };
 
 struct Radical {
