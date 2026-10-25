@@ -20,13 +20,18 @@ bool Dictionary::open(Reader *r, std::string &error) {
     size_ = r->size();
     cache_.assign(kBlocks, Block());
     memoPool_.clear();
-    memoPool_.reserve(64 * 1024);  // grows as the search visits the tree: reserved once, so it never moves
     memoOff_.clear();
     memoLen_.clear();
+    std::string().swap(fencePool_);
+    std::vector<uint32_t>().swap(fenceAt_);
+    maskMemo_.clear();
+    prefixMemo_.clear();
     uint8_t h[64];
     if (size_ < 64 || !r->read(0, h, 64)) { error = "dict.bin is missing or too small"; reader_ = nullptr; return false; }
     if (memcmp(h, "KTB1", 4) != 0) { error = "dict.bin has the wrong format (rebuild it)"; reader_ = nullptr; return false; }
-    if (le32(h + 4) != 1) { error = "dict.bin version mismatch (rebuild it)"; reader_ = nullptr; return false; }
+    version_ = le32(h + 4);
+    if (version_ != 1 && version_ != 2) { error = "dict.bin version mismatch (rebuild it)"; reader_ = nullptr; return false; }
+    keyRec_ = version_ >= 2 ? 12 : 8;
     entryCount_ = le32(h + 8);
     entryIdxOff_ = le32(h + 12);
     keyCount_ = le32(h + 16);
@@ -36,11 +41,44 @@ bool Dictionary::open(Reader *r, std::string &error) {
     kanjiCount_ = le32(h + 32);
     kanjiOff_ = le32(h + 36);
     exactMemo_.clear();
-    if ((uint64_t)keyIdxOff_ + (uint64_t)keyCount_ * 8 > size_ ||
+    if ((uint64_t)keyIdxOff_ + (uint64_t)keyCount_ * keyRec_ > size_ ||
         (uint64_t)entryIdxOff_ + (uint64_t)(entryCount_ + 1) * 8 > size_) {
         error = "dict.bin is truncated (copy it again)";
         reader_ = nullptr;
         return false;
+    }
+    if (version_ >= 2) {  // the fences, into memory in one read (~70 KB)
+        fenceStep_ = le32(h + 40);
+        const uint32_t count = le32(h + 44), off = le32(h + 48);
+        const uint32_t bytes = off > keyIdxOff_ && off < size_ ? size_ - off : 0;  // the last section
+        bool ok = fenceStep_ > 0 && count > 0 && count == (keyCount_ + fenceStep_ - 1) / fenceStep_ && bytes >= count * 2u;
+        std::string raw;
+        if (ok) {
+            raw.resize(std::min<uint32_t>(bytes, count * 258u));
+            ok = r->read(off, &raw[0], (uint32_t)raw.size());
+        }
+        if (ok) {
+            fenceAt_.reserve(count + 1);
+            fencePool_.reserve(raw.size() - count * 2u);
+            size_t p = 0;
+            for (uint32_t i = 0; i < count && ok; i++) {
+                if (p + 2 > raw.size()) { ok = false; break; }
+                const uint32_t len = le16((const uint8_t *)raw.data() + p);
+                p += 2;
+                if (p + len > raw.size()) { ok = false; break; }
+                fenceAt_.push_back((uint32_t)fencePool_.size());
+                fencePool_.append(raw, p, len);
+                p += len;
+            }
+            fenceAt_.push_back((uint32_t)fencePool_.size());
+        }
+        if (!ok) {
+            error = "dict.bin is damaged (copy it again)";
+            reader_ = nullptr;
+            return false;
+        }
+    } else {
+        memoPool_.reserve(64 * 1024);  // grows as the search visits the tree: reserved once, so it never moves
     }
     return true;
 }
@@ -95,9 +133,15 @@ std::string Dictionary::cstrAt(uint32_t off) {
 }
 
 std::string Dictionary::keyAt(uint32_t i, uint32_t *entryId) {
-    uint8_t rec[8];
-    readAt(keyIdxOff_ + i * 8, rec, 8);
-    if (entryId) *entryId = le32(rec + 4);
+    uint8_t rec[12];
+    readAt(keyIdxOff_ + i * keyRec_, rec, keyRec_);
+    if (entryId) {
+        *entryId = le32(rec + 4);
+        if (keyRec_ >= 12) {  // version 2: the entry's part-of-speech mask comes with it
+            if (maskMemo_.size() >= 4096) maskMemo_.clear();
+            maskMemo_[*entryId] = le32(rec + 8);
+        }
+    }
     return cstrAt(le32(rec));
 }
 
@@ -129,6 +173,28 @@ int Dictionary::cmpProbe(uint32_t node, uint32_t index, const std::string &key) 
 }
 
 uint32_t Dictionary::lowerBound(const std::string &key) {
+    if (!fenceAt_.empty()) {  // version 2: between which fences (in memory), then the keys there
+        const uint32_t count = (uint32_t)fenceAt_.size() - 1;
+        uint32_t lo = 0, hi = count;
+        while (lo < hi) {  // the first fence >= key
+            const uint32_t mid = lo + (hi - lo) / 2;
+            const char *p = fencePool_.data() + fenceAt_[mid];
+            const size_t len = fenceAt_[mid + 1] - fenceAt_[mid], n = std::min(len, key.size());
+            int c = memcmp(p, key.data(), n);
+            if (!c) c = len < key.size() ? -1 : (len > key.size() ? 1 : 0);
+            if (c < 0) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo == 0) return 0;  // key <= the first key
+        // fence lo - 1 < key <= fence lo (or the end): the answer is in ((lo - 1) step, lo step]
+        uint32_t a = (lo - 1) * fenceStep_ + 1, b = std::min(lo * fenceStep_, keyCount_);
+        while (a < b) {
+            const uint32_t mid = a + (b - a) / 2;
+            if (cmpBytes(keyAt(mid, nullptr), key) < 0) a = mid + 1;
+            else b = mid;
+        }
+        return a;
+    }
     if (memoOff_.empty()) {
         memoOff_.assign(1u << kMemoLevels, 0);
         memoLen_.assign(1u << kMemoLevels, 0);
@@ -170,6 +236,18 @@ void Dictionary::exactUncached(const std::string &key, std::vector<uint32_t> &id
     }
 }
 
+bool Dictionary::hasPrefix(const std::string &pre) {
+    if (!reader_) return false;
+    if (pre.empty()) return true;
+    auto memo = prefixMemo_.find(pre);
+    if (memo != prefixMemo_.end()) return memo->second;
+    uint32_t i = lowerBound(pre);
+    bool yes = i < keyCount_ && keyAt(i, nullptr).compare(0, pre.size(), pre) == 0;
+    if (prefixMemo_.size() >= 512) prefixMemo_.clear();
+    prefixMemo_[pre] = yes;
+    return yes;
+}
+
 void Dictionary::prefix(const std::string &pre, uint32_t limit,
                         std::vector<std::pair<uint32_t, std::string>> &out) {
     if (!reader_ || pre.empty()) return;
@@ -184,6 +262,8 @@ void Dictionary::prefix(const std::string &pre, uint32_t limit,
 
 uint32_t Dictionary::posMask(uint32_t id) {
     if (!reader_ || id >= entryCount_) return 0;
+    auto m = maskMemo_.find(id);  // read with the key that found the entry (version 2)
+    if (m != maskMemo_.end()) return m->second;
     return u32At(entryIdxOff_ + id * 8 + 4);
 }
 

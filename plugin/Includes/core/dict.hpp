@@ -52,6 +52,8 @@ public:
 
     // All entries whose key equals `key` exactly (key already normalized).
     void exact(const std::string &key, std::vector<uint32_t> &entryIds);
+    // Whether some key starts with `prefix` (normalized). Remembered, like exact().
+    bool hasPrefix(const std::string &prefix);
     // Keys that start with `prefix` (normalized); returns (entryId, key) pairs, at most `limit`
     // keys scanned.
     void prefix(const std::string &prefix, uint32_t limit,
@@ -76,6 +78,12 @@ private:
     // keys are kept in memory once read (about 30 KB), so a lookup reads ~3 blocks instead of ~20.
     enum : uint32_t { kMemoLevels = 12 };
     std::unordered_map<std::string, std::vector<uint32_t>> exactMemo_;  // recent exact() answers
+    std::unordered_map<std::string, bool> prefixMemo_;                  // recent hasPrefix() answers
+    std::unordered_map<uint32_t, uint32_t> maskMemo_;                   // posMask of recently found entries
+    // version 2: every fenceStep_-th key in memory (fencePool_ from fenceAt_[i] to fenceAt_[i + 1])
+    uint32_t version_ = 1, keyRec_ = 8, fenceStep_ = 0;
+    std::string fencePool_;
+    std::vector<uint32_t> fenceAt_;
     void exactUncached(const std::string &key, std::vector<uint32_t> &ids);
     std::string memoPool_;            // the remembered keys, back to back
     std::vector<uint32_t> memoOff_;   // per tree node (heap order): offset into memoPool_ + 1, 0 = not read

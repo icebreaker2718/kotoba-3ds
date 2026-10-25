@@ -111,13 +111,27 @@ SearchOutput scanAt(Dictionary &dict, const std::string &text, size_t start, uin
         ends.push_back(j);
         i = j;
     }
+    // How far the text here can be a dictionary key at all: dead is the shortest start of it that
+    // no key begins with (empty: none). A candidate that begins with it can't be a key, so its
+    // search (a few reads from the SD card) is skipped; the results are the same.
+    std::string dead;
+    {
+        std::string prev;
+        for (size_t n = 1; n <= ends.size(); n++) {
+            std::string k = normalizeKey(text.substr(start, ends[n - 1] - start));
+            if (k.compare(0, prev.size(), prev) != 0) break;  // (normalizing is per character: never)
+            if (!dict.hasPrefix(k)) { dead = k; break; }
+            prev = k;
+        }
+    }
+    auto impossible = [&](const std::string &c) { return !dead.empty() && c.compare(0, dead.size(), dead) == 0; };
     for (size_t n = ends.size(); n > 0 && so.results.size() < maxResults; n--) {
         std::string surface = text.substr(start, ends[n - 1] - start);
         std::string key = normalizeKey(surface);
         std::vector<Result> exactHits, deinflHits;
         for (const Candidate &c : deinflect(key)) {
             std::vector<uint32_t> ids;
-            dict.exact(c.text, ids);
+            if (!impossible(c.text)) dict.exact(c.text, ids);
             for (uint32_t id : ids) {
                 if (c.type != 0 && (dict.posMask(id) & c.type) == 0) continue;
                 if (hasResult(so.results, id) || hasResult(exactHits, id) || hasResult(deinflHits, id)) continue;
@@ -131,7 +145,7 @@ SearchOutput scanAt(Dictionary &dict, const std::string &text, size_t start, uin
             if ((c.type & POS_VSI) && endsWith(c.text, "する") && c.text.size() > 6) {
                 std::string noun = c.text.substr(0, c.text.size() - 6);
                 std::vector<uint32_t> nids;
-                dict.exact(noun, nids);
+                if (!impossible(noun)) dict.exact(noun, nids);
                 for (uint32_t id : nids) {
                     if ((dict.posMask(id) & POS_VSN) == 0) continue;
                     if (hasResult(so.results, id) || hasResult(exactHits, id) || hasResult(deinflHits, id)) continue;

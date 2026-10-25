@@ -1,3 +1,8 @@
+// Built for speed (the plugin's C++ is otherwise built for size): every redraw of the lookup
+// screens runs through here.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize("O2")
+#endif
 #include "screen_ui.hpp"
 
 #include <3ds.h>
@@ -82,6 +87,10 @@ bool SystemFont::pixels(uint32_t cp, uint8_t *out) {
 // ---------------------------------------------------------------------------
 // The framebuffer is stored column by column, bottom to top: pixel (x, y) is at
 // base + (x * column + 239 - y) * bpp, `column` = Stride / bpp pixels (240 plus any gap).
+// x / 255 for x in [0, 255 * 255], without a division (the ARM11 has no divide instruction, and
+// at -Os gcc calls a library routine for each): checked for every x.
+static inline unsigned Div255(unsigned x) { return (x + 1 + (x >> 8)) >> 8; }
+
 ScreenCanvas::ScreenCanvas(const Screen &s)
     : base_((u8 *)s.LeftFramebuffer), fmt_((int)s.Format), bpp_(s.BytesPerPixel),
       column_(s.BytesPerPixel ? s.Stride / s.BytesPerPixel : 240) {
@@ -122,9 +131,9 @@ void ScreenCanvas::blend(int x, int y, kt::Rgb c, uint8_t a) {
     }
     uint8_t rgb[3];
     kt::framebufferToRGB(p, 1, fmt_, bpp_, rgb);
-    rgb[0] = (uint8_t)((c.r * a + rgb[0] * (255 - a)) / 255);
-    rgb[1] = (uint8_t)((c.g * a + rgb[1] * (255 - a)) / 255);
-    rgb[2] = (uint8_t)((c.b * a + rgb[2] * (255 - a)) / 255);
+    rgb[0] = (uint8_t)Div255(c.r * a + rgb[0] * (255u - a));
+    rgb[1] = (uint8_t)Div255(c.g * a + rgb[1] * (255u - a));
+    rgb[2] = (uint8_t)Div255(c.b * a + rgb[2] * (255u - a));
     kt::rgbToFramebuffer(rgb, fmt_, p);
 }
 
@@ -159,13 +168,13 @@ void ScreenCanvas::blendBlock(int x, int y, int w, int h, const uint8_t *alpha, 
             const unsigned k = 255 - v;
             if (bpp_ == 4 && words) {
                 const u32 old = *(const u32 *)(const void *)p;
-                const u32 nr = (c.r * v + (old >> 24) * k) / 255, ng = (c.g * v + ((old >> 16) & 0xFF) * k) / 255,
-                          nb = (c.b * v + ((old >> 8) & 0xFF) * k) / 255;
+                const u32 nr = Div255(c.r * v + (old >> 24) * k), ng = Div255(c.g * v + ((old >> 16) & 0xFF) * k),
+                          nb = Div255(c.b * v + ((old >> 8) & 0xFF) * k);
                 *(u32 *)(void *)p = (nr << 24) | (ng << 16) | (nb << 8) | full[0];
             } else {
-                p[R] = (u8)((c.r * v + p[R] * k) / 255);
-                p[G] = (u8)((c.g * v + p[G] * k) / 255);
-                p[B] = (u8)((c.b * v + p[B] * k) / 255);
+                p[R] = (u8)Div255(c.r * v + p[R] * k);
+                p[G] = (u8)Div255(c.g * v + p[G] * k);
+                p[B] = (u8)Div255(c.b * v + p[B] * k);
             }
         }
     }
@@ -183,10 +192,11 @@ void ScreenCanvas::shade(int x, int y, int w, int h, uint8_t a) {
         u8 *p = at(xx, y + h - 1);
         if (words) {  // RGBA8 a word at a time: the same bytes, one read and one write per pixel
             u32 *q = (u32 *)(void *)p;
-            for (int k = 0; k < h; k++, q++) {
+            for (int k = 0; k < h; k++, q++) {  // B and R side by side in 16-bit lanes (255 * 255 fits)
                 const u32 v = *q;
-                *q = ((((v >> 24) * keep) >> 8) << 24) | (((((v >> 16) & 0xFF) * keep) >> 8) << 16) |
-                     (((((v >> 8) & 0xFF) * keep) >> 8) << 8) | (v & 0xFF);
+                const u32 br = ((((v >> 8) & 0x00FF00FFu) * keep) >> 8) & 0x00FF00FFu;
+                const u32 g = ((((v >> 16) & 0xFFu) * keep) >> 8);
+                *q = (br << 8) | (g << 16) | (v & 0xFFu);
             }
             continue;
         }

@@ -50,8 +50,11 @@ public:
 
     // ---- drawing ----
     void drawBottom(Canvas &c);
-    // The entry panel; the caller has drawn the dimmed game (or black) underneath.
-    void drawTop(Canvas &c);
+    // The entry panel; the caller has drawn the dimmed game (or black) underneath, and, with
+    // bandShaded, the darker band behind the entry too (topBand() rows, darkened by kBandShade).
+    void drawTop(Canvas &c, bool bandShaded = false);
+    int topBand() const;  // rows of the darker band (0 while hidden)
+    static constexpr uint8_t kBandShade = 185;
 
     // Layout, for the tests: the character at (x, y) on the touchscreen, -1 if none.
     int charAt(int x, int y) const;

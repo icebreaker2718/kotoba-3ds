@@ -1,3 +1,7 @@
+// Built for speed (the plugin's C++ is otherwise built for size): the lookup screens' drawing.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize("O2")
+#endif
 #include "core/lookup_view.hpp"
 
 #include <algorithm>
@@ -540,13 +544,18 @@ void LookupView::drawBottom(Canvas &c) {
     }
 }
 
-void LookupView::drawTop(Canvas &c) {
-    if (hidden_) return;
-    // a darker band behind the entry, so it reads over a bright speech bubble too
+int LookupView::topBand() const {
+    if (hidden_) return 0;
     int h = kTopMargin;
     for (size_t i = topScroll_; i < entry_.size() && h + entry_[i].height <= kTopH - 6; i++) h += entry_[i].height;
-    h = std::min(h + 6, kTopH);
-    c.shade(0, 0, kTopW, h, 185);
+    return std::min(h + 6, kTopH);
+}
+
+void LookupView::drawTop(Canvas &c, bool bandShaded) {
+    if (hidden_) return;
+    // a darker band behind the entry, so it reads over a bright speech bubble too
+    const int h = topBand();
+    if (!bandShaded) c.shade(0, 0, kTopW, h, kBandShade);
     if (h < kTopH) c.fill(0, h, kTopW, 1, kRule);
     int y = kTopMargin;
     for (size_t i = topScroll_; i < entry_.size(); i++) {

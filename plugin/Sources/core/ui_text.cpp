@@ -1,3 +1,7 @@
+// Built for speed (the plugin's C++ is otherwise built for size): the lookup screens' drawing.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize("O2")
+#endif
 #include "core/ui_text.hpp"
 
 #include <algorithm>

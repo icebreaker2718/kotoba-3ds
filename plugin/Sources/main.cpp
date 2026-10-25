@@ -66,9 +66,14 @@ public:
         return true;
     }
     bool read(uint32_t off, void *dst, uint32_t len) override {
-        if (file_.Seek(off, File::SET) != File::SUCCESS) return false;
-        return file_.Read(dst, len) == File::SUCCESS;
+        u64 t0 = svcGetSystemTick();
+        bool ok = file_.Seek(off, File::SET) == File::SUCCESS && file_.Read(dst, len) == File::SUCCESS;
+        reads++;
+        ticks += svcGetSystemTick() - t0;
+        return ok;
     }
+    u32 reads = 0;  // for the log: how many reads, and how long they took
+    u64 ticks = 0;
     uint32_t size() override { return size_; }
 private:
     File file_;
@@ -295,8 +300,11 @@ static inline void Darken(u8 *d, const u8 *s, u32 bpp, GSPFormat fmt) {
     d[1] = (u8)(v >> 8);
 }
 
-// The paused game onto the top screen's draw buffer, dimmed or as it was.
-static bool PaintGame(bool dim) {
+// The paused game onto the top screen's draw buffer, dimmed or as it was. With band > 0 (8-bit
+// formats only: returns whether it did), the top `band` rows are also darkened as Canvas::shade
+// would (each channel * (255 - shade) >> 8), in the same pass: the framebuffer is only written.
+static bool g_bandDone = false;
+static bool PaintGame(bool dim, int band = 0, unsigned shade = 0) {
     const Screen &top = OSD::GetTopScreen();
     if (!g_snap.valid || top.BytesPerPixel != g_snap.bpp) return false;
     const u32 bpp = g_snap.bpp, col = 240 * bpp;
@@ -304,6 +312,11 @@ static bool PaintGame(bool dim) {
     // 720 or 960 bytes and start word-aligned, in the framebuffer and in the snapshot.
     const bool words = bpp >= 3 && ((uintptr_t)Column(top, 0) & 3) == 0 && ((uintptr_t)g_snap.px.data() & 3) == 0;
     const u32 keep = g_snap.format == GSP_RGBA8_OES ? 0x000000FFu : 0u;  // byte 0 of each pixel = alpha
+    // the band: RGBA8 a word at a time (B and R in 16-bit lanes); the column's last `band` pixels
+    // are the screen's top rows (columns run bottom to top)
+    const bool shadeHere = band > 0 && dim && words && g_snap.format == GSP_RGBA8_OES && band <= 240;
+    const u32 sk = 255 - shade, bandFrom = shadeHere ? 240 - (u32)band : 240;
+    g_bandDone = shadeHere;
     for (u32 x = 0; x < 400; x++) {
         u8 *d = Column(top, x);
         const u8 *src = &g_snap.px[x * col];
@@ -312,10 +325,18 @@ static bool PaintGame(bool dim) {
         } else if (words) {
             const u32 *s4 = (const u32 *)src;
             u32 *d4 = (u32 *)d;
-            for (u32 k = 0; k < col / 4; k++) {
+            u32 k = 0;
+            for (; k < bandFrom && k < col / 4; k++) {
                 u32 w = s4[k];
                 u32 v = ((w >> 3) & 0x1F1F1F1Fu) + ((w >> 4) & 0x0F0F0F0Fu);
                 d4[k] = (v & ~keep) | (w & keep);
+            }
+            for (; k < col / 4; k++) {  // RGBA8 only (shadeHere): dimmed, then shaded
+                u32 w = s4[k];
+                u32 v = (((w >> 3) & 0x1F1F1F1Fu) + ((w >> 4) & 0x0F0F0F0Fu)) & ~0xFFu;
+                const u32 br = ((((v >> 8) & 0x00FF00FFu) * sk) >> 8) & 0x00FF00FFu;
+                const u32 g = (((v >> 16) & 0xFFu) * sk) >> 8;
+                d4[k] = (br << 8) | (g << 16) | (w & 0xFFu);
             }
         } else {
             for (u32 k = 0; k < col; k += bpp) Darken(d + k, src + k, bpp, g_snap.format);
@@ -525,10 +546,12 @@ static void DropView() {
 static u64 g_drawTicks[4];  // since the view opened: the dimmed game, the entry, the text, showing it
 static u32 DrawLookup(kt::LookupView &v) {
     u64 t0 = svcGetSystemTick();
-    if (!PaintGame(!v.hidden())) OSD::GetTopScreen().DrawRect(0, 0, 400, 240, Color(15, 18, 22));
+    g_bandDone = false;
+    if (!PaintGame(!v.hidden(), v.topBand(), kt::LookupView::kBandShade))
+        OSD::GetTopScreen().DrawRect(0, 0, 400, 240, Color(15, 18, 22));
     u64 t1 = svcGetSystemTick();
     ScreenCanvas tc(OSD::GetTopScreen());
-    v.drawTop(tc);
+    v.drawTop(tc, g_bandDone);
     u64 t2 = svcGetSystemTick();
     ScreenCanvas bc(OSD::GetBottomScreen());
     v.drawBottom(bc);
@@ -559,7 +582,8 @@ static void SaveSelected(kt::LookupView &v) {
 
 // Timings of the lookup screens, written to ocr_log.txt when they close.
 struct ViewStats {
-    u32 moves = 0, prefetched = 0;
+    u32 moves = 0, prefetched = 0, moveReads = 0;
+    u64 moveReadTicks = 0;
     u64 lookSum = 0, lookMax = 0, drawSum = 0, drawMax = 0, draws = 0;
 };
 
@@ -584,6 +608,8 @@ static void RunLookupView(kt::LookupView &v) {
         u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
         bool changed = false;
         u64 t0 = osGetTime();
+        const u32 reads0 = g_reader.reads;
+        const u64 readTicks0 = g_reader.ticks;
         bool moved = false;
         if (down & Key::B) break;
         if (down & Key::A) { SaveSelected(v); changed = true; }
@@ -622,6 +648,8 @@ static void RunLookupView(kt::LookupView &v) {
         touchWas = touch;
         if (moved) {
             u64 ms = osGetTime() - t0;
+            st.moveReads += g_reader.reads - reads0;
+            st.moveReadTicks += g_reader.ticks - readTicks0;
             st.moves++;
             st.lookSum += ms;
             if (ms > st.lookMax) st.lookMax = ms;
@@ -641,13 +669,17 @@ static void RunLookupView(kt::LookupView &v) {
     {
         const u64 n = st.draws + 1;  // the first draw too
         LogOcr(Utils::Format("view: opened in %lu ms (first draw %lu ms), %lu moves, look-up avg %lu ms (max %lu), "
-                             "draw avg %lu ms (max %lu: game %lu, entry %lu, text %lu, show %lu ms avg), %lu looked up ahead",
+                             "draw avg %lu ms (max %lu: game %lu, entry %lu, text %lu, show %lu ms avg), %lu looked up ahead, "
+                             "dictionary reads per move %lu.%lu (%lu us each)",
                              (unsigned long)openMs, (unsigned long)firstMs, (unsigned long)st.moves,
                              (unsigned long)(st.moves ? st.lookSum / st.moves : 0), (unsigned long)st.lookMax,
                              (unsigned long)(st.draws ? st.drawSum / st.draws : 0), (unsigned long)st.drawMax,
                              (unsigned long)(g_drawTicks[0] / n / 268112), (unsigned long)(g_drawTicks[1] / n / 268112),
                              (unsigned long)(g_drawTicks[2] / n / 268112), (unsigned long)(g_drawTicks[3] / n / 268112),
-                             (unsigned long)st.prefetched));
+                             (unsigned long)st.prefetched,
+                             (unsigned long)(st.moves ? st.moveReads / st.moves : 0),
+                             (unsigned long)(st.moves ? st.moveReads * 10 / st.moves % 10 : 0),
+                             (unsigned long)(st.moveReads ? st.moveReadTicks / st.moveReads / 268 : 0)));
     }
 }
 

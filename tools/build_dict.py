@@ -13,20 +13,24 @@ Radicals (for the "search by kanji components" screen):
 
 Output: dict.bin  ->  copy to SD:/3ds/kotoba3ds/dict.bin
 
-File format (little endian), version 1:
+File format (little endian), version 2 (the plugin also reads version 1: 8-byte key records, no fences):
   header (64 bytes)
     0  "KTB1"
     4  u32 version
     8  u32 entryCount
    12  u32 entryIndexOff   (entryCount+1) x {u32 dataOff, u32 posMask}  (last = sentinel)
    16  u32 keyCount
-   20  u32 keyIndexOff     keyCount x {u32 strOff, u32 entryId}, sorted by (key bytes, rank)
+   20  u32 keyIndexOff     keyCount x {u32 strOff, u32 entryId, u32 posMask of that entry},
+                           sorted by (key bytes, rank)
    24  u32 radCount
    28  u32 radTableOff     radCount x {char utf8[8], u16 strokes, u16 count, u32 listOff,
                                        char label[16]}  (32 bytes)
    32  u32 kanjiCount
    36  u32 kanjiTableOff   kanjiCount x u32 codepoint, most common kanji first
-   40..63 reserved
+   40  u32 fenceStep       a fence every fenceStep keys (keys 0, step, 2 step, ...)
+   44  u32 fenceCount
+   48  u32 fenceOff        fenceCount x {u16 len, key bytes}
+   52..63 reserved
   radical lists: u16 kanji ids, ascending (== most common first)
   key strings: NUL-terminated UTF-8
   entry blobs (UTF-8, see ENTRY BLOB below)
@@ -580,6 +584,9 @@ def load_radkfile(path):
 # ----------------------------------------------------------------------------
 # Writer
 # ----------------------------------------------------------------------------
+FENCE_STEP = 128  # keys per stretch between two fences (see build)
+
+
 def build(entries, rads, out_path, freq=None):
     entries = list(entries)
     print(f"{len(entries)} entries", file=sys.stderr)
@@ -667,14 +674,23 @@ def build(entries, rads, out_path, freq=None):
     for off, m in zip(entry_offs, masks):
         blob += struct.pack("<II", off, m)
     blob += struct.pack("<II", end_off, 0)
-    # key index
+    # key index (version 2): the key's string, its entry, and that entry's part-of-speech mask
+    # (the search filters deinflected matches by it: one read less per match)
     align()
     key_idx_off = len(blob)
     for (k, eid), _ in key_list:
-        blob += struct.pack("<II", str_offs[k], eid)
+        blob += struct.pack("<III", str_offs[k], eid, masks[eid])
+    # fences: every FENCE_STEP-th key, loaded into memory by the plugin, so a search reads only
+    # the stretch of FENCE_STEP keys around its key from the SD card
+    align()
+    fence_off = len(blob)
+    fences = [key_list[i][0][0] for i in range(0, len(key_list), FENCE_STEP)]
+    for k in fences:
+        assert len(k) < 65536
+        blob += struct.pack("<H", len(k)) + k
 
-    header = struct.pack("<4s9I", b"KTB1", 1, len(entries), entry_idx_off, len(key_list), key_idx_off,
-                         len(rad_records), rad_off, len(kanji_order), kanji_off)
+    header = struct.pack("<4s12I", b"KTB1", 2, len(entries), entry_idx_off, len(key_list), key_idx_off,
+                         len(rad_records), rad_off, len(kanji_order), kanji_off, FENCE_STEP, len(fences), fence_off)
     blob[:len(header)] = header
     with open(out_path, "wb") as f:
         f.write(blob)
