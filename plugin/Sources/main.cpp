@@ -1130,6 +1130,20 @@ static void OpenLookup(const std::vector<std::string> &blocks, bool textOnTop) {
     DropView();
 }
 
+// Before the game goes on: wait until every button (and the touchscreen) is let go, and a few
+// frames more. Otherwise the B (or A) that closed the plugin still reaches the game as a press
+// and skips the line you were reading.
+static void WaitForRelease() {
+    const u64 until = osGetTime() + 3000;  // a button held on purpose doesn't keep the game paused
+    while (osGetTime() < until) {
+        Controller::Update();
+        if (!Controller::GetKeysDown(true) && !Touch::IsDown()) break;
+        Sleep(Milliseconds(10));
+    }
+    Sleep(Milliseconds(80));
+    Controller::Update();  // the game's next reading is "nothing pressed"
+}
+
 // A hotkey: pause the game, read its screen(s), look a word up.
 static void ReadAndLookUp(int mode) {
     Process::Pause();
@@ -1156,6 +1170,7 @@ static void ReadAndLookUp(int mode) {
     WriteScreenshotLater();  // the game goes on while it is written
     g_lookupShot = "";
     RestoreCpu();
+    WaitForRelease();
     Process::Play();
 }
 
@@ -1707,6 +1722,7 @@ static void Watcher(void) {
         Process::Pause();
         Settings();
         g_hotkeys.reset();
+        WaitForRelease();
         Process::Play();
         return;
     }
