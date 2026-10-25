@@ -681,9 +681,20 @@ bool LookupView::scroll(int lines) {
     return topScroll_ != before;
 }
 
-void LookupView::markSaved() {
+const std::string *LookupView::savedTag() const {
+    for (const Saved &s : saved_)
+        if (s.block == selBlock_ && s.byte == selByte_) return &s.tag;
+    return nullptr;
+}
+
+void LookupView::unmarkSaved() {
+    for (size_t i = saved_.size(); i-- > 0;)
+        if (saved_[i].block == selBlock_ && saved_[i].byte == selByte_) saved_.erase(saved_.begin() + i);
+}
+
+void LookupView::markSaved(const std::string &tag) {
     if (selBlock_ < 0) return;
-    saved_.push_back({selBlock_, selByte_, selLen_});
+    saved_.push_back({selBlock_, selByte_, selLen_, tag});
     if (!known_) return;
     // the word is known now: wherever else it is in the text, it turns green too
     std::vector<std::string> forms;
@@ -767,7 +778,8 @@ void LookupView::drawTextPanel(Canvas &c, Panel p) {
 
 void LookupView::drawButtons(Canvas &c) {
     const int bw = (kBottomW - 16) / 3;
-    const char *labels[3] = {"\uE000 Save", hidden_ ? "\uE002 Show" : "\uE002 Hide", "\uE001 Close"};
+    const char *labels[3] = {savedTag() ? "\uE000 Undo" : "\uE000 Save", hidden_ ? "\uE002 Show" : "\uE002 Hide",
+                             "\uE001 Close"};
     for (int i = 0; i < 3; i++) {
         int x = 8 + i * bw;
         frame(c, x + 2, kButtonY, bw - 4, kButtonH, kButton, kButtonEdge);

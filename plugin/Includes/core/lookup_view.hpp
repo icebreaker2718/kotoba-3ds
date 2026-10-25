@@ -60,7 +60,13 @@ public:
     const std::string &query() const { return so_.query; }
     const std::string &sentence() const;          // the block the selection is in
     std::string selectedText() const;             // the highlighted characters
-    void markSaved();                             // shows the selection (and the word elsewhere) as saved (green)
+    // Shows the selection (and the word elsewhere) as saved (green); `tag`: the caller's note of
+    // what was saved (the line written), for taking it back.
+    void markSaved(const std::string &tag = "");
+    // The selected word was saved in this lookup: its tag (the Save button then reads Undo).
+    const std::string *savedTag() const;
+    void unmarkSaved();                           // takes the selection's save back
+    bool anySaved() const { return !saved_.empty(); }
     // The spellings the selected word is known under (for marking it known by hand); empty if
     // there is no word here.
     std::vector<std::string> selectedForms();
@@ -131,7 +137,7 @@ private:
     void drawTextPanel(Canvas &c, Panel p);
     void drawEntryPanel(Canvas &c, Panel p, bool bandShaded);
     void drawButtons(Canvas &c);
-    struct Saved { int block; size_t byte, len; };
+    struct Saved { int block; size_t byte, len; std::string tag; };
     std::vector<Saved> saved_;
     std::string status_;
     Rgb statusColor_;

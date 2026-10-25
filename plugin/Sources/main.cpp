@@ -214,7 +214,7 @@ static u32 HeapFree() {
 
 // The biggest block malloc can give now (KB): the free memory may be in pieces.
 static u32 LargestFreeKB() {
-    u32 lo = 0, hi = 4096;  // KB
+    u32 lo = 0, hi = HeapFree() / 1024;  // never ask for more than there is
     while (lo < hi) {
         u32 mid = (lo + hi + 1) / 2;
         void *p = malloc((size_t)mid * 1024);
@@ -714,7 +714,7 @@ static void WriteScreenshotLater() {
 
 // Saves a word to mined.tsv. `status` gets the line to show.
 static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string &query, const std::string &sentence,
-                     std::string &status) {
+                     std::string &status, std::string &line) {
     const u64 t0 = osGetTime();
     std::string shot = SaveScreenshot();
     bool fresh = File::Exists(kLogPath) != 1;
@@ -726,7 +726,8 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
     std::string text;
     if (fresh)
         text += "#time\ttitle_id\texpression\treading\tdefinition\tscreenshot\tquery\tinflection\tentry\tsentence\n";
-    text += kt::mineLogLine(Timestamp(), TitleIdHex(), e, r, shot, query, sentence) + "\n";
+    line = kt::mineLogLine(Timestamp(), TitleIdHex(), e, r, shot, query, sentence);
+    text += line + "\n";
     bool ok = f.Write(text.data(), text.size()) == File::SUCCESS;
     f.Close();
     if (!ok) {
@@ -805,14 +806,59 @@ static void SaveSelected(kt::LookupView &v) {
         v.setStatus("Could not read this entry.", kWarn);
         return;
     }
-    bool ok = SaveWord(e, *r, r->surface.empty() ? v.query() : r->surface, v.sentence(), status);
-    if (ok) v.markSaved();
+    std::string line;
+    bool ok = SaveWord(e, *r, r->surface.empty() ? v.query() : r->surface, v.sentence(), status, line);
+    if (ok) v.markSaved(line);
     v.setStatus(status, ok ? kGood : kWarn);
+}
+
+// A (or Undo) on a word saved in this lookup: the save is taken back (saved by mistake).
+static void UndoSave(kt::LookupView &v, const std::string line) {
+    std::vector<std::string> lines = SavedLines();
+    bool found = false;
+    for (size_t i = lines.size(); i-- > 0;)
+        if (lines[i] == line) {
+            lines.erase(lines.begin() + i);
+            found = true;
+            break;
+        }
+    std::string out;
+    for (const std::string &l : lines) out += l + "\n";
+    if (found && !WriteWholeFile(kLogPath, out)) {
+        v.setStatus(std::string("Could not write ") + kLogPath, kWarn);
+        return;
+    }
+    // no longer known, unless saved before or marked with Y
+    std::vector<std::string> cols, still;
+    for (const std::string &l : lines) {
+        if (l[0] == '#') continue;
+        SplitTabs(l, cols);
+        if (cols.size() > 2) still.push_back(cols[2]);
+    }
+    std::vector<std::string> forms = v.selectedForms();
+    for (const std::string &f : forms)
+        if (std::find(still.begin(), still.end(), f) == still.end() &&
+            std::find(g_marked.begin(), g_marked.end(), f) == g_marked.end())
+            g_known.remove(f);
+    v.unmarkSaved();
+    v.refreshKnown();
+    if (!v.anySaved()) g_lookupShot = "";  // nothing saved from this lookup: no screenshot
+    int n = 0;
+    for (const std::string &l : lines) n += l[0] != '#';
+    v.setStatus("Took back " + (forms.empty() ? std::string("the word") : forms[0]) +
+                    Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s"),
+                kGreyInk);
+}
+
+// A / Save: saves the selected word, or takes back its save from this lookup.
+static void SaveOrUndo(kt::LookupView &v) {
+    if (const std::string *tag = v.savedTag()) UndoSave(v, *tag);
+    else SaveSelected(v);
 }
 
 // Runs the lookup screens until B / Close. Tap a character (text on the touchscreen); Circle Pad:
 // words and rows; D-pad up/down (or C-stick): scroll the entry; D-pad left/right or L/R: the other
-// matches; A save, X hide, Y mark known.
+// matches; A save (again on a word just saved: undo), X hide, Y mark known.
 static u64 g_viewOpenedAt = 0;  // when the read finished, for the log
 static void RunLookupView(kt::LookupView &v) {
     g_hide = 0;
@@ -835,7 +881,7 @@ static void RunLookupView(kt::LookupView &v) {
         bool changed = false, moved = false;
         u64 t0 = osGetTime();
         if (down & Key::B) break;
-        if (down & Key::A) { SaveSelected(v); changed = true; }
+        if (down & Key::A) { SaveOrUndo(v); changed = true; }
         if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
         if (down & Key::Y) { MarkKnown(v); changed = true; }
         if (down & (Key::L | Key::DPadLeft)) moved |= v.page(-1);
@@ -870,7 +916,7 @@ static void RunLookupView(kt::LookupView &v) {
                 kt::LookupView::Button b = kt::LookupView::kNone;
                 moved |= v.tap((int)p.x, (int)p.y, b);
                 if (b == kt::LookupView::kClose) break;
-                if (b == kt::LookupView::kSave) { SaveSelected(v); changed = true; }
+                if (b == kt::LookupView::kSave) { SaveOrUndo(v); changed = true; }
                 if (b == kt::LookupView::kHide) { g_hide = NextHide(g_hide); changed = true; }
             }
         }
@@ -1519,7 +1565,8 @@ static void HowToUse() {
          "hidden (the game alone), as set under \"Hide (X)\". X again brings the lookup back; so "
          "does a tap on a hidden touchscreen."},
         {"Saving words, Anki cards",
-         "A saves the selected word with its sentence and a screenshot (SD:/3ds/kotoba3ds/mined.tsv). "
+         "A saves the selected word with its sentence and a screenshot (SD:/3ds/kotoba3ds/mined.tsv); "
+         "saved by mistake? A again on it (Undo) takes it back. "
          "\"Saved words\" lists them; Y deletes one.\n\n"
          "\"Make Anki cards\" sends them to tools/ocr_server.py on your PC (same Wi-Fi, Anki open). "
          "tools/mine.py can also read them from the SD card."},

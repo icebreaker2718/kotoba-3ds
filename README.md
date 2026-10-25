@@ -106,7 +106,7 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    | Circle Pad ▲ ▼ | the row above / below |
    | D-pad ▲ ▼ (or C-stick) | scroll a long definition |
    | D-pad ◀ ▶ (or L / R) | the other matches at that spot (homographs, most common first, then shorter words), shown as 1/3 |
-   | **A** (or the Save button) | save the word |
+   | **A** (or the Save button) | save the word; on a word you just saved (the button reads Undo), take the save back |
    | Y | mark the word known without saving it (grammar, words you know); Y again takes it back |
    | X (or Hide) | uncover the screen that was read: see-through or hidden (*Hide (X)* in the menu); again to come back |
    | **B** (or Close) | close; the game continues |

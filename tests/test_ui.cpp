@@ -384,6 +384,12 @@ int main(int argc, char **argv) {
         check(!s.cellKnown(cellOf(s, "ケ", 1)), "not known before it is saved");
         tapCell(s, cellOf(s, "ケ"));
         s.markSaved();
+        s.unmarkSaved();
+        s.markSaved("line 1");
+        check(s.savedTag() && *s.savedTag() == "line 1" && s.anySaved(), "a word saved in this lookup: its save can be undone");
+        s.unmarkSaved();
+        check(!s.savedTag() && !s.anySaved(), "undone: Save again");
+        s.markSaved();
         check(s.cellKnown(cellOf(s, "ケ", 1)) && kw.has("ケーキ"), "saving a word turns it green elsewhere too");
         // Y: marked known by hand, and taken back
         LookupView y(dict, tr);

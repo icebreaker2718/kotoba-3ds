@@ -488,12 +488,29 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
         return true;
     }
     if (!ocr.read(grey, w, h, lines, error, progress)) return false;  // the whole screen
-    paragraphs = textParagraphs(lines, true);
+    // With no text box, the scenery can look like a few kana (「ンりツ」 in a face). A short line
+    // stays only next to a real one (4+ characters) of about its size: a title over the text
+    // (「ご注意」), a dialogue's short first or last row, a speaker's name.
+    std::vector<char> real(lines.size());
+    for (size_t i = 0; i < lines.size(); i++) real[i] = japaneseChars({lines[i].text}) >= kMinScreenChars;
+    std::vector<TextLine> kept;
+    for (size_t i = 0; i < lines.size(); i++) {
+        bool keep = real[i];
+        const TextLine &a = lines[i];
+        for (size_t j = 0; j < lines.size() && !keep; j++) {
+            if (!real[j] || a.height <= 0) continue;
+            const TextLine &b = lines[j];
+            const float ratio = a.height / b.height;
+            const float gapY = a.centerY > b.centerY ? a.centerY - b.centerY : b.centerY - a.centerY;
+            const float aL = a.centerX - a.width / 2, aR = a.centerX + a.width / 2;
+            const float bL = b.centerX - b.width / 2, bR = b.centerX + b.width / 2;
+            const bool overlapX = aL < bR + 0.05f && bL < aR + 0.05f;
+            keep = ratio > 0.6f && ratio < 1.7f && gapY < 2.6f * std::max(a.height, b.height) && overlapX;
+        }
+        if (keep) kept.push_back(a);
+    }
+    paragraphs = textParagraphs(kept, true);
     cleanParagraphs(paragraphs);
-    // with no text box, the scenery can look like a few kana (「ンりツ」 in a face): only real lines
-    paragraphs.erase(std::remove_if(paragraphs.begin(), paragraphs.end(),
-                                    [](const std::string &p) { return japaneseChars({p}) < kMinScreenChars; }),
-                     paragraphs.end());
     if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
     return true;
 }
