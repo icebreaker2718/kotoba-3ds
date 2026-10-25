@@ -5,22 +5,42 @@ words you save into Anki cards with the screenshot and the sentence.
 
 Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-vn-ocr) model she built. Without it this project would not be possible!
 
-**On the 3DS** (Luma3DS plugin): press **ZL + ZR** in any game when a line has a word you
-don't know. The game pauses, the 3DS **reads the screen itself** (on-device OCR, no PC or
-internet) and shows the text on the touchscreen: tap a word and its full entry appears on the top
-screen over the paused game. The touchscreen, or both screens, can be read too, each with its
-own hotkey. Conjugated forms are matched (食べられなかった → 食べる). **Save** the word: it goes
-to `SD:/3ds/kotoba3ds/mined.tsv` with the sentence and a screenshot.
+## Features
 
-**On the PC** (`tools/mine.py`): fetches the saved words over Wi-Fi (ftpd) or from the SD card
-and makes [Lapis](https://github.com/donkuri/lapis) cards through AnkiConnect, with the
-screenshot, the OCR'd sentence (word in bold), the full Jitendex definition, pitch accent,
-frequency and word audio.
+**On the 3DS** (a Luma3DS plugin, works in any game)
+- **Reads the screen itself.** Press **ZL + ZR** (any buttons you choose; an original 3DS,
+  which has no ZL/ZR, needs another hotkey set in the menu) and the game pauses while the 3DS reads the
+  text with on-device OCR, in under a second. It needs no PC and no internet. The touchscreen,
+  or both screens, can be read too, each with its own hotkey.
+- **Finds every text box.** Speech bubbles, menus and dialogue boxes are found by their colour,
+  wherever they are. Furigana and the "next" arrow are left out, and the dictionary corrects
+  kanji the OCR wasn't sure of (造跡 → 遺跡).
+- **Tap a word to look it up.** The full Jitendex entry shows over the paused game, with the
+  reading, how common the word is (JPDB rank) and other matches for the same spelling.
+  Conjugations are undone (食べられなかった → 食べる, with the conjugation shown).
+- **Save words for Anki.** One button saves the word with its sentence and a screenshot. Saving
+  is instant, and a mistaken save can be undone.
+- **Known words in green.** Words you saved, words you marked known with **Y** (grammar, words
+  you already know) and the words of your Anki cards are shown in green.
+- **Your choice of spelling.** Saved words are written in their usual kanji, or as the game
+  wrote them.
+- **Easy on the game.** The dictionary is searched on the SD card instead of being loaded into
+  memory, a New 3DS runs at full speed only while a lookup is open, and closing a lookup never
+  passes your button press on to the game. Closing the lid with the plugin open is fine.
+
+**On the PC** (optional; `tools/ocr_server.py` or `tools/mine.py`)
+- **Anki cards in one step.** Choose *Make Anki cards* on the 3DS and every saved word becomes a
+  [Lapis](https://github.com/donkuri/lapis) card, sent over Wi-Fi through AnkiConnect. You can
+  also fetch the saved words over ftpd or from the SD card.
+- **Full cards.** Each card gets the screenshot, the sentence (word in bold), the full Jitendex
+  definition, pitch accent, frequency and word audio. Cards missing audio or a definition are
+  tagged and flagged red, so they're easy to finish by hand.
+- **No duplicates.** Words that are cards already are skipped.
+- **Your Anki words on the 3DS.** *Known words* copies the words of your Anki cards to the 3DS
+  so they show in green.
 
 The on-console dictionary is built from [Jitendex](https://jitendex.org) (or JMdict, or any
-Yomitan dictionary). It lives on the SD card and is searched on disk, so the plugin needs only
-about 100 KB of RAM.
-
+Yomitan dictionary) and lives on the SD card.
 
 ---
 
@@ -81,7 +101,7 @@ python tools/build_dict.py --jmdict JMdict_e.gz -o dict.bin  # current one from 
 | File | Put it at |
 |---|---|
 | `Kotoba3DS.3gx` | `SD:/luma/plugins/default.3gx` (every game), **or** `SD:/luma/plugins/<TitleID>/Kotoba3DS.3gx` for one game |
-| `dict.bin` (~41 MB) | `SD:/3ds/kotoba3ds/dict.bin` |
+| `dict.bin` (~55 MB) | `SD:/3ds/kotoba3ds/dict.bin` |
 | `Kotoba3DS-ocr-model.zip` (the OCR model) | unzip to the root of the SD card: `SD:/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr` |
 
 Then open the Rosalina menu (**L + Down + Select**), set **Plugin loader: [Enabled]**, and
@@ -112,12 +132,14 @@ start a game. After a few seconds the plugin is ready; press **Select** to open 
    | **A** (or the Save button) | save the word; on a word you just saved (the button reads Undo), take the save back |
    | Y | mark the word known without saving it (grammar, words you know); Y again takes it back |
    | X (or Hide) | uncover the screen that was read: see-through or hidden (*Hide (X)* in the menu); again to come back |
-   | **B** (or Close) | close; the game continues |
+   | **B** (or Close) | close; the game continues once you let go of the buttons |
 
    If the screen had several text boxes (two speech bubbles, a menu and a dialogue box), they are
    all there, top to bottom, with a line between them (both screens: the top screen's first). When the
    touchscreen was read, its text can also go on the top screen and the entry on the touchscreen
    (*Touchscreen text shows on*).
+   If nothing could be read, the screen is kept as `shots/failed_*.qoi`, which helps when
+   reporting a problem.
 3. **Save** writes the word to `mined.tsv` with the sentence and a screenshot of the screen(s)
    that were read (in `SD:/3ds/kotoba3ds/shots/`); a saved word turns green. The screenshot is
    written once the lookup closes, while the game goes on, so saving is instant.
@@ -136,7 +158,7 @@ The **Select** menu (drawn like the lookup: tap, or D-pad / Circle Pad and A) ha
 | *Last lookup* | reopen the text of your last lookup |
 | *Saved words* | review them with their entry; Y deletes one |
 | *Make Anki cards* | send the saved words to your PC (below) |
-| *Known words* | get the words of your Anki cards from your PC, so they show in green (below) |
+| *Known words* | get the words of your Anki cards from your PC, so they show in green (below); forget that list, or forget the words marked with Y |
 | *PC* | find your PC, or type its address |
 | *How to use* | the controls in short |
 
@@ -160,7 +182,8 @@ setting is restored when you close the lookup.
 your PC, run `py -3.12 tools\ocr_server.py` there (same Wi-Fi, Anki open) and choose **Make Anki
 cards** in the Select menu: every saved word is sent and becomes a Lapis card, with the
 definition, audio, pitch and picture (words that are cards already are skipped), and you can
-then clear them from the list. The plugin finds your PC automatically; you can also type its
+then clear them from the list. When it starts, `ocr_server.py` says what the cards will get
+and warns if a dictionary is missing. The plugin finds your PC automatically; you can also type its
 address under **PC**. `mine.py` (below) still works too, over ftpd or from the SD card.
 
 **Words you have cards for, in green.** With `ocr_server.py` running (Anki open), choose
@@ -208,7 +231,7 @@ Cards go to your deck **Mining Deck** with the **Lapis** note type by default.
 
 ### Each time
 1. Close the game, open **ftpd** on the 3DS, and keep Anki open on the PC.
-2. Run `python tools/mine.py`. Add `--dry-run` to preview, `--no-ocr` to skip OCR, or
+2. Run `python tools/mine.py`. Add `--dry-run` to preview, `--no-ocr` to skip OCR of old words saved without a sentence, or
    `--clear` to remove imported words from the 3DS log afterwards. `python tools/mine.py known`
    puts the words of your Anki cards on the 3DS (green in lookups).
 
@@ -224,7 +247,7 @@ makes duplicate cards.
 | ExpressionAudio | word audio (see below) |
 | MainDefinition, Glossary | the Jitendex entry, same HTML and styling as Yomitan's |
 | Sentence | OCR'd line with the word in `<b>` |
-| Picture | the top screen at 2× |
+| Picture | the screenshot of the screen(s) that were read, at 2× |
 | PitchPosition / PitchCategories | e.g. `[2]` / `kifuku`, which Lapis turns into the pitch graph and colors |
 | Frequency / FreqSort | from your frequency dictionaries (harmonic rank, like Yomitan) |
 | MiscInfo | game name and time |
@@ -242,7 +265,9 @@ is tagged `no_definition`; one for which no audio source had a recording is tagg
 Either way its card also gets **flag 1 (red)**, so you can find them in the Anki browser
 (*Flag → Red*, or search `tag:no_definition` / `tag:no_audio`) and add what's missing. Change
 the tags with `"missing_definition_tag"` and `"missing_audio_tag"` in the `anki` section (`""`
-for none), and the flag with `"flag_missing"` (0 turns it off; 2 = orange, 3 = green, 4 = blue…).
+for none), and the flag with `"flag_missing"` (0 turns it off; 2 = orange, 3 = green, 4 = blue…). If Anki
+has the card open in an editor, it won't take the flag yet; the flag is set as soon as the editor
+closes.
 
 ### Word audio
 `audio.sources` is tried in order for each word, until one has a recording:
@@ -276,6 +301,9 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
 /3ds/kotoba3ds/shots/          screenshots of the screen(s) read (400x240, 320x240, or both 400x480; QOI images, a third of a BMP)
 /3ds/kotoba3ds/settings.txt    hotkeys and the menu's choices
 /3ds/kotoba3ds/known.txt       words of your Anki cards (green in lookups; from Known words or mine.py known)
+/3ds/kotoba3ds/marked.txt      words you marked known with Y
+/3ds/kotoba3ds/ocr/            the OCR model (VOCR5_N_w8.vocr)
+/3ds/kotoba3ds/ocr_log.txt     each read's timing, and notes for bug reports
 ```
 
 ## Troubleshooting
