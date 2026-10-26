@@ -202,33 +202,65 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
                     if (y < gt) gt = y;
                     if (y > gb) gb = y;
                 };
-                for (int pass = 0; pass < 8 && !leaked; pass++) {  // sweeps down and up until nothing changes
-                    bool changed = false;
-                    for (unsigned y = gy0; y <= gy1 && !leaked; y++)
-                        for (unsigned x = gx0; x <= gx1; x++) {
+                // Grown as a flood fill: from the pixels next to the box, then only the neighbours
+                // of pixels just taken (the stack, free again, as a ring of pixels to look around).
+                // When the ring is full, a sweep finds what it dropped: the same pixels either way.
+                const unsigned cap = kSpanCap;
+                unsigned head = 0, count = 0;
+                bool dropped = false;
+                auto push = [&](unsigned i) {
+                    if (count == cap) { dropped = true; return; }
+                    stk[(head + count++) % cap] = i;
+                };
+                // takes i (x, y) if it carries on from a pixel of ours next to it
+                auto tryTake = [&](unsigned x, unsigned y, unsigned i) {
+                    if (ours(i) || !can(i)) return;
+                    if ((x > gx0 && ours(i - 1) && close(i, i - 1)) || (x < gx1 && ours(i + 1) && close(i, i + 1)) ||
+                        (y > gy0 && ours(i - w) && close(i, i - w)) || (y < gy1 && ours(i + w) && close(i, i + w))) {
+                        take(x, y, i);
+                        push(i);
+                    }
+                };
+                // The first pass looks only right around the box (a pixel it can start from is next
+                // to one of the box's); a pass after the ring overflowed, around all that grew.
+                unsigned sx0 = l > gx0 ? l - 1 : gx0, sx1 = std::min(gx1, r + 1);
+                unsigned sy0 = t > gy0 ? t - 1 : gy0, sy1 = std::min(gy1, b + 1);
+                bool sweep = true;
+                while (sweep && !leaked) {
+                    sweep = false;
+                    dropped = false;
+                    const uint64_t me4 = 0x0001000100010001ull * me;
+                    for (unsigned y = sy0; y <= sy1 && !leaked; y++)
+                        for (unsigned x = sx0; x <= sx1; x++) {
                             const unsigned i = y * w + x;
-                            if (ours(i) || !can(i)) continue;
-                            if ((x > gx0 && ours(i - 1) && close(i, i - 1)) || (y > gy0 && ours(i - w) && close(i, i - w))) {
-                                take(x, y, i);
-                                changed = true;
+                            uint64_t q;  // inside the box: four of its own pixels at a time
+                            if (x + 4 <= sx1 + 1 && (memcpy(&q, label + i, 8), q == me4)) {
+                                x += 3;
+                                continue;
                             }
+                            tryTake(x, y, i);
                         }
-                    for (unsigned y = gy1 + 1; y-- > gy0 && !leaked;)
-                        for (unsigned x = gx1 + 1; x-- > gx0;) {
-                            const unsigned i = y * w + x;
-                            if (ours(i) || !can(i)) continue;
-                            if ((x < gx1 && ours(i + 1) && close(i, i + 1)) || (y < gy1 && ours(i + w) && close(i, i + w))) {
-                                take(x, y, i);
-                                changed = true;
-                            }
-                        }
-                    if (!changed) break;
+                    while (count && !leaked) {
+                        const unsigned i = stk[head];
+                        head = (head + 1) % cap;
+                        count--;
+                        const unsigned y = i / w, x = i - y * w;
+                        if (x > gx0) tryTake(x - 1, y, i - 1);
+                        if (x < gx1) tryTake(x + 1, y, i + 1);
+                        if (y > gy0) tryTake(x, y - 1, i - w);
+                        if (y < gy1) tryTake(x, y + 1, i + w);
+                    }
+                    if (dropped) {  // the ring overflowed: look again, around everything ours
+                        sweep = true;
+                        sx0 = gl > gx0 ? gl - 1 : gx0, sx1 = std::min(gx1, gr + 1);
+                        sy0 = gt > gy0 ? gt - 1 : gy0, sy1 = std::min(gy1, gb + 1);
+                    }
                 }
                 // a text box grown this way is a wide band of lines, not a lump (a shaded cushion)
                 if (any && (gr - gl + 1) * 2 < (gb - gt + 1) * 3) leaked = true;
-                if (any)
-                    for (unsigned y = gy0; y <= gy1; y++)
-                        for (unsigned x = gx0; x <= gx1; x++) {
+                if (any)  // what grew lies within gl..gr, gt..gb
+                    for (unsigned y = gt; y <= gb; y++)
+                        for (unsigned x = gl; x <= gr; x++) {
                             uint16_t &v = label[y * w + x];
                             if (v == grown) v = leaked ? 0 : me;
                         }

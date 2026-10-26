@@ -1018,8 +1018,11 @@ static void RunLookupView(kt::LookupView &v) {
         Sleep(Milliseconds(10));
     }
     RestoreScreens();
-    LogOcr(Utils::Format("view: opened in %lu ms, %lu moves, draw avg %lu ms", (unsigned long)openMs,
-                         (unsigned long)moves, (unsigned long)(draws ? drawSum / draws : 0)));
+    static const char *kFormats[5] = {"RGBA8", "BGR8", "RGB565", "RGB5A1", "RGBA4"};
+    const int f0 = (int)ScreenOf(0).Format, f1 = (int)ScreenOf(1).Format;
+    LogOcr(Utils::Format("view: opened in %lu ms, %lu moves, draw avg %lu ms (screens %s / %s)", (unsigned long)openMs,
+                         (unsigned long)moves, (unsigned long)(draws ? drawSum / draws : 0),
+                         f0 >= 0 && f0 < 5 ? kFormats[f0] : "?", f1 >= 0 && f1 < 5 ? kFormats[f1] : "?"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,12 +1148,14 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     u64 t1 = osGetTime();
     const u32 largestBefore = LargestFreeKB();  // for the log: room for the read's buffers?
+    const u64 tMem = osGetTime();
     // the screens' pictures for the OCR, before anything is drawn on them
     const bool screens[2] = {mode != kReadBottom, mode != kReadTop};
     uint8_t *grey[2] = {nullptr, nullptr};
     std::vector<kt::TextBox> boxes[2];
     for (int s = 0; s < 2; s++)
         if (screens[s]) grey[s] = ScreenGrey(s, boxes[s]);
+    const u64 tBoxes = osGetTime();
     // then the game's screens as they are, for drawing under the lookup and the card's
     // screenshot (after the colour copies above are freed: the pictures take their place): the
     // top screen always (the entry goes over it), the touchscreen when it is read
@@ -1187,13 +1192,17 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     if (!any) error = firstError.empty() ? "no text found" : firstError;
     std::string first = any ? blocks[0] : error;
     for (char &c : first) if (c == '\n') c = '/';
-    LogOcr(Utils::Format("%s: %s, model %lu ms, box %lu ms (%u+%u found), read %lu ms (%u threads, %d MHz, %u fixed), "
-                         "heap free %lu KB (largest %lu KB, before the read %lu KB), %u block%s, %s",
+    // in pieces: Utils::Format stops at 255 characters
+    LogOcr(Utils::Format("%s: %s, model %lu ms, box %lu ms (%u+%u found; memory check %lu, boxes %lu, pictures %lu), ",
                          name.c_str(), kModeNames[mode], (unsigned long)(t1 - t0), (unsigned long)(t2 - t1),
-                         (unsigned)boxes[0].size(), (unsigned)boxes[1].size(), (unsigned long)(t3 - t2),
-                         g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars, (unsigned long)(HeapFree() / 1024),
-                         (unsigned long)LargestFreeKB(), (unsigned long)largestBefore, (unsigned)blocks.size(),
-                         blocks.size() == 1 ? "" : "s", first.c_str()));
+                         (unsigned)boxes[0].size(), (unsigned)boxes[1].size(), (unsigned long)(tMem - t1),
+                         (unsigned long)(tBoxes - tMem), (unsigned long)(t2 - tBoxes)) +
+           Utils::Format("read %lu ms (%u threads, %d MHz, %u fixed), heap free %lu KB (largest %lu KB, before the "
+                         "read %lu KB), %u block%s, ",
+                         (unsigned long)(t3 - t2), g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
+                         (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
+                         (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
+           first);
     return any;
 }
 
@@ -1943,25 +1952,26 @@ static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
     constexpr int kMaxSites = 16;
     u32 siteAt[kMaxSites];
     void (*siteFn[kMaxSites])(void);
-    int sites = 0;
-    std::string found;
+    int sites = 0, perKind[4] = {0, 0, 0, 0};
     const u32 *text = (const u32 *)0x00100000;
     const u32 words = Process::GetTextSize() / 4;
-    for (const Kind &k : kinds) {
-        int n = 0, skipped = 0;
-        for (u32 i = 0; i < words; i++) {
-            if (text[i] != svcInstruction(k.svc)) continue;
-            if (!isPatchableCall(text, words, i, k.svc)) { skipped++; continue; }
-            if (sites == kMaxSites) return "not patched: more calls than expected";
-            siteAt[sites] = 0x00100000 + i * 4;
-            siteFn[sites] = k.standIn;
-            sites++;
-            n++;
-        }
+    for (u32 i = 0; i < words; i++) {  // one pass for all four (svc #n: 0xEF0000nn)
+        const u32 word = text[i];
+        if ((word & 0xFFFFFFC0) != 0xEF000000) continue;  // svc 0x00..0x3F
+        int k = 0;
+        while (k < 4 && kinds[k].svc != (word & 0xFF)) k++;
+        if (k == 4) continue;
         // a call left as it is would give the game a second, different answer
-        if (skipped) return Utils::Format("not patched: a %s call can't be patched", k.name);
-        found += Utils::Format("%s%s %d", found.empty() ? "" : ", ", k.name, n);
+        if (!isPatchableCall(text, words, i, kinds[k].svc))
+            return Utils::Format("not patched: a %s call can't be patched", kinds[k].name);
+        if (sites == kMaxSites) return "not patched: more calls than expected";
+        siteAt[sites] = 0x00100000 + i * 4;
+        siteFn[sites] = kinds[k].standIn;
+        sites++;
+        perKind[k]++;
     }
+    std::string found;
+    for (int k = 0; k < 4; k++) found += Utils::Format("%s%s %d", k ? ", " : "", kinds[k].name, perKind[k]);
     if (sites == 0) return "the game asks none of these";
 
     // the trampolines, in plugin memory the game can run (never freed: the game uses them until it exits)

@@ -195,6 +195,61 @@ int main(int argc, char **argv) {
         framebufferToRGB(col.data(), 1, 0, 4, b);
         check(abs(a[0] - b[0]) < 8 && abs(a[1] - b[1]) < 4 && abs(a[2] - b[2]) < 8, "RGB565 pictures: close to the screen");
     }
+    {   // the per-format fast paths give the same bytes as the plain per-pixel functions
+        unsigned seed = 12345;
+        auto rnd = [&seed]() { seed = seed * 1103515245u + 12345u; return (seed >> 16) & 0xFF; };
+        bool paintSame = true, blendSame = true;
+        for (int it = 0; it < 200; it++)
+            for (int fmt = 0; fmt < 5; fmt++)
+                for (unsigned pb = 2; pb <= 3; pb++) {
+                    const unsigned bpp = fmt == 0 ? 4 : (fmt == 1 ? 3 : 2), n = 240;
+                    const int tone = it % 3;
+                    const unsigned from = rnd() % 250, keep = rnd();
+                    std::vector<uint8_t> pic(n * pb), fast(n * bpp), slow(n * bpp);
+                    for (auto &x : pic) x = (uint8_t)rnd();
+                    pictureColumnToFramebuffer(pic.data(), n, pb, tone, from, keep, fmt, bpp, fast.data());
+                    for (unsigned i = 0; i < n; i++) {  // picturePixelRGB, the tone, the band, rgbToFramebuffer
+                        uint8_t c[3];
+                        picturePixelRGB(&pic[i * pb], pb, c);
+                        for (int k = 0; k < 3; k++) {
+                            unsigned v = c[k];
+                            if (tone == 1) v = (v >> 3) + (v >> 4);
+                            else if (tone == 2) v >>= 1;
+                            if (i >= from) v = (v * keep) >> 8;
+                            c[k] = (uint8_t)v;
+                        }
+                        rgbToFramebuffer(c, fmt, &slow[i * bpp]);
+                    }
+                    paintSame &= fast == slow;
+                }
+        for (int it = 0; it < 500; it++)
+            for (int fmt = 2; fmt <= 4; fmt++) {
+                const unsigned h = 1 + rnd() % 40, w = 1 + rnd() % 20, dx = rnd() % w;
+                std::vector<uint8_t> col(h * 2), ref, alpha(h * w);
+                for (auto &x : col) x = (uint8_t)rnd();
+                for (auto &x : alpha) { const unsigned k = rnd() % 4; x = (uint8_t)(k == 0 ? 0 : k == 1 ? 255 : rnd()); }
+                const uint8_t r = (uint8_t)rnd(), g = (uint8_t)rnd(), b = (uint8_t)rnd();
+                ref = col;
+                for (unsigned dy = 0; dy < h; dy++) {  // blend(): decode, mix by alpha / 255, encode
+                    uint8_t *p = &ref[(h - 1 - dy) * 2];
+                    const unsigned a = alpha[dy * w + dx];
+                    if (!a) continue;
+                    uint8_t c[3] = {r, g, b}, o[3];
+                    if (a < 255) {
+                        framebufferToRGB(p, 1, fmt, 2, o);
+                        for (int k = 0; k < 3; k++) {
+                            const unsigned x = c[k] * a + o[k] * (255 - a);
+                            c[k] = (uint8_t)((x + 1 + (x >> 8)) >> 8);
+                        }
+                    }
+                    rgbToFramebuffer(c, fmt, p);
+                }
+                blendColumn16(&col[(h - 1) * 2], -2, &alpha[dx], (int)w, h, fmt, r, g, b);
+                blendSame &= col == ref;
+            }
+        check(paintSame, "pictures painted: every format and size as pixel by pixel");
+        check(blendSame, "glyphs on 16-bit screens: as blend() pixel by pixel");
+    }
 
     if (argc > 1) {
         FileReader dr(argv[1]);

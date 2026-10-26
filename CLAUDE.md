@@ -98,6 +98,16 @@ works on the code.
 - On `alpha` (2026-10-26), not yet tried on a console: Start on the lookup screen keeps the
   screenshot without saving a word (Start again takes it back; undoing a word save keeps it).
   For collecting screens from games where reading goes wrong, ahead of a box-free reader.
+- On `alpha` (2026-10-26), not yet tried on a console: a speed pass over what changed since the
+  last one (04d3b1e). The shaded-box growth (aeb83e1) had made the box search 2.7x slower (Mario &
+  Luigi top screen ~10 ms -> 130-250 ms on the console): it now grows as a flood fill from the
+  box's edge instead of up to 16 sweeps of a region 3 box-heights tall (same boxes on all 608
+  saved screens; tests/ has no runner for this yet: the benchmark lived in the session's scratch
+  space). Pictures painted and taken, and glyphs on 16-bit screens, with the format chosen once
+  per column instead of per pixel (byte-identical; tested in test_ocr_core). The read log line
+  splits "box" into memory check / boxes / pictures, and no longer loses its end to
+  Utils::Format's 255-character cap; the view line names the screens' framebuffer formats. The
+  memory fix scans the game's code once instead of four times.
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
   README.

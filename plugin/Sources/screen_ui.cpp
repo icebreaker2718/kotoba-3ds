@@ -144,7 +144,13 @@ void ScreenCanvas::blendBlock(int x, int y, int w, int h, const uint8_t *alpha, 
     int x0 = x < 0 ? -x : 0, y0 = y < 0 ? -y : 0;
     int x1 = x + w > width ? width - x : w, y1 = y + h > height ? height - y : h;
     if (x0 >= x1 || y0 >= y1) return;
-    if (bpp_ < 3) {  // 16-bit formats: as blend()
+    if (bpp_ == 2 && fmt_ >= 2) {  // 16-bit formats: a column at a time, the format chosen once
+        for (int dx = x0; dx < x1; dx++)
+            kt::blendColumn16(at(x + dx, y + y0), -2, alpha + (size_t)y0 * w + dx, w, (unsigned)(y1 - y0), fmt_, c.r,
+                              c.g, c.b);
+        return;
+    }
+    if (bpp_ < 3) {  // anything else of 16 bits: as blend()
         kt::Canvas::blendBlock(x, y, w, h, alpha, c);
         return;
     }

@@ -227,11 +227,13 @@ std::string bmpFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
     return out;
 }
 
-void framebufferColumnToPicture(const uint8_t *fb, unsigned n, int format, unsigned bpp, unsigned picBytes, uint8_t *pic) {
+// The pixel format and the picture's size chosen once per column, not per pixel.
+template <int F, unsigned PB>
+static void columnToPicture(const uint8_t *fb, unsigned n, unsigned bpp, uint8_t *pic) {
     for (unsigned i = 0; i < n; i++, fb += bpp) {
         uint8_t rgb[3];
-        framebufferToRGB(fb, 1, format, bpp, rgb);
-        if (picBytes == 3) {
+        pixelToRGB<F>(fb, rgb);
+        if (PB == 3) {
             *pic++ = rgb[0];
             *pic++ = rgb[1];
             *pic++ = rgb[2];
@@ -240,6 +242,58 @@ void framebufferColumnToPicture(const uint8_t *fb, unsigned n, int format, unsig
             *pic++ = (uint8_t)(v & 0xFF);
             *pic++ = (uint8_t)(v >> 8);
         }
+    }
+}
+
+template <unsigned PB>
+static void columnToPictureAs(const uint8_t *fb, unsigned n, int format, unsigned bpp, uint8_t *pic) {
+    switch (format) {
+    case 0: columnToPicture<0, PB>(fb, n, bpp, pic); break;
+    case 1: columnToPicture<1, PB>(fb, n, bpp, pic); break;
+    case 2: columnToPicture<2, PB>(fb, n, bpp, pic); break;
+    case 3: columnToPicture<3, PB>(fb, n, bpp, pic); break;
+    default: columnToPicture<4, PB>(fb, n, bpp, pic); break;
+    }
+}
+
+void framebufferColumnToPicture(const uint8_t *fb, unsigned n, int format, unsigned bpp, unsigned picBytes, uint8_t *pic) {
+    if (picBytes == 3) columnToPictureAs<3>(fb, n, format, bpp, pic);
+    else columnToPictureAs<2>(fb, n, format, bpp, pic);
+}
+
+template <int F>
+static void blendColumn16As(uint8_t *px, int step, const uint8_t *alpha, int alphaStep, unsigned n, uint8_t r,
+                            uint8_t g, uint8_t b) {
+    uint8_t c[3] = {r, g, b}, full[2];
+    rgbToFramebuffer(c, F, full);
+    for (unsigned i = 0; i < n; i++, px += step, alpha += alphaStep) {
+        const unsigned a = *alpha;
+        if (!a) continue;
+        if (a == 255) {
+            px[0] = full[0];
+            px[1] = full[1];
+            continue;
+        }
+        uint8_t o[3];
+        pixelToRGB<F>(px, o);
+        const unsigned k = 255 - a;
+        auto mix = [&](unsigned src, unsigned dst) { const unsigned x = src * a + dst * k; return (x + 1 + (x >> 8)) >> 8; };
+        const unsigned nr = mix(r, o[0]), ng = mix(g, o[1]), nb = mix(b, o[2]);
+        uint16_t v;
+        if (F == 2) v = (uint16_t)(((nr & 0xF8) << 8) | ((ng & 0xFC) << 3) | (nb >> 3));
+        else if (F == 3) v = (uint16_t)(((nr & 0xF8) << 8) | ((ng & 0xF8) << 3) | ((nb & 0xF8) >> 2) | 1);
+        else v = (uint16_t)(((nr & 0xF0) << 8) | ((ng & 0xF0) << 4) | (nb & 0xF0) | 0xF);
+        px[0] = (uint8_t)(v & 0xFF);
+        px[1] = (uint8_t)(v >> 8);
+    }
+}
+
+void blendColumn16(uint8_t *px, int step, const uint8_t *alpha, int alphaStep, unsigned n, int format, uint8_t r,
+                   uint8_t g, uint8_t b) {
+    switch (format) {
+    case 2: blendColumn16As<2>(px, step, alpha, alphaStep, n, r, g, b); break;
+    case 3: blendColumn16As<3>(px, step, alpha, alphaStep, n, r, g, b); break;
+    default: blendColumn16As<4>(px, step, alpha, alphaStep, n, r, g, b); break;
     }
 }
 
@@ -256,40 +310,58 @@ void picturePixelRGB(const uint8_t *pic, unsigned picBytes, uint8_t *rgb) {
     rgb[2] = (uint8_t)((b << 3) | (b >> 2));
 }
 
-void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picBytes, int tone, unsigned shadeFrom,
-                                unsigned keep, int format, unsigned bpp, uint8_t *fb) {
-    if (picBytes == 3 && format == 0 && bpp == 4) {  // the common case, without the per-pixel tests
-        for (unsigned i = 0; i < n; i++, pic += 3, fb += 4) {
-            unsigned r = pic[0], g = pic[1], b = pic[2];
-            if (tone == 1) r = (r >> 3) + (r >> 4), g = (g >> 3) + (g >> 4), b = (b >> 3) + (b >> 4);
-            else if (tone == 2) r >>= 1, g >>= 1, b >>= 1;
-            if (i >= shadeFrom) r = (r * keep) >> 8, g = (g * keep) >> 8, b = (b * keep) >> 8;
+// One picture column onto the framebuffer with the picture's size and the screen's format chosen
+// once (the same pixels as picturePixelRGB + rgbToFramebuffer, without the per-pixel tests).
+template <unsigned PB, int F>
+static void paintColumn(const uint8_t *pic, unsigned n, int tone, unsigned shadeFrom, unsigned keep, unsigned bpp,
+                        uint8_t *fb) {
+    for (unsigned i = 0; i < n; i++, pic += PB, fb += bpp) {
+        unsigned r, g, b;
+        if (PB == 3) {
+            r = pic[0], g = pic[1], b = pic[2];
+        } else {
+            const unsigned v = pic[0] | (pic[1] << 8), r5 = (v >> 11) & 31, g6 = (v >> 5) & 63, b5 = v & 31;
+            r = (r5 << 3) | (r5 >> 2), g = (g6 << 2) | (g6 >> 4), b = (b5 << 3) | (b5 >> 2);
+        }
+        if (tone == 1) r = (r >> 3) + (r >> 4), g = (g >> 3) + (g >> 4), b = (b >> 3) + (b >> 4);  // ~19%
+        else if (tone == 2) r >>= 1, g >>= 1, b >>= 1;                                          // 50%
+        if (i >= shadeFrom) r = (r * keep) >> 8, g = (g * keep) >> 8, b = (b * keep) >> 8;
+        if (F == 0) {  // RGBA8: A, B, G, R
             fb[0] = 0xFF;
             fb[1] = (uint8_t)b;
             fb[2] = (uint8_t)g;
             fb[3] = (uint8_t)r;
-        }
-        return;
-    }
-    for (unsigned i = 0; i < n; i++, pic += picBytes, fb += bpp) {
-        uint8_t c[3];
-        picturePixelRGB(pic, picBytes, c);
-        for (int k = 0; k < 3; k++) {
-            unsigned v = c[k];
-            if (tone == 1) v = (v >> 3) + (v >> 4);  // ~19%
-            else if (tone == 2) v >>= 1;            // 50%
-            if (i >= shadeFrom) v = (v * keep) >> 8;
-            c[k] = (uint8_t)v;
-        }
-        if (format == 0 && bpp == 4) {  // RGBA8: A, B, G, R
-            fb[0] = 0xFF;
-            fb[1] = c[2];
-            fb[2] = c[1];
-            fb[3] = c[0];
+        } else if (F == 1) {  // BGR8
+            fb[0] = (uint8_t)b;
+            fb[1] = (uint8_t)g;
+            fb[2] = (uint8_t)r;
         } else {
-            rgbToFramebuffer(c, format, fb);
+            uint16_t v;
+            if (F == 2) v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+            else if (F == 3) v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xF8) << 3) | ((b & 0xF8) >> 2) | 1);
+            else v = (uint16_t)(((r & 0xF0) << 8) | ((g & 0xF0) << 4) | (b & 0xF0) | 0xF);
+            fb[0] = (uint8_t)(v & 0xFF);
+            fb[1] = (uint8_t)(v >> 8);
         }
     }
+}
+
+template <unsigned PB>
+static void paintColumnAs(const uint8_t *pic, unsigned n, int tone, unsigned shadeFrom, unsigned keep, int format,
+                          unsigned bpp, uint8_t *fb) {
+    switch (format) {
+    case 0: paintColumn<PB, 0>(pic, n, tone, shadeFrom, keep, bpp, fb); break;
+    case 1: paintColumn<PB, 1>(pic, n, tone, shadeFrom, keep, bpp, fb); break;
+    case 2: paintColumn<PB, 2>(pic, n, tone, shadeFrom, keep, bpp, fb); break;
+    case 3: paintColumn<PB, 3>(pic, n, tone, shadeFrom, keep, bpp, fb); break;
+    default: paintColumn<PB, 4>(pic, n, tone, shadeFrom, keep, bpp, fb); break;
+    }
+}
+
+void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picBytes, int tone, unsigned shadeFrom,
+                                unsigned keep, int format, unsigned bpp, uint8_t *fb) {
+    if (picBytes == 3) paintColumnAs<3>(pic, n, tone, shadeFrom, keep, format, bpp, fb);
+    else paintColumnAs<2>(pic, n, tone, shadeFrom, keep, format, bpp, fb);
 }
 
 // ---------------------------------------------------------------------------
