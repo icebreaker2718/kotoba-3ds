@@ -458,6 +458,13 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
         if (inside) continue;
         unsigned x0 = b.x > 2 ? b.x - 2 : 0, y0 = b.y > 2 ? b.y - 2 : 0;
         unsigned x1 = b.x + b.w + 2 < w ? b.x + b.w + 2 : w, y1 = b.y + b.h + 2 < h ? b.y + b.h + 2 : h;
+        if (b.shaded && b.inkW && b.inkH) {  // a rounded shaded box: just around the letters, not its frame
+            const unsigned m = 6;
+            x0 = std::max(x0, b.inkX > m ? b.inkX - m : 0);
+            y0 = std::max(y0, b.inkY > m ? b.inkY - m : 0);
+            x1 = std::min(x1, b.inkX + b.inkW + m);
+            y1 = std::min(y1, b.inkY + b.inkH + m);
+        }
         std::string e;
         if (!ocr.read(grey, w, h, lines, e, progress, x0, y0, x1 - x0, y1 - y0)) continue;
         reads.push_back({&b, (int)bi, lines});

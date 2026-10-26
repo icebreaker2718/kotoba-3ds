@@ -10,6 +10,10 @@ namespace kt {
 struct TextBox {
     unsigned x = 0, y = 0, w = 0, h = 0;
     uint8_t r = 0, g = 0, b = 0;  // the box's colour
+    // Where its letters are: the box's holes, not what reaches in from outside it (a rounded
+    // corner, the frame). Reading just this keeps the frame out of the text lines.
+    unsigned inkX = 0, inkY = 0, inkW = 0, inkH = 0;
+    bool shaded = false;  // grew past its colour (a gradient): read around inkX..inkH only
     float score = 0;
 };
 
