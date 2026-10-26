@@ -1866,6 +1866,27 @@ static bool ArmImmediate(u32 v, u32 &enc) {  // ARM data-processing immediate (8
     return false;
 }
 
+// A game whose SDK sizes its heap some other way: its code goes to the SD card once (only this
+// game's own copy, on this console), so that way can be looked at and added.
+static void SaveCodeForDiagnosis() {
+    const std::string path = std::string(kRootDir) + "/code_" + TitleIdHex() + ".bin";
+    if (File::Exists(path) == 1) return;
+    File f;
+    if (File::Open(f, path, File::WRITE | File::CREATE) != File::SUCCESS) return;
+    const u32 size = Process::GetTextSize();
+    const u32 chunk = 16 * 1024;
+    u8 *buf = (u8 *)malloc(chunk);
+    bool ok = buf != nullptr;
+    for (u32 done = 0; ok && done < size; done += chunk) {
+        const u32 n = std::min(chunk, size - done);
+        memcpy(buf, (const void *)(0x00100000 + done), n);
+        ok = f.Write(buf, n) == File::SUCCESS;
+    }
+    free(buf);
+    f.Close();
+    LogOcr(Utils::Format("boot: saved the game's code for a look (%lu KB) to %s", (unsigned long)(size / 1024), path.c_str()));
+}
+
 static void GiveGameItsMemory() {
     PluginHeader *h = FwkSettings::Header;
     if (!h) return;
@@ -1904,7 +1925,10 @@ static void GiveGameItsMemory() {
                 found++;
             }
         }
-        if (found != 1) why = Utils::Format("SDK heap sizing found %lu times", (unsigned long)found);
+        if (found != 1) {
+            why = Utils::Format("SDK heap sizing found %lu times", (unsigned long)found);
+            SaveCodeForDiagnosis();
+        }
     }
     if (why.empty() && limit < want) {
         // the high word is what the kernel writes to APPMEMALLOC: keep it as it is
