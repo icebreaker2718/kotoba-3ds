@@ -95,6 +95,9 @@ works on the code.
      (00040000001AE200), Corpse Party BR (000400000015D500) and Mario & Luigi (0004000000060600)
      each asked "in use" (resource-limit current value) once at start; 逆転裁判123
      (0004000000108800) asks nothing and is covered by the raised limit alone. All four start.
+- On `alpha` (2026-10-26), not yet tried on a console: Start on the lookup screen keeps the
+  screenshot without saving a word (Start again takes it back; undoing a word save keeps it).
+  For collecting screens from games where reading goes wrong, ahead of a box-free reader.
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
   README.

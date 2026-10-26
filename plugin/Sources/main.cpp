@@ -646,6 +646,7 @@ static void MarkKnown(kt::LookupView &v) {
 // to, and the lookup's dictionary reads would wait behind it). FinishScreenshot() waits for it.
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
+static bool g_shotKept = false;  // Start in the lookup: keep its screenshot even with no word saved
 
 struct ShotJob {
     char path[96];
@@ -895,7 +896,7 @@ static void UndoSave(kt::LookupView &v, const std::string line) {
             g_known.remove(f);
     v.unmarkSaved();
     v.refreshKnown();
-    if (!v.anySaved()) g_lookupShot = "";  // nothing saved from this lookup: no screenshot
+    if (!v.anySaved() && !g_shotKept) g_lookupShot = "";  // nothing saved or kept: no screenshot
     int n = 0;
     for (const std::string &l : lines) n += l[0] != '#';
     v.setStatus("Took back " + (forms.empty() ? std::string("the word") : forms[0]) +
@@ -909,9 +910,33 @@ static void SaveOrUndo(kt::LookupView &v) {
     else SaveSelected(v);
 }
 
+// Start: keeps this lookup's screenshot without saving a word (to look at the screen later), or
+// takes that back. A word saved from the lookup keeps the screenshot either way.
+static void KeepScreenshot(kt::LookupView &v) {
+    if (g_shotKept) {
+        g_shotKept = false;
+        if (v.anySaved()) {
+            v.setStatus("The screenshot stays: a word was saved with it", kGreyInk);
+        } else {
+            g_lookupShot = "";
+            v.setStatus("Screenshot won't be saved", kGreyInk);
+        }
+        return;
+    }
+    const std::string name = SaveScreenshot();
+    if (name.empty()) {
+        v.setStatus("No picture of the screen to save", kWarn);
+        return;
+    }
+    g_shotKept = true;
+    LogOcr("screenshot kept without a word: " + name);
+    v.setStatus("Screenshot will be saved: shots/" + name + " (Start: undo)", kGood);
+}
+
 // Runs the lookup screens until B / Close. Tap a character (text on the touchscreen); Circle Pad:
 // words and rows; D-pad up/down (or C-stick): scroll the entry; D-pad left/right or L/R: the other
-// matches; A save (again on a word just saved: undo), X hide, Y mark known.
+// matches; A save (again on a word just saved: undo), X hide, Y mark known, Start keep the
+// screenshot without saving a word.
 static u64 g_viewOpenedAt = 0;  // when the read finished, for the log
 static void RunLookupView(kt::LookupView &v) {
     g_hide = 0;
@@ -937,6 +962,7 @@ static void RunLookupView(kt::LookupView &v) {
         if (down & Key::A) { SaveOrUndo(v); changed = true; }
         if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
         if (down & Key::Y) { MarkKnown(v); changed = true; }
+        if (down & Key::Start) { KeepScreenshot(v); changed = true; }
         if (down & (Key::L | Key::DPadLeft)) moved |= v.page(-1);
         if (down & (Key::R | Key::DPadRight)) moved |= v.page(1);
         // moving: on the press, then repeating while held
@@ -1223,6 +1249,7 @@ static void ReadAndLookUp(int mode) {
     g_readTop = mode != kReadBottom;
     g_readBottom = mode != kReadTop;
     g_lookupShot = "";
+    g_shotKept = false;
     std::vector<std::string> blocks;
     std::string error;
     if (!OpenDict()) {
@@ -1239,6 +1266,7 @@ static void ReadAndLookUp(int mode) {
     RestoreScreens();
     WriteScreenshotLater();  // the game goes on while it is written
     g_lookupShot = "";
+    g_shotKept = false;
     RestoreCpu();
     WaitForRelease();
     ResumeGame();
