@@ -3,6 +3,9 @@
 An in-game Japanese dictionary for a modded (New) 3DS / 2DS, plus a PC script that turns the
 words you save into Anki cards with the screenshot and the sentence.
 
+**Latest: 1.1.0.** More games start with the plugin, and Pokémon's speech bubbles are read
+whole. See the [changelog](CHANGELOG.md) for what changed in each release.
+
 Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-vn-ocr) model she built. Without it this project would not be possible!
 
 ## Features
@@ -303,6 +306,10 @@ either returning an audio file or Yomitan's JSON audio-source list:
 
 ## Troubleshooting
 
+- **The game crashes or shows an error at start**: update to the latest release first; it
+  fixes this for most games. If it still happens, turn the plugin loader off in the Rosalina
+  menu to play, and please report the game with `SD:/3ds/kotoba3ds/ocr_log.txt` (its `boot:`
+  lines say what the plugin did with the game's memory).
 - **Menu doesn't open**: make sure the plugin loader is enabled, the file is named
   `default.3gx` (or sits in the game's title ID folder), and you waited ~5 s after the game
   started.

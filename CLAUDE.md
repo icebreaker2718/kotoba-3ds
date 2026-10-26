@@ -13,6 +13,10 @@ works on the code.
 - **Experiments the owner wants kept away from the test branch's users go to `alpha`.** No
   release for it: CI's run artifact goes straight onto the owner's SD card. It moves to `test`
   only when the owner says so.
+- **Releases (there are real users now):** merging to `main` publishes the release. Before it,
+  bump the version in `plugin/Kotoba3DS.plgInfo` (and the `PluginMenu` numbers in `main.cpp`),
+  add the user-facing changes to `CHANGELOG.md` (and README if needed), and have the owner read
+  them before pushing.
 - **When unsure about a design decision, stop and ask** before building it.
 - **Anonymity:** no personal information (names, home paths, emails) in commits or files.
 - **Commits** are authored `Claude <noreply@anthropic.com>` and end with the attribution lines the
@@ -83,18 +87,16 @@ works on the code.
 
 ## Status (2026-10-26)
 
-- `main` = the confirmed release (lid-close fix, no OCR needed on the PC, flag retry,
-  overlapping-box OCR fixes, saved-word spelling option, README feature list).
-- On `test`, waiting for the owner's hardware check (the SD card has this build):
-  1. Shaded text boxes (Pokémon Sun/Moon bubbles fade top to bottom; only the first row was
-     read). Backtest: 4 other screens changed, all better.
-  2. The general memory fix (confirmed by the owner on `alpha`, 2026-10-26): the commit limit is
-     raised by the plugin's share, and every GetSystemInfo / GetProcessInfo / resource-limit call
-     in the game's code is patched to leave the share out of the answer (only answers measured
-     at boot to include it; all calls or none). Replaces the old SDK-formula patch. 大逆転裁判2
-     (00040000001AE200), Corpse Party BR (000400000015D500) and Mario & Luigi (0004000000060600)
-     each asked "in use" (resource-limit current value) once at start; 逆転裁判123
-     (0004000000108800) asks nothing and is covered by the raised limit alone. All four start.
+- `main` = release 1.1.0: the general memory fix (commit limit raised by the plugin's share,
+  and every GetSystemInfo / GetProcessInfo / resource-limit call in the game's code patched to
+  leave the share out of the answer; only answers measured at boot to include it; all calls or
+  none) and shaded text boxes (Pokémon Sun/Moon). Confirmed on the owner's console with
+  大逆転裁判2 (00040000001AE200), Corpse Party BR (000400000015D500), 逆転裁判123
+  (0004000000108800) and Mario & Luigi (0004000000060600). Before it, 1.0.0 (unversioned
+  releases until then).
+- On `alpha`, not yet tried on a console: Start on the lookup screen keeps the screenshot
+  without saving a word (Start again takes it back; undoing a word save keeps it). For
+  collecting screens where reading goes wrong, ahead of a reader that doesn't need text boxes.
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
   README.

@@ -159,6 +159,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4  # for the version number in plugin/Kotoba3DS.plgInfo
       - uses: actions/download-artifact@v4
         with:
           path: out
@@ -169,11 +170,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           ls -la out
+          VERSION=$(awk '/Major:/{a=$2} /Minor:/{b=$2} /Revision:/{c=$2} END{print a"."b"."c}' plugin/Kotoba3DS.plgInfo)
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
           gh release create latest out/Kotoba3DS.3gx out/dict.bin out/Kotoba3DS-ocr-model.zip out/Kotoba3DS-2MiB-test.3gx \
             --target "$GITHUB_SHA" --latest \
-            --title "Kotoba3DS (latest build)" \
-            --notes "Built automatically from ${GITHUB_SHA::7} on $(date -u +%Y-%m-%d).
+            --title "Kotoba3DS $VERSION" \
+            --notes "Kotoba3DS $VERSION, built from ${GITHUB_SHA::7} on $(date -u +%Y-%m-%d). What's new in this version: [CHANGELOG.md](https://github.com/icebreaker2718/kotoba-3ds/blob/main/CHANGELOG.md).
 
           1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\` (every game), or \`/luma/plugins/<TitleID>/Kotoba3DS.3gx\` for one game.
           2. Copy **dict.bin** to \`/3ds/kotoba3ds/dict.bin\`.

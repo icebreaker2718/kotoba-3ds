@@ -2032,7 +2032,7 @@ void PatchProcess(FwkSettings &settings) {
 
 
 int main(void) {
-    PluginMenu *menu = new PluginMenu("Kotoba3DS", 3, 0, 0,
+    PluginMenu *menu = new PluginMenu("Kotoba3DS", 1, 1, 0,  // the version: as in Kotoba3DS.plgInfo
                                       "In-game Japanese dictionary that reads the screen and saves words for Anki.");
     menu->SynchronizeWithFrame(true);
     menu->OnOpening = OnMenuOpening;  // Select: the plugin's own menu, not CTRPF's list
