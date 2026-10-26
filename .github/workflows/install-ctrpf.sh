@@ -53,6 +53,12 @@ if [ ! -f "$DKP/libctrpf/lib/libctrpf.a" ]; then
       if [ -z "$init" ]; then note "libctrpf ($url)" "start-up heap line not found"; continue; fi
       sed -i 's/size = 0x100000; \/\/\/< Mostly used for Search/size = 0x20000; \/\/\/< Mostly used for Search (Kotoba3DS: 128 KB)/' $init
       grep -q "size = 0x20000;" $init || { note "libctrpf ($url)" "could not shrink the start-up heap"; continue; }
+      # plugin/Sources/mem_hooks.s finds its way back through the HookContext CTRPF keeps in TLS
+      # slot 15 (tls + 0x3C): stop here if this copy of CTRPF does it differently
+      hm=$(find ctrpf-src/Library/source -name HookManager.cpp | head -1)
+      if [ -z "$hm" ] || ! grep -q 'add    r5, r5, #0x3C' "$hm"; then
+        fail "libctrpf ($url)" "hooks don't keep their context in TLS slot 15; mem_hooks.s needs updating"; exit 1
+      fi
       if make -C ctrpf-src/Library install >ctrpf-build.log 2>&1; then
         ok=1; echo "libctrpf built from $url"; break
       else

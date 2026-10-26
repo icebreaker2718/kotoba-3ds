@@ -10,6 +10,7 @@
 #include <CTRPluginFramework.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <ctime>
 #include <string>
@@ -24,6 +25,7 @@
 #include "core/hotkeys.hpp"
 #include "core/known_words.hpp"
 #include "core/local_ocr.hpp"
+#include "core/mem_share.hpp"
 #include "core/lookup_view.hpp"
 #include "core/menu_view.hpp"
 #include "core/net.hpp"
@@ -1795,8 +1797,19 @@ static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's o
     return false;
 }
 
+static void LogMemoryHooks(const char *when);  // below, with the memory fix
+
 static void Watcher(void) {
     if (SleepRequested()) return;  // the console is going to sleep: not now
+    {   // how the game used the patched memory calls: once early on, once after some play
+        static u64 started = osGetTime();
+        static int reported = 0;
+        const u64 ms = osGetTime() - started;
+        if ((reported == 0 && ms > 30000) || (reported == 1 && ms > 600000)) {
+            LogMemoryHooks(reported == 0 ? "30 s in" : "10 min in");
+            reported++;
+        }
+    }
     if (g_shotDeferred) {
         g_shotDeferred = false;
         StartScreenshotThread();
@@ -1848,24 +1861,146 @@ static void LogBootMemory() {
 // Giving the game back the memory the plugin takes
 //
 // On a New 3DS, Luma maps the plugin's memory (5 MiB) into the game and it counts against the
-// game's 64 MB budget (its "commit" limit). Nintendo's SDK sizes a game's heap at start as
-//     heap = min(APPMEMALLOC, 64 MB) - memory already committed - device memory
-// so the heap comes out 5 MiB short; a game that needs all of it (大逆転裁判2) fails an
-// allocation and crashes. A game that asks for fixed amounts instead (逆転裁判123) goes over its
-// commit limit and crashes the same way. The console has the memory (the app region is 124 MB), so
-// before the game's first instruction: raise the game's commit limit by the plugin's size, and,
-// where the game uses it, make the SDK's formula leave the plugin's share out of "already
-// committed". Done only when the numbers say it is safe, and the formula only when its
-// instructions are found exactly once.
+// game's 64 MB budget (its "commit" limit). A game that asks for fixed amounts (逆転裁判123: a
+// 512 KB heap and 56.5 MB of device memory) goes over that limit; one that sizes its heap from
+// what's left (大逆転裁判2: min(APPMEMALLOC, 64 MB) - memory in use - device memory) comes out
+// 5 MiB short. Either way the game fails an allocation at start. The console has the memory (the
+// app region is 124 MB), so before the game's first instruction:
+//   1. the game's commit limit is raised by the plugin's share (fixed amounts now fit), and
+//   2. every system call the game could use to ask how much memory it uses, or what its limit is,
+//      is patched to leave the plugin's share out of the answer (mem_hooks.s, core/mem_share.cpp).
+// The game then sees a normal 64 MB console whichever way its start-up code was written. Step 2
+// only follows step 1, and either all the calls found are patched or none: the game must never be
+// told it has memory it can't get. Only answers measured at boot to include the share are changed.
 // ---------------------------------------------------------------------------
 static s64 g_commitLimitBefore = -1;  // to put back when the game exits
 
-static bool ArmImmediate(u32 v, u32 &enc) {  // ARM data-processing immediate (8 bits rotated)
-    for (u32 rot = 0; rot < 16; rot++) {
-        u32 r = (v << (2 * rot)) | (rot ? v >> (32 - 2 * rot) : 0);  // rotate left by 2*rot
-        if (r < 256) { enc = (rot << 8) | r; return true; }
+static kt::memshare::Plan g_memPlan;
+static kt::memshare::Counts g_memCounts;
+static int g_memHookSites = 0;  // calls patched (0: none)
+
+static_assert(offsetof(HookContext, returnAddress) == 12, "mem_hooks.s reads returnAddress at +12");
+
+extern "C" {
+void KotobaHookGetSystemInfo(void);
+void KotobaHookGetProcessInfo(void);
+void KotobaHookLimitValues(void);
+void KotobaHookCurrentValues(void);
+
+// called by the stand-ins in mem_hooks.s, on the game's threads, right after the real call
+void KotobaMemHookAdjust(u32 svc, u32 *regs) {
+    if (svc == kt::memshare::kLimitValues || svc == kt::memshare::kCurrentValues)
+        kt::memshare::adjustLimits(g_memPlan, g_memCounts, svc, (s32)regs[0], (s64 *)(uintptr_t)regs[4],
+                                   (const u32 *)(uintptr_t)regs[6], (s32)regs[7]);
+    else
+        kt::memshare::adjustRegisters(g_memPlan, g_memCounts, svc, regs);
+}
+}
+
+// alpha only: each game's code goes to the SD card once, so how it asks about memory can be read
+static void SaveCodeForDiagnosis() {
+    const std::string path = std::string(kRootDir) + "/code_" + TitleIdHex() + ".bin";
+    if (File::Exists(path) == 1) return;
+    File f;
+    if (File::Open(f, path, File::WRITE | File::CREATE) != File::SUCCESS) return;
+    const u32 size = Process::GetTextSize();
+    const u32 chunk = 16 * 1024;
+    u8 *buf = (u8 *)malloc(chunk);
+    bool ok = buf != nullptr;
+    for (u32 done = 0; ok && done < size; done += chunk) {
+        const u32 n = std::min(chunk, size - done);
+        memcpy(buf, (const void *)(0x00100000 + done), n);
+        ok = f.Write(buf, n) == File::SUCCESS;
     }
-    return false;
+    free(buf);
+    f.Close();
+    LogOcr(Utils::Format("boot: saved the game's code for a look (%lu KB) to %s", (unsigned long)(size / 1024),
+                         path.c_str()));
+}
+
+// Where the old fix would have patched the SDK's heap formula (logged only: the hooks replace it)
+static u32 FindHeapFormula(u32 &found) {
+    const u32 *text = (const u32 *)0x00100000;
+    const u32 words = Process::GetTextSize() / 4;
+    u32 at = 0;
+    found = 0;
+    for (u32 i = 0; i + 2 < words; i++) {  // cmp rN, #0x4000000 / movhi rN, #0x4000000 / sub r0, rN, r0
+        u32 w0 = text[i];
+        if ((w0 & 0xFFF0FFFF) != 0xE3500301) continue;
+        u32 n = (w0 >> 16) & 0xF;
+        if (text[i + 1] == (0x83A00301 | (n << 12)) && text[i + 2] == (0xE0400000 | (n << 16))) {
+            at = 0x00100000 + i * 4;
+            found++;
+        }
+    }
+    return at;
+}
+
+// Step 2: patch the memory questions. Returns what happened, for the log.
+static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
+    using namespace kt::memshare;
+    // which answers include the plugin's share, asked now with the plugin's own (unpatched) calls
+    Plan plan;
+    plan.plugin = plugin;
+    plan.limits = true;  // committed includes it (checked by the caller) and the limit was raised by it
+    std::string measured;
+    for (int type = 0; type < kProcessInfoTypes; type++) {
+        s64 v = -1;
+        if (R_SUCCEEDED(svcGetProcessInfo(&v, CUR_PROCESS_HANDLE, (u32)type)))
+            plan.processInfo[type] = countsPlugin(v, committed, plugin);
+        measured += Utils::Format("%sprocess %d: %ld KB%s", type ? ", " : "", type, (long)(v / 1024),
+                                  plan.processInfo[type] ? " (has it)" : "");
+    }
+    s64 appUsed = -1;
+    if (R_SUCCEEDED(svcGetSystemInfo(&appUsed, 0, 1))) plan.appUsed = countsPlugin(appUsed, committed, plugin);
+    measured += Utils::Format(", app region used %ld KB%s", (long)(appUsed / 1024), plan.appUsed ? " (has it)" : "");
+
+    // find the calls in the game's code
+    struct Kind { u32 svc; void (*standIn)(void); const char *name; };
+    static const Kind kinds[] = {
+        {kGetSystemInfo, KotobaHookGetSystemInfo, "system info"},
+        {kGetProcessInfo, KotobaHookGetProcessInfo, "process info"},
+        {kLimitValues, KotobaHookLimitValues, "limit"},
+        {kCurrentValues, KotobaHookCurrentValues, "in use"},
+    };
+    constexpr int kMaxSites = 16;
+    static Hook hooks[kMaxSites];
+    u32 siteAt[kMaxSites];
+    void (*siteFn[kMaxSites])(void);
+    int sites = 0;
+    std::string found;
+    const u32 *text = (const u32 *)0x00100000;
+    const u32 words = Process::GetTextSize() / 4;
+    for (const Kind &k : kinds) {
+        int n = 0, skipped = 0;
+        for (u32 i = 0; i < words; i++) {
+            if (text[i] != svcInstruction(k.svc)) continue;
+            if (!isPatchableCall(text, words, i, k.svc)) { skipped++; continue; }
+            if (sites == kMaxSites) return measured + "; not patched: more calls than expected";
+            siteAt[sites] = 0x00100000 + i * 4;
+            siteFn[sites] = k.standIn;
+            sites++;
+            n++;
+        }
+        // a call left as it is would give the game a second, different answer
+        if (skipped) return measured + Utils::Format("; not patched: a %s call can't be patched", k.name);
+        found += Utils::Format("%s%s %d", found.empty() ? "" : ", ", k.name, n);
+    }
+    if (sites == 0) return measured + "; the game asks none of these";
+
+    // all or nothing
+    g_memPlan = plan;
+    for (int s = 0; s < sites; s++) {
+        hooks[s].Initialize(siteAt[s], (u32)siteFn[s]).SetFlags(0);
+        HookResult r = hooks[s].Enable();
+        if (r != HookResult::Success) {
+            for (int t = 0; t < s; t++) hooks[t].Disable();
+            g_memPlan = Plan();
+            return measured + Utils::Format("; not patched: hook %d failed (%d)", s, (int)r);
+        }
+    }
+    g_memHookSites = sites;
+    return measured + "; patched " + found;
 }
 
 static void GiveGameItsMemory() {
@@ -1883,17 +2018,15 @@ static void GiveGameItsMemory() {
     svcGetResourceLimitCurrentValues(&committed, rl, &t, 1);
     const u32 codeSize = Process::GetTextSize() + Process::GetRoDataSize() + Process::GetRwDataSize();
     std::string why;
-    // only for a game told it has at most 64 MB (the SDK's cap, so the formula's cap does nothing),
-    // whose commit already holds the plugin's block, with room left in the app region
+    // only for a game told it has at most 64 MB (the SDK's cap), whose commit already holds the
+    // plugin's block, with room left in the app region
     const s64 want = (s64)appMemAlloc + plugin;
     if (appMemAlloc == 0 || appMemAlloc > 0x4000000) why = "APPMEMALLOC above 64 MB";
     else if (limit < (s64)appMemAlloc) why = "unusual commit limit";
     else if (committed < (s64)(codeSize + plugin)) why = "the plugin isn't counted in the game's memory";
     else if (want > appRegion) why = "no room in the app region";
-    // 1. The commit limit: raised by the plugin's share, so a game that asks for fixed amounts
-    //    (逆転裁判123: a 512 KB heap and 56.5 MB of device memory) gets them. A game that sizes
-    //    its heap with the SDK's formula reads APPMEMALLOC, which stays as it is: for it this
-    //    alone changes nothing.
+    // 1. The commit limit: at least APPMEMALLOC + the plugin's share. Taking the share off both
+    //    the limit and the memory in use (step 2) leaves the game's free memory exactly as it is.
     std::string raised;
     if (why.empty() && limit < want) {
         // the high word is what the kernel writes to APPMEMALLOC: keep it as it is
@@ -1906,38 +2039,29 @@ static void GiveGameItsMemory() {
         }
     }
     svcCloseHandle(rl);
+    u32 formulaFound = 0;
+    u32 formulaAt = FindHeapFormula(formulaFound);
+    std::string formula = formulaFound == 1 ? Utils::Format("SDK heap formula at %08lX, not patched", (unsigned long)formulaAt)
+                                            : Utils::Format("SDK heap formula found %lu times", (unsigned long)formulaFound);
+    SaveCodeForDiagnosis();
     if (!why.empty()) {
-        LogOcr("boot: memory left as it is: " + why);
+        LogOcr("boot: memory left as it is: " + why + " (" + formula + ")");
         return;
     }
-    // 2. The SDK's heap formula, when the game uses it: make it leave the plugin's share out of
-    //    "already committed".  cmp rN, #0x4000000 / movhi rN, #0x4000000 / sub r0, rN, r0
-    u32 subImm = 0, at = 0, found = 0;
-    std::string formula;
-    if (!ArmImmediate(plugin, subImm)) formula = "plugin size not encodable";
-    else {
-        const u32 *text = (const u32 *)0x00100000;
-        const u32 words = Process::GetTextSize() / 4;
-        for (u32 i = 0; i + 2 < words; i++) {
-            u32 w0 = text[i];
-            if ((w0 & 0xFFF0FFFF) != 0xE3500301) continue;
-            u32 n = (w0 >> 16) & 0xF;
-            if (text[i + 1] == (0x83A00301 | (n << 12)) && text[i + 2] == (0xE0400000 | (n << 16))) {
-                at = 0x00100000 + i * 4;
-                found++;
-            }
-        }
-        if (found == 1) {
-            Process::Patch(at, 0xE2400000 | subImm);  // sub r0, r0, #plugin  (committed - plugin)
-            Process::Patch(at + 4, 0xE1A00000);       // nop (the 64 MB cap can't apply: checked above)
-            formula = Utils::Format("heap sizing at %08lX", (unsigned long)at);
-        } else {
-            formula = Utils::Format("SDK heap sizing found %lu times (fixed sizes, or sized another way)",
-                                    (unsigned long)found);
-        }
-    }
-    LogOcr(Utils::Format("boot: gave the game back %lu KB (%s; %s)", (unsigned long)(plugin / 1024),
-                         raised.empty() ? "commit limit already high enough" : raised.c_str(), formula.c_str()));
+    // 2. The questions about memory: only once the limit really is at least APPMEMALLOC + the share
+    std::string hooks = HookMemoryQuestions(plugin, committed);
+    LogOcr(Utils::Format("boot: gave the game back %lu KB (%s; %s; %s)", (unsigned long)(plugin / 1024),
+                         raised.empty() ? "commit limit already high enough" : raised.c_str(), formula.c_str(),
+                         hooks.c_str()));
+}
+
+// how often the patched calls changed an answer, a while after start (the log shows whether the
+// game asked, and which way)
+static void LogMemoryHooks(const char *when) {
+    if (g_memHookSites == 0) return;
+    LogOcr(Utils::Format("memory (%s): answers changed: system info %lu, process info %lu, limit %lu, in use %lu",
+                         when, (unsigned long)g_memCounts.systemInfo, (unsigned long)g_memCounts.processInfo,
+                         (unsigned long)g_memCounts.limitValues, (unsigned long)g_memCounts.currentValues));
 }
 
 void OnProcessExit(void) {

@@ -33,13 +33,17 @@ test_ocr_core: test_ocr_core.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes
 test_ui: test_ui.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
 	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_ui.cpp $(CORE) $(LDLIBS)
 
-run: test_wrap test_core test_ocr_core test_ui
+test_memshare: test_memshare.cpp ../plugin/Sources/core/mem_share.cpp ../plugin/Includes/core/mem_share.hpp
+	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_memshare.cpp ../plugin/Sources/core/mem_share.cpp
+
+run: test_wrap test_core test_ocr_core test_ui test_memshare
+	./test_memshare
 	./test_core $(DICT)
 	./test_wrap $(DICT)
 	./test_ocr_core $(DICT)
 	./test_ui $(DICT)
 
 clean:
-	rm -f test_core test_net bmp_tool test_wrap test_ocr_core test_ui libvocr.a vocr_*.o
+	rm -f test_memshare test_core test_net bmp_tool test_wrap test_ocr_core test_ui libvocr.a vocr_*.o
 
 .PHONY: run clean

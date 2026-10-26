@@ -131,6 +131,9 @@ jobs:
           tests/build_arm_cli.sh
           OCR_PROBE="qemu-arm -cpu cortex-a15 $PWD/tests/ocr_cli_arm" python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr
 
+      - name: Test the memory-call stand-ins on an ARM CPU (under qemu-arm)
+        run: tests/build_memhooks_arm.sh
+
       - name: Test the screenshot converter (compact upload)
         run: python tests/test_bmp.py
 

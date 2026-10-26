@@ -10,6 +10,9 @@ works on the code.
 - **New work goes to the `test` branch.** Nothing new reaches `main` until the owner has
   confirmed it on real hardware and says to merge. Docs-only changes (README, this file) may go
   straight to `main`; then merge `main` into `test`.
+- **Experiments the owner wants kept away from the test branch's users go to `alpha`.** No
+  release for it: CI's run artifact goes straight onto the owner's SD card. It moves to `test`
+  only when the owner says so.
 - **When unsure about a design decision, stop and ask** before building it.
 - **Anonymity:** no personal information (names, home paths, emails) in commits or files.
 - **Commits** are authored `Claude <noreply@anthropic.com>` and end with the attribution lines the
@@ -47,8 +50,10 @@ works on the code.
 
 - `plugin/Sources/main.cpp`: menus, hotkeys, `ReadScreens`, saving, screenshots (QOI, written on
   their own thread), lid-close handling, known words, network to the PC, and at boot
-  `GiveGameItsMemory` (raises the game's commit limit by the plugin's 5 MiB; patches the SDK's
-  heap formula where found).
+  `GiveGameItsMemory` (raises the game's commit limit by the plugin's 5 MiB; on `test`, patches
+  the SDK's heap formula where found; on `alpha`, instead patches the game's memory system calls:
+  `mem_hooks.s` stand-ins + `core/mem_share.cpp`, tested by `tests/test_memshare.cpp` and
+  `tests/build_memhooks_arm.sh` under qemu).
 - `plugin/Sources/core/` (platform independent, also built natively for tests):
   `textbox.cpp` (finds flat-colour text boxes; grows shaded ones), `local_ocr.cpp`
   (`localReadScreen`: reads each box, dedupes overlapping boxes, whole-screen fallback),
@@ -87,6 +92,13 @@ works on the code.
      device memory, which no longer fit with the plugin's 5 MiB counted. The commit limit is now
      raised whenever safe, not only when the SDK heap formula is found. Also check Mario & Luigi
      (0004000000060600) still starts.
+- On `alpha` (2026-10-26), not yet tried on a console: the general memory fix. Every
+  GetSystemInfo / GetProcessInfo / resource-limit call in the game's code is hooked so the plugin's
+  share is left out of the answer (only answers measured at boot to include it; all calls or
+  none). Replaces the formula patch there, so 大逆転裁判2 (00040000001AE200) is the key check, plus
+  逆転裁判123, Mario & Luigi, and 000400000015D500 (new; crashed at start on `test`). Alpha also
+  saves each game's code once to `/3ds/kotoba3ds/code_<titleID>.bin`; `memory (...)` log lines
+  show how often answers were changed.
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
   README.

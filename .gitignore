@@ -21,3 +21,5 @@ tests/ocr_cli_arm
 tests/arm_build/
 tests/test_lens
 tests/test_ui
+tests/test_memshare
+tests/test_memhooks_arm
