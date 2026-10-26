@@ -159,9 +159,13 @@ static void testPatchableCall() {
     CHECK(isPatchableCall(wrapper, 5, 1, kGetProcessInfo));
     CHECK(!isPatchableCall(wrapper, 5, 1, kGetSystemInfo));  // a different call
     CHECK(!isPatchableCall(wrapper, 5, 0, kGetProcessInfo));
-    // the next instruction is conditional (bne): reads flags
+    // the next instruction is conditional (bne), or uses pc: can't be moved
     const uint32_t cond[] = {0xE52D0004, svc2B, 0x1A000002};
     CHECK(!isPatchableCall(cond, 3, 1, kGetProcessInfo));
+    const uint32_t pcrel[] = {0xE52D0004, svc2B, 0xE59F0004};
+    CHECK(!isPatchableCall(pcrel, 3, 1, kGetProcessInfo));
+    const uint32_t bxlr[] = {0xE52D0004, svc2B, 0xE12FFF1E};
+    CHECK(isPatchableCall(bxlr, 3, 1, kGetProcessInfo));
     // the last word of the code, or the first: nothing to check around it
     const uint32_t end[] = {0xE52D0004, svc2B};
     CHECK(!isPatchableCall(end, 2, 1, kGetProcessInfo));
@@ -170,7 +174,43 @@ static void testPatchableCall() {
     CHECK(svcInstruction(0x3A) == 0xEF00003A);
 }
 
+static void testRelocatable() {
+    CHECK(isRelocatable(0xE49D3004));   // ldr r3, [sp], #4
+    CHECK(isRelocatable(0xE12FFF1E));   // bx lr
+    CHECK(isRelocatable(0xE3500000));   // cmp r0, #0
+    CHECK(isRelocatable(0xE1B01FA0));   // lsrs r1, r0, #31
+    CHECK(isRelocatable(0xE8BD8010));   // pop {r4, pc}
+    CHECK(!isRelocatable(0xE12FFF1F));  // bx pc
+    CHECK(!isRelocatable(0xE59F0004));  // ldr r0, [pc, #4]
+    CHECK(!isRelocatable(0xE28F0010));  // add r0, pc, #16
+    CHECK(!isRelocatable(0xEB000010));  // bl
+    CHECK(!isRelocatable(0xEA000010));  // b
+    CHECK(!isRelocatable(0x1A000002));  // bne
+    CHECK(!isRelocatable(0xEF00002B));  // svc
+    CHECK(!isRelocatable(0xE080000F));  // add r0, r0, pc
+    CHECK(!isRelocatable(0xFA000000));  // blx (immediate)
+}
+
+static void testTrampoline() {
+    uint32_t t[kTrampolineWords];
+    const uint32_t at = 0x01000000, standIn = 0x07001234, moved = 0xE49D3004, resume = 0x00102348;
+    buildTrampoline(t, at, standIn, moved, resume);
+    CHECK(t[0] == 0xE24DD008);   // sub sp, sp, #8
+    CHECK(t[2] == 0xE59FC008);   // ldr r12, [pc, #8]: pc reads as at+16, so it loads t[6]
+    CHECK(t[4] == 0xE51FF004);
+    CHECK(t[5] == standIn);
+    CHECK(t[6] == at + 28);      // t[7]
+    CHECK(t[7] == moved);
+    CHECK(t[8] == 0xE51FF004);
+    CHECK(t[9] == resume);
+    uint32_t site[2];
+    buildSitePatch(site, at);
+    CHECK(site[0] == 0xE51FF004 && site[1] == at);
+}
+
 int main() {
+    testRelocatable();
+    testTrampoline();
     testCountsPlugin();
     testRegisters();
     testLimits();

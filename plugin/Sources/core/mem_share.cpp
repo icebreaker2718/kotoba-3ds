@@ -53,11 +53,42 @@ void adjustLimits(const Plan &plan, Counts &counts, uint32_t svc, int32_t result
     }
 }
 
+bool isRelocatable(uint32_t ins) {
+    if ((ins >> 28) != 0xE) return false;          // conditional (or an unconditional-space op)
+    if ((ins >> 24) == 0xEF) return false;         // svc: would be a second, unpatched call
+    if (((ins >> 25) & 7) == 5) return false;      // b / bl: pc-relative
+    if ((ins & 0x0FFFFFD0) == 0x012FFF10)          // bx / blx rM (its middle bits are all ones)
+        return (ins & 0xF) != 15;
+    if (((ins >> 16) & 0xF) == 15) return false;   // pc as the base / first operand
+    if ((ins & 0xF) == 15) return false;           // pc as a register operand (or an immediate
+                                                   // ending in 0xF: refused to be safe)
+    return true;
+}
+
 bool isPatchableCall(const uint32_t *text, uint32_t words, uint32_t i, uint32_t svc) {
     if (!text || i + 1 >= words || i == 0) return false;
     if (text[i] != svcInstruction(svc)) return false;
-    // the instruction after it runs whatever the flags say, so it can't depend on them
-    return (text[i + 1] >> 28) == 0xE;
+    return isRelocatable(text[i + 1]);
+}
+
+static const uint32_t kLdrPcLiteral = 0xE51FF004;  // ldr pc, [pc, #-4]: jump to the next word
+
+void buildTrampoline(uint32_t *t, uint32_t tAddr, uint32_t standIn, uint32_t moved, uint32_t resume) {
+    t[0] = 0xE24DD008;      // sub  sp, sp, #8
+    t[1] = 0xE58DC000;      // str  r12, [sp]          the game's r12
+    t[2] = 0xE59FC008;      // ldr  r12, [pc, #8]      = t[6]
+    t[3] = 0xE58DC004;      // str  r12, [sp, #4]      where the stand-in goes back to
+    t[4] = kLdrPcLiteral;   // ldr  pc, [pc, #-4]
+    t[5] = standIn;
+    t[6] = tAddr + 7 * 4;   // -> t[7]
+    t[7] = moved;           // the instruction the patch moved
+    t[8] = kLdrPcLiteral;
+    t[9] = resume;
+}
+
+void buildSitePatch(uint32_t site[2], uint32_t tAddr) {
+    site[0] = kLdrPcLiteral;
+    site[1] = tAddr;
 }
 
 }  // namespace memshare

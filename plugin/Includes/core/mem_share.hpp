@@ -6,8 +6,9 @@
 // its limit is), the plugin's share is taken off the answer. The game then sees a normal 64 MB
 // console, whichever way its start-up code sizes its memory.
 //
-// The 3DS side patches four system calls in the game's code; each patched call runs the real call
-// and then passes its registers here. Platform independent, so it is tested on a PC.
+// The 3DS side patches four system calls in the game's code (through the trampolines built here);
+// each patched call runs the real call and then passes its registers here. Platform independent,
+// so it is tested on a PC.
 #pragma once
 #include <cstdint>
 
@@ -50,9 +51,21 @@ void adjustRegisters(const Plan &plan, Counts &counts, uint32_t svc, uint32_t *r
 void adjustLimits(const Plan &plan, Counts &counts, uint32_t svc, int32_t result, int64_t *values,
                   const uint32_t *names, int32_t count);
 
-// May the system call at text[i] be patched? It must be the call itself (svc #n), with the next
-// instruction unconditional, so nothing after it reads flags the patch could change.
+// May the system call at text[i] be patched? It must be the call itself (svc #n), and the next
+// instruction (which the patch moves into the trampoline) must run the same from anywhere.
 bool isPatchableCall(const uint32_t *text, uint32_t words, uint32_t i, uint32_t svc);
+
+// Does this instruction do the same at another address? Unconditional, no branch, no system
+// call, and pc in none of its register fields (conservative: some harmless ones are refused).
+bool isRelocatable(uint32_t instruction);
+
+// The patch: the svc and the instruction after it become `ldr pc, [pc, #-4]` + the trampoline's
+// address. The trampoline (kTrampolineWords, at tAddr) puts the game's r12 and where to carry on
+// on the game's stack, jumps to the stand-in, then runs the moved instruction and jumps back to
+// the instruction after it (resume = svc address + 8). Nothing shared, so any thread can use it.
+constexpr int kTrampolineWords = 10;
+void buildTrampoline(uint32_t *t, uint32_t tAddr, uint32_t standIn, uint32_t moved, uint32_t resume);
+void buildSitePatch(uint32_t site[2], uint32_t tAddr);
 
 // The svc instruction for system call n.
 constexpr uint32_t svcInstruction(uint32_t n) { return 0xEF000000u | n; }

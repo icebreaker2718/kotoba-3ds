@@ -1,14 +1,14 @@
 @ mem_hooks.s - stand-ins for the four system calls a game uses to ask about its memory.
 @
-@ At boot the plugin patches each such `svc` instruction in the game's code with a CTRPF hook
-@ (no flags: CTRPF jumps here with the game's registers, lr and stack as they were, and keeps the
-@ hook's HookContext in this thread's TLS slot 15). Each stand-in makes the real call, lets
-@ KotobaMemHookAdjust (main.cpp -> core/mem_share.cpp) take the plugin's share off the answer,
-@ and goes back to the instruction after the svc with every other register as the svc leaves it.
+@ At boot the plugin patches each such `svc` in the game's code to jump to a trampoline (built by
+@ core/mem_share.cpp's buildTrampoline), which jumps here with every register, the flags and lr as
+@ the game had them, except: sp is 8 lower, [sp] holds the game's r12 and [sp + 4] where to carry
+@ on (the trampoline's copy of the instruction the patch moved). Each stand-in makes the real
+@ call, lets KotobaMemHookAdjust (main.cpp -> core/mem_share.cpp) take the plugin's share off the
+@ answer, and carries on with every other register as the svc leaves it. Nothing shared: game
+@ threads can call at the same time.
 @
 @ Frame (8-byte aligned for the C call): [0..2] the call's outputs r0-r2, [4..7] its inputs r0-r3.
-@ The address to go back to comes from this thread's own HookContext, so game threads calling at
-@ the same time can't mix theirs up.
 
     .arm
     .section .text.kotoba_mem_hooks, "ax", %progbits
@@ -18,12 +18,7 @@
     .global \name
     .type \name, %function
 \name:
-    sub     sp, sp, #4                  @ slot: where to go back to
-    push    {r3-r12, lr}                @ what the svc keeps, and the game's lr (44 bytes)
-    mrc     p15, 0, r12, c13, c0, 3     @ this thread's TLS
-    ldr     r12, [r12, #0x3C]           @ slot 15: CTRPF's HookContext for this hook
-    ldr     r12, [r12, #12]             @ its returnAddress: the instruction after the svc
-    str     r12, [sp, #44]
+    push    {r3-r11, lr}                @ what the svc keeps, and the game's lr (40 bytes)
     mov     r4, sp
     bic     sp, sp, #7
     sub     sp, sp, #32
@@ -43,8 +38,9 @@
     ldmia   sp, {r0-r2}
     msr     cpsr_f, r5
     mov     sp, r4
-    pop     {r3-r12, lr}
-    pop     {pc}
+    pop     {r3-r11, lr}
+    pop     {r12}                       @ the game's r12 (from the trampoline)
+    pop     {pc}                        @ carry on in the trampoline; sp is the game's again
     .size \name, . - \name
 .endm
 

@@ -8,9 +8,9 @@
 // to tools/ocr_server.py on the PC (or tools/mine.py reads them later).
 #include <3ds.h>
 #include <CTRPluginFramework.hpp>
+#include <csvc.h>  // Luma's extra system calls (cache maintenance for the memory patches)
 
 #include <algorithm>
-#include <cstddef>
 #include <cstring>
 #include <ctime>
 #include <string>
@@ -1879,8 +1879,6 @@ static kt::memshare::Plan g_memPlan;
 static kt::memshare::Counts g_memCounts;
 static int g_memHookSites = 0;  // calls patched (0: none)
 
-static_assert(offsetof(HookContext, returnAddress) == 12, "mem_hooks.s reads returnAddress at +12");
-
 extern "C" {
 void KotobaHookGetSystemInfo(void);
 void KotobaHookGetProcessInfo(void);
@@ -1936,6 +1934,12 @@ static u32 FindHeapFormula(u32 &found) {
     return at;
 }
 
+// svcGetProcessInfo's type is a u32 in some libctru versions and an enum in others
+template <typename T>
+static Result AskProcessInfo(Result (*fn)(s64 *, Handle, T), s64 *out, u32 type) {
+    return fn(out, CUR_PROCESS_HANDLE, (T)type);
+}
+
 // Step 2: patch the memory questions. Returns what happened, for the log.
 static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
     using namespace kt::memshare;
@@ -1946,7 +1950,7 @@ static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
     std::string measured;
     for (int type = 0; type < kProcessInfoTypes; type++) {
         s64 v = -1;
-        if (R_SUCCEEDED(svcGetProcessInfo(&v, CUR_PROCESS_HANDLE, (u32)type)))
+        if (R_SUCCEEDED(AskProcessInfo(svcGetProcessInfo, &v, (u32)type)))
             plan.processInfo[type] = countsPlugin(v, committed, plugin);
         measured += Utils::Format("%sprocess %d: %ld KB%s", type ? ", " : "", type, (long)(v / 1024),
                                   plan.processInfo[type] ? " (has it)" : "");
@@ -1964,7 +1968,6 @@ static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
         {kCurrentValues, KotobaHookCurrentValues, "in use"},
     };
     constexpr int kMaxSites = 16;
-    static Hook hooks[kMaxSites];
     u32 siteAt[kMaxSites];
     void (*siteFn[kMaxSites])(void);
     int sites = 0;
@@ -1988,17 +1991,33 @@ static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
     }
     if (sites == 0) return measured + "; the game asks none of these";
 
-    // all or nothing
-    g_memPlan = plan;
+    // the trampolines, in plugin memory the game can run (never freed: the game uses them until it exits)
+    const u32 bytes = (sites * kTrampolineWords * 4 + 0xFFF) & ~0xFFFu;
+    u32 *tramp = (u32 *)memalign(0x1000, bytes);
+    if (!tramp) return measured + "; not patched: no memory for the trampolines";
+    if (!Process::ProtectMemory((u32)tramp, bytes)) return measured + "; not patched: trampolines can't be made runnable";
     for (int s = 0; s < sites; s++) {
-        hooks[s].Initialize(siteAt[s], (u32)siteFn[s]).SetFlags(0);
-        HookResult r = hooks[s].Enable();
-        if (r != HookResult::Success) {
-            for (int t = 0; t < s; t++) hooks[t].Disable();
+        u32 *t = tramp + s * kTrampolineWords;
+        buildTrampoline(t, (u32)t, (u32)siteFn[s], *(const u32 *)(siteAt[s] + 4), siteAt[s] + 8);
+    }
+    svcFlushProcessDataCache(Process::GetHandle(), (u32)tramp, bytes);
+
+    // all or nothing: patch every site; if one fails, put back the ones done
+    g_memPlan = plan;
+    u32 original[kMaxSites][2];
+    for (int s = 0; s < sites; s++) {
+        u32 patch[2];
+        buildSitePatch(patch, (u32)(tramp + s * kTrampolineWords));
+        original[s][0] = *(const u32 *)siteAt[s];
+        original[s][1] = *(const u32 *)(siteAt[s] + 4);
+        if (!Process::Patch(siteAt[s], patch, 8)) {
+            for (int t = 0; t < s; t++) Process::Patch(siteAt[t], original[t], 8);
+            svcInvalidateEntireInstructionCache();
             g_memPlan = Plan();
-            return measured + Utils::Format("; not patched: hook %d failed (%d)", s, (int)r);
+            return measured + Utils::Format("; not patched: could not write the call at %08lX", (unsigned long)siteAt[s]);
         }
     }
+    svcInvalidateEntireInstructionCache();
     g_memHookSites = sites;
     return measured + "; patched " + found;
 }

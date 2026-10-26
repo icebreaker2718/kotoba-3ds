@@ -1,39 +1,27 @@
-@ memhooks_harness.s - runs a stand-in from plugin/Sources/mem_hooks.s the way a game would reach
-@ it through a CTRPF hook (game registers, lr and stack as they were, the HookContext in TLS slot
-@ 15), and records every register when it comes back. For tests/test_memhooks_arm (qemu-arm).
+@ memhooks_harness.s - runs a patched call site the way a game would hit it: jumps to the site
+@ (the svc already replaced by a jump to its trampoline) with marker values in every register and
+@ known flags, and records every register when the code after the site comes back here.
+@ For tests/test_memhooks_arm (qemu-arm).
 @
-@ Block (see test_memhooks_arm.cpp): +0 stand-in, +4 inputs r0-r3, +20 outputs r0-r12, +72 lr,
-@ +76 cpsr, +80 sp, +84 sp before, +88 fake HookContext (32 bytes), +120 fake TLS (0x40),
-@ +200 misalign the game's stack by 4.
+@ Block (see test_memhooks_arm.cpp): +0 the call site, +4 inputs r0-r3, +20 outputs r0-r12,
+@ +72 lr, +76 cpsr, +80 sp, +84 sp before, +200 misalign the game's stack by 4.
 
     .arm
     .text
     .align 2
 
-    .global RunStub
+    .global RunStub, HarnessBack
 RunStub:
     push    {r4-r11, lr}
     ldr     r1, =g_block
     str     r0, [r1]
     ldr     r1, =g_savedSp
     str     sp, [r1]
-    mrc     p15, 0, r1, c13, c0, 3
-    ldr     r2, =g_origTls
-    str     r1, [r2]
-    add     r0, r0, #120              @ this thread's TLS -> the block's fake TLS
-    ldr     r7, =0x0f0005             @ __ARM_NR_set_tls
-    svc     #0
-    ldr     r0, =g_block
-    ldr     r0, [r0]
-    ldr     r1, =Back
-    str     r1, [r0, #100]            @ HookContext.returnAddress
-    add     r1, r0, #88
-    str     r1, [r0, #180]            @ TLS slot 15 (+0x3C) = &HookContext
     ldr     r1, [r0, #200]
     cmp     r1, #0
     subne   sp, sp, #4                @ a game stack that isn't 8-byte aligned
     ldr     r12, [r0]
-    push    {r12}                     @ where to "jump from the hook"
+    push    {r12}                     @ the call site
     add     r1, sp, #4
     str     r1, [r0, #84]             @ the game's sp at the svc
     ldr     r4, =0x44444444
@@ -53,7 +41,7 @@ RunStub:
     msr     cpsr_f, #0x60000000       @ Z and C set, N and V clear
     pop     {pc}
 
-Back:
+HarnessBack:
     push    {r0-r12, lr}
     mrs     r4, cpsr
     ldr     r5, =g_block
@@ -70,10 +58,6 @@ Back:
     stmia   r7!, {r0-r3}
     ldmia   sp!, {r0-r1}
     stmia   r7!, {r0-r1}
-    ldr     r0, =g_origTls
-    ldr     r0, [r0]
-    ldr     r7, =0x0f0005
-    svc     #0
     ldr     r1, =g_savedSp
     ldr     sp, [r1]
     pop     {r4-r11, pc}
@@ -124,4 +108,3 @@ g_fakeValue:  .quad 0
 g_lastSvc:    .word 0
 g_block:      .word 0
 g_savedSp:    .word 0
-g_origTls:    .word 0

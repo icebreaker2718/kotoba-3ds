@@ -52,7 +52,8 @@ works on the code.
   their own thread), lid-close handling, known words, network to the PC, and at boot
   `GiveGameItsMemory` (raises the game's commit limit by the plugin's 5 MiB; on `test`, patches
   the SDK's heap formula where found; on `alpha`, instead patches the game's memory system calls:
-  `mem_hooks.s` stand-ins + `core/mem_share.cpp`, tested by `tests/test_memshare.cpp` and
+  `mem_hooks.s` stand-ins reached through its own trampolines (not CTRPF hooks) +
+  `core/mem_share.cpp`, tested by `tests/test_memshare.cpp` and
   `tests/build_memhooks_arm.sh` under qemu).
 - `plugin/Sources/core/` (platform independent, also built natively for tests):
   `textbox.cpp` (finds flat-colour text boxes; grows shaded ones), `local_ocr.cpp`
