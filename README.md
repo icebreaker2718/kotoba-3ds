@@ -203,8 +203,7 @@ Cards go to your deck **Mining Deck** with the **Lapis** note type by default.
    note type must exist (it does if you already mine into Lapis; otherwise import the `.apkg`
    from [Lapis' releases](https://github.com/donkuri/lapis/releases)).
 2. **Python packages**: `pip install pillow`. (No OCR is needed on the PC: the 3DS reads the
-   screen and saves the sentence with each word. `pip install manga-ocr` only matters for words
-   saved by old plugin versions, which didn't keep the sentence.)
+   screen and saves the sentence with each word.)
 3. **Dictionaries**: make a folder `tools/dictionaries/` and put Yomitan `.zip` dictionaries
    in it. The script works out what each one is:
    - definitions: `jitendex-yomitan.zip` from [jitendex.org](https://jitendex.org). Other term
@@ -225,12 +224,10 @@ Cards go to your deck **Mining Deck** with the **Lapis** note type by default.
      rather use an SD card reader, set `source.sd_root` to the card's drive (e.g. `E:/`).
    - `games`: title ID → game name. It goes into `MiscInfo` and becomes the card's tag. The
      title ID shows in the `MiscInfo` field of your first card.
-   - `ocr.crop` / `ocr.game_crops`: only for those old words without a sentence: the box
-     `[left, top, right, bottom]` on the top screen that manga-ocr reads.
 
 ### Each time
 1. Close the game, open **ftpd** on the 3DS, and keep Anki open on the PC.
-2. Run `python tools/mine.py`. Add `--dry-run` to preview, `--no-ocr` to skip OCR of old words saved without a sentence, or
+2. Run `python tools/mine.py`. Add `--dry-run` to preview, or
    `--clear` to remove imported words from the 3DS log afterwards. `python tools/mine.py known`
    puts the words of your Anki cards on the 3DS (green in lookups).
 
@@ -289,7 +286,6 @@ either returning an audio file or Yomitan's JSON audio-source list:
 ```json
 {"name": "my server", "url": "http://example.com/audio?term={term}&reading={reading}"}
 ```
-Configs from older versions that only had `"jpod101"` get the new list automatically.
 
 ## Files on the SD card
 
@@ -311,8 +307,8 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
   `default.3gx` (or sits in the game's title ID folder), and you waited ~5 s after the game
   started.
 - **"Dictionary not found"**: check that the file is exactly `SD:/3ds/kotoba3ds/dict.bin`.
-- **"wrong format / truncated"**: rebuild `dict.bin` with this version of `build_dict.py`,
-  and copy it again.
+- **"wrong format / truncated"**: download `dict.bin` again from the latest release (or rebuild
+  it with `build_dict.py`), and copy it again.
 - **Japanese shows as boxes**: the plugin draws text with the console's system font. Please
   report it, with your console's region.
 - **mine.py can't connect**: ftpd must be open on the 3DS, and the PC and 3DS on the same network.
