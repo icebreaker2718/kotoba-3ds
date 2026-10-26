@@ -1851,10 +1851,12 @@ static void LogBootMemory() {
 // game's 64 MB budget (its "commit" limit). Nintendo's SDK sizes a game's heap at start as
 //     heap = min(APPMEMALLOC, 64 MB) - memory already committed - device memory
 // so the heap comes out 5 MiB short; a game that needs all of it (大逆転裁判2) fails an
-// allocation and crashes. The console has the memory (the app region is 124 MB), so before the
-// game's first instruction: raise the game's commit limit by the plugin's size, and make the SDK's
-// formula leave the plugin's share out of "already committed". Done only when the numbers say it
-// is safe, and the formula only when its instructions are found exactly once.
+// allocation and crashes. A game that asks for fixed amounts instead (逆転裁判123) goes over its
+// commit limit and crashes the same way. The console has the memory (the app region is 124 MB), so
+// before the game's first instruction: raise the game's commit limit by the plugin's size, and,
+// where the game uses it, make the SDK's formula leave the plugin's share out of "already
+// committed". Done only when the numbers say it is safe, and the formula only when its
+// instructions are found exactly once.
 // ---------------------------------------------------------------------------
 static s64 g_commitLimitBefore = -1;  // to put back when the game exits
 
@@ -1864,27 +1866,6 @@ static bool ArmImmediate(u32 v, u32 &enc) {  // ARM data-processing immediate (8
         if (r < 256) { enc = (rot << 8) | r; return true; }
     }
     return false;
-}
-
-// A game whose SDK sizes its heap some other way: its code goes to the SD card once (only this
-// game's own copy, on this console), so that way can be looked at and added.
-static void SaveCodeForDiagnosis() {
-    const std::string path = std::string(kRootDir) + "/code_" + TitleIdHex() + ".bin";
-    if (File::Exists(path) == 1) return;
-    File f;
-    if (File::Open(f, path, File::WRITE | File::CREATE) != File::SUCCESS) return;
-    const u32 size = Process::GetTextSize();
-    const u32 chunk = 16 * 1024;
-    u8 *buf = (u8 *)malloc(chunk);
-    bool ok = buf != nullptr;
-    for (u32 done = 0; ok && done < size; done += chunk) {
-        const u32 n = std::min(chunk, size - done);
-        memcpy(buf, (const void *)(0x00100000 + done), n);
-        ok = f.Write(buf, n) == File::SUCCESS;
-    }
-    free(buf);
-    f.Close();
-    LogOcr(Utils::Format("boot: saved the game's code for a look (%lu KB) to %s", (unsigned long)(size / 1024), path.c_str()));
 }
 
 static void GiveGameItsMemory() {
@@ -1909,11 +1890,32 @@ static void GiveGameItsMemory() {
     else if (limit < (s64)appMemAlloc) why = "unusual commit limit";
     else if (committed < (s64)(codeSize + plugin)) why = "the plugin isn't counted in the game's memory";
     else if (want > appRegion) why = "no room in the app region";
-    u32 subImm = 0;
-    if (why.empty() && !ArmImmediate(plugin, subImm)) why = "plugin size not encodable";
-    // the SDK's  cmp rN, #0x4000000 / movhi rN, #0x4000000 / sub r0, rN, r0
-    u32 at = 0, found = 0;
-    if (why.empty()) {
+    // 1. The commit limit: raised by the plugin's share, so a game that asks for fixed amounts
+    //    (逆転裁判123: a 512 KB heap and 56.5 MB of device memory) gets them. A game that sizes
+    //    its heap with the SDK's formula reads APPMEMALLOC, which stays as it is: for it this
+    //    alone changes nothing.
+    std::string raised;
+    if (why.empty() && limit < want) {
+        // the high word is what the kernel writes to APPMEMALLOC: keep it as it is
+        s64 value = want | ((s64)appMemAlloc << 32);
+        Result r = svcSetResourceLimitValues(rl, &t, &value, 1);
+        if (R_FAILED(r)) why = Utils::Format("could not raise the limit (%08lX)", (unsigned long)r);
+        else {
+            g_commitLimitBefore = limit;
+            raised = Utils::Format("commit limit %ld -> %ld KB", (long)(limit / 1024), (long)(want / 1024));
+        }
+    }
+    svcCloseHandle(rl);
+    if (!why.empty()) {
+        LogOcr("boot: memory left as it is: " + why);
+        return;
+    }
+    // 2. The SDK's heap formula, when the game uses it: make it leave the plugin's share out of
+    //    "already committed".  cmp rN, #0x4000000 / movhi rN, #0x4000000 / sub r0, rN, r0
+    u32 subImm = 0, at = 0, found = 0;
+    std::string formula;
+    if (!ArmImmediate(plugin, subImm)) formula = "plugin size not encodable";
+    else {
         const u32 *text = (const u32 *)0x00100000;
         const u32 words = Process::GetTextSize() / 4;
         for (u32 i = 0; i + 2 < words; i++) {
@@ -1925,28 +1927,17 @@ static void GiveGameItsMemory() {
                 found++;
             }
         }
-        if (found != 1) {
-            why = Utils::Format("SDK heap sizing found %lu times", (unsigned long)found);
-            SaveCodeForDiagnosis();
+        if (found == 1) {
+            Process::Patch(at, 0xE2400000 | subImm);  // sub r0, r0, #plugin  (committed - plugin)
+            Process::Patch(at + 4, 0xE1A00000);       // nop (the 64 MB cap can't apply: checked above)
+            formula = Utils::Format("heap sizing at %08lX", (unsigned long)at);
+        } else {
+            formula = Utils::Format("SDK heap sizing found %lu times (fixed sizes, or sized another way)",
+                                    (unsigned long)found);
         }
     }
-    if (why.empty() && limit < want) {
-        // the high word is what the kernel writes to APPMEMALLOC: keep it as it is
-        s64 value = want | ((s64)appMemAlloc << 32);
-        Result r = svcSetResourceLimitValues(rl, &t, &value, 1);
-        if (R_FAILED(r)) why = Utils::Format("could not raise the limit (%08lX)", (unsigned long)r);
-        else g_commitLimitBefore = limit;
-    }
-    svcCloseHandle(rl);
-    if (why.empty()) {
-        Process::Patch(at, 0xE2400000 | subImm);  // sub r0, r0, #plugin  (committed - plugin)
-        Process::Patch(at + 4, 0xE1A00000);       // nop (the 64 MB cap can't apply: checked above)
-        LogOcr(Utils::Format("boot: gave the game back %lu KB (commit limit %ld -> %ld KB, heap sizing at %08lX)",
-                             (unsigned long)(plugin / 1024), (long)(limit / 1024), (long)(want / 1024),
-                             (unsigned long)at));
-    } else {
-        LogOcr("boot: memory left as it is: " + why);
-    }
+    LogOcr(Utils::Format("boot: gave the game back %lu KB (%s; %s)", (unsigned long)(plugin / 1024),
+                         raised.empty() ? "commit limit already high enough" : raised.c_str(), formula.c_str()));
 }
 
 void OnProcessExit(void) {
