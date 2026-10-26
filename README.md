@@ -19,14 +19,13 @@ Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-
   reading, how common the word is (JPDB rank) and other matches for the same spelling.
   Conjugations are undone (食べられなかった → 食べる, with the conjugation shown).
 - **Save words for Anki.** One button saves the word with its sentence and a screenshot. Saving
-  is instant, and a mistaken save can be undone.
+  is instant, and a mistaken save can be undone just as quickly.
 - **Known words in green.** Words you saved, words you marked known with **Y** (grammar, words
   you already know) and the words of your Anki cards are shown in green.
 - **Your choice of spelling.** Saved words are written in their usual kanji, or as the game
   wrote them.
 - **Easy on the game.** The dictionary is searched on the SD card instead of being loaded into
-  memory, a New 3DS runs at full speed only while a lookup is open, and closing a lookup never
-  passes your button press on to the game. Closing the lid with the plugin open is fine.
+  memory, a New 3DS runs at full speed only while a lookup is open.
 
 **On the PC** (optional; `tools/ocr_server.py` or `tools/mine.py`)
 - **Anki cards in one step.** Choose *Make Anki cards* on the 3DS and every saved word becomes a
@@ -204,8 +203,7 @@ Cards go to your deck **Mining Deck** with the **Lapis** note type by default.
    note type must exist (it does if you already mine into Lapis; otherwise import the `.apkg`
    from [Lapis' releases](https://github.com/donkuri/lapis/releases)).
 2. **Python packages**: `pip install pillow`. (No OCR is needed on the PC: the 3DS reads the
-   screen and saves the sentence with each word. `pip install manga-ocr` only matters for words
-   saved by old plugin versions, which didn't keep the sentence.)
+   screen and saves the sentence with each word.)
 3. **Dictionaries**: make a folder `tools/dictionaries/` and put Yomitan `.zip` dictionaries
    in it. The script works out what each one is:
    - definitions: `jitendex-yomitan.zip` from [jitendex.org](https://jitendex.org). Other term
@@ -226,12 +224,10 @@ Cards go to your deck **Mining Deck** with the **Lapis** note type by default.
      rather use an SD card reader, set `source.sd_root` to the card's drive (e.g. `E:/`).
    - `games`: title ID → game name. It goes into `MiscInfo` and becomes the card's tag. The
      title ID shows in the `MiscInfo` field of your first card.
-   - `ocr.crop` / `ocr.game_crops`: only for those old words without a sentence: the box
-     `[left, top, right, bottom]` on the top screen that manga-ocr reads.
 
 ### Each time
 1. Close the game, open **ftpd** on the 3DS, and keep Anki open on the PC.
-2. Run `python tools/mine.py`. Add `--dry-run` to preview, `--no-ocr` to skip OCR of old words saved without a sentence, or
+2. Run `python tools/mine.py`. Add `--dry-run` to preview, or
    `--clear` to remove imported words from the 3DS log afterwards. `python tools/mine.py known`
    puts the words of your Anki cards on the 3DS (green in lookups).
 
@@ -290,7 +286,6 @@ either returning an audio file or Yomitan's JSON audio-source list:
 ```json
 {"name": "my server", "url": "http://example.com/audio?term={term}&reading={reading}"}
 ```
-Configs from older versions that only had `"jpod101"` get the new list automatically.
 
 ## Files on the SD card
 
@@ -312,8 +307,8 @@ Configs from older versions that only had `"jpod101"` get the new list automatic
   `default.3gx` (or sits in the game's title ID folder), and you waited ~5 s after the game
   started.
 - **"Dictionary not found"**: check that the file is exactly `SD:/3ds/kotoba3ds/dict.bin`.
-- **"wrong format / truncated"**: rebuild `dict.bin` with this version of `build_dict.py`,
-  and copy it again.
+- **"wrong format / truncated"**: download `dict.bin` again from the latest release (or rebuild
+  it with `build_dict.py`), and copy it again.
 - **Japanese shows as boxes**: the plugin draws text with the console's system font. Please
   report it, with your console's region.
 - **mine.py can't connect**: ftpd must be open on the 3DS, and the PC and 3DS on the same network.
