@@ -56,7 +56,10 @@ if [ ! -f "$DKP/libctrpf/lib/libctrpf.a" ]; then
       # plugin/Sources/mem_hooks.s finds its way back through the HookContext CTRPF keeps in TLS
       # slot 15 (tls + 0x3C): stop here if this copy of CTRPF does it differently
       hm=$(find ctrpf-src/Library/source -name HookManager.cpp | head -1)
-      if [ -z "$hm" ] || ! grep -q 'add    r5, r5, #0x3C' "$hm"; then
+      if [ -z "$hm" ] || ! grep -qiE 'add[[:space:]]+r5,[[:space:]]*r5,[[:space:]]*#0x3C' "$hm"; then
+        echo "---- $hm (TLS / HookContext lines)"; grep -niE 'tls|0x3C|c13|SetHookContext' "$hm" | head -40
+        hh=$(find ctrpf-src/Library/include -name Hook.hpp | head -1)
+        echo "---- $hh"; grep -n -A12 'struct[[:space:]]*HookContext' "$hh" | head -20
         fail "libctrpf ($url)" "hooks don't keep their context in TLS slot 15; mem_hooks.s needs updating"; exit 1
       fi
       if make -C ctrpf-src/Library install >ctrpf-build.log 2>&1; then
