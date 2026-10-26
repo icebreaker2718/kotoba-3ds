@@ -50,11 +50,10 @@ works on the code.
 
 - `plugin/Sources/main.cpp`: menus, hotkeys, `ReadScreens`, saving, screenshots (QOI, written on
   their own thread), lid-close handling, known words, network to the PC, and at boot
-  `GiveGameItsMemory` (raises the game's commit limit by the plugin's 5 MiB; on `test`, patches
-  the SDK's heap formula where found; on `alpha`, instead patches the game's memory system calls:
-  `mem_hooks.s` stand-ins reached through its own trampolines (not CTRPF hooks) +
-  `core/mem_share.cpp`, tested by `tests/test_memshare.cpp` and
-  `tests/build_memhooks_arm.sh` under qemu).
+  `GiveGameItsMemory` (raises the game's commit limit by the plugin's 5 MiB, then patches the
+  game's memory system calls so the plugin's share is left out of their answers: `mem_hooks.s`
+  stand-ins reached through their own trampolines (not CTRPF hooks) + `core/mem_share.cpp`,
+  tested by `tests/test_memshare.cpp` and `tests/build_memhooks_arm.sh` under qemu).
 - `plugin/Sources/core/` (platform independent, also built natively for tests):
   `textbox.cpp` (finds flat-colour text boxes; grows shaded ones), `local_ocr.cpp`
   (`localReadScreen`: reads each box, dedupes overlapping boxes, whole-screen fallback),
@@ -89,17 +88,13 @@ works on the code.
 - On `test`, waiting for the owner's hardware check (the SD card has this build):
   1. Shaded text boxes (Pokémon Sun/Moon bubbles fade top to bottom; only the first row was
      read). Backtest: 4 other screens changed, all better.
-  2. 逆転裁判123 (0004000000108800) crashed at start: it asks for a fixed 512 KB heap + 56.5 MB
-     device memory, which no longer fit with the plugin's 5 MiB counted. The commit limit is now
-     raised whenever safe, not only when the SDK heap formula is found. Also check Mario & Luigi
-     (0004000000060600) still starts.
-- On `alpha` (2026-10-26), not yet tried on a console: the general memory fix. Every
-  GetSystemInfo / GetProcessInfo / resource-limit call in the game's code is hooked so the plugin's
-  share is left out of the answer (only answers measured at boot to include it; all calls or
-  none). Replaces the formula patch there, so 大逆転裁判2 (00040000001AE200) is the key check, plus
-  逆転裁判123, Mario & Luigi, and 000400000015D500 (new; crashed at start on `test`). Alpha also
-  saves each game's code once to `/3ds/kotoba3ds/code_<titleID>.bin`; `memory (...)` log lines
-  show how often answers were changed.
+  2. The general memory fix (confirmed by the owner on `alpha`, 2026-10-26): the commit limit is
+     raised by the plugin's share, and every GetSystemInfo / GetProcessInfo / resource-limit call
+     in the game's code is patched to leave the share out of the answer (only answers measured
+     at boot to include it; all calls or none). Replaces the old SDK-formula patch. 大逆転裁判2
+     (00040000001AE200), Corpse Party BR (000400000015D500) and Mario & Luigi (0004000000060600)
+     each asked "in use" (resource-limit current value) once at start; 逆転裁判123
+     (0004000000108800) asks nothing and is covered by the raised limit alone. All four start.
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
   README.

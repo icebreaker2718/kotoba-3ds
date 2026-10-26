@@ -1797,19 +1797,8 @@ static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's o
     return false;
 }
 
-static void LogMemoryHooks(const char *when);  // below, with the memory fix
-
 static void Watcher(void) {
     if (SleepRequested()) return;  // the console is going to sleep: not now
-    {   // how the game used the patched memory calls: once early on, once after some play
-        static u64 started = osGetTime();
-        static int reported = 0;
-        const u64 ms = osGetTime() - started;
-        if ((reported == 0 && ms > 30000) || (reported == 1 && ms > 600000)) {
-            LogMemoryHooks(reported == 0 ? "30 s in" : "10 min in");
-            reported++;
-        }
-    }
     if (g_shotDeferred) {
         g_shotDeferred = false;
         StartScreenshotThread();
@@ -1877,7 +1866,6 @@ static s64 g_commitLimitBefore = -1;  // to put back when the game exits
 
 static kt::memshare::Plan g_memPlan;
 static kt::memshare::Counts g_memCounts;
-static int g_memHookSites = 0;  // calls patched (0: none)
 
 extern "C" {
 void KotobaHookGetSystemInfo(void);
@@ -1895,45 +1883,6 @@ void KotobaMemHookAdjust(u32 svc, u32 *regs) {
 }
 }
 
-// alpha only: each game's code goes to the SD card once, so how it asks about memory can be read
-static void SaveCodeForDiagnosis() {
-    const std::string path = std::string(kRootDir) + "/code_" + TitleIdHex() + ".bin";
-    if (File::Exists(path) == 1) return;
-    File f;
-    if (File::Open(f, path, File::WRITE | File::CREATE) != File::SUCCESS) return;
-    const u32 size = Process::GetTextSize();
-    const u32 chunk = 16 * 1024;
-    u8 *buf = (u8 *)malloc(chunk);
-    bool ok = buf != nullptr;
-    for (u32 done = 0; ok && done < size; done += chunk) {
-        const u32 n = std::min(chunk, size - done);
-        memcpy(buf, (const void *)(0x00100000 + done), n);
-        ok = f.Write(buf, n) == File::SUCCESS;
-    }
-    free(buf);
-    f.Close();
-    LogOcr(Utils::Format("boot: saved the game's code for a look (%lu KB) to %s", (unsigned long)(size / 1024),
-                         path.c_str()));
-}
-
-// Where the old fix would have patched the SDK's heap formula (logged only: the hooks replace it)
-static u32 FindHeapFormula(u32 &found) {
-    const u32 *text = (const u32 *)0x00100000;
-    const u32 words = Process::GetTextSize() / 4;
-    u32 at = 0;
-    found = 0;
-    for (u32 i = 0; i + 2 < words; i++) {  // cmp rN, #0x4000000 / movhi rN, #0x4000000 / sub r0, rN, r0
-        u32 w0 = text[i];
-        if ((w0 & 0xFFF0FFFF) != 0xE3500301) continue;
-        u32 n = (w0 >> 16) & 0xF;
-        if (text[i + 1] == (0x83A00301 | (n << 12)) && text[i + 2] == (0xE0400000 | (n << 16))) {
-            at = 0x00100000 + i * 4;
-            found++;
-        }
-    }
-    return at;
-}
-
 // svcGetProcessInfo's type is a u32 in some libctru versions and an enum in others
 template <typename T>
 static Result AskProcessInfo(Result (*fn)(s64 *, Handle, T), s64 *out, u32 type) {
@@ -1947,17 +1896,13 @@ static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
     Plan plan;
     plan.plugin = plugin;
     plan.limits = true;  // committed includes it (checked by the caller) and the limit was raised by it
-    std::string measured;
     for (int type = 0; type < kProcessInfoTypes; type++) {
         s64 v = -1;
         if (R_SUCCEEDED(AskProcessInfo(svcGetProcessInfo, &v, (u32)type)))
             plan.processInfo[type] = countsPlugin(v, committed, plugin);
-        measured += Utils::Format("%sprocess %d: %ld KB%s", type ? ", " : "", type, (long)(v / 1024),
-                                  plan.processInfo[type] ? " (has it)" : "");
     }
     s64 appUsed = -1;
     if (R_SUCCEEDED(svcGetSystemInfo(&appUsed, 0, 1))) plan.appUsed = countsPlugin(appUsed, committed, plugin);
-    measured += Utils::Format(", app region used %ld KB%s", (long)(appUsed / 1024), plan.appUsed ? " (has it)" : "");
 
     // find the calls in the game's code
     struct Kind { u32 svc; void (*standIn)(void); const char *name; };
@@ -1979,23 +1924,23 @@ static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
         for (u32 i = 0; i < words; i++) {
             if (text[i] != svcInstruction(k.svc)) continue;
             if (!isPatchableCall(text, words, i, k.svc)) { skipped++; continue; }
-            if (sites == kMaxSites) return measured + "; not patched: more calls than expected";
+            if (sites == kMaxSites) return "not patched: more calls than expected";
             siteAt[sites] = 0x00100000 + i * 4;
             siteFn[sites] = k.standIn;
             sites++;
             n++;
         }
         // a call left as it is would give the game a second, different answer
-        if (skipped) return measured + Utils::Format("; not patched: a %s call can't be patched", k.name);
+        if (skipped) return Utils::Format("not patched: a %s call can't be patched", k.name);
         found += Utils::Format("%s%s %d", found.empty() ? "" : ", ", k.name, n);
     }
-    if (sites == 0) return measured + "; the game asks none of these";
+    if (sites == 0) return "the game asks none of these";
 
     // the trampolines, in plugin memory the game can run (never freed: the game uses them until it exits)
     const u32 bytes = (sites * kTrampolineWords * 4 + 0xFFF) & ~0xFFFu;
     u32 *tramp = (u32 *)memalign(0x1000, bytes);
-    if (!tramp) return measured + "; not patched: no memory for the trampolines";
-    if (!Process::ProtectMemory((u32)tramp, bytes)) return measured + "; not patched: trampolines can't be made runnable";
+    if (!tramp) return "not patched: no memory for the trampolines";
+    if (!Process::ProtectMemory((u32)tramp, bytes)) return "not patched: trampolines can't be made runnable";
     for (int s = 0; s < sites; s++) {
         u32 *t = tramp + s * kTrampolineWords;
         buildTrampoline(t, (u32)t, (u32)siteFn[s], *(const u32 *)(siteAt[s] + 4), siteAt[s] + 8);
@@ -2014,12 +1959,11 @@ static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
             for (int t = 0; t < s; t++) Process::Patch(siteAt[t], original[t], 8);
             svcInvalidateEntireInstructionCache();
             g_memPlan = Plan();
-            return measured + Utils::Format("; not patched: could not write the call at %08lX", (unsigned long)siteAt[s]);
+            return Utils::Format("not patched: could not write the call at %08lX", (unsigned long)siteAt[s]);
         }
     }
     svcInvalidateEntireInstructionCache();
-    g_memHookSites = sites;
-    return measured + "; patched " + found;
+    return "patched " + found;
 }
 
 static void GiveGameItsMemory() {
@@ -2058,29 +2002,14 @@ static void GiveGameItsMemory() {
         }
     }
     svcCloseHandle(rl);
-    u32 formulaFound = 0;
-    u32 formulaAt = FindHeapFormula(formulaFound);
-    std::string formula = formulaFound == 1 ? Utils::Format("SDK heap formula at %08lX, not patched", (unsigned long)formulaAt)
-                                            : Utils::Format("SDK heap formula found %lu times", (unsigned long)formulaFound);
-    SaveCodeForDiagnosis();
     if (!why.empty()) {
-        LogOcr("boot: memory left as it is: " + why + " (" + formula + ")");
+        LogOcr("boot: memory left as it is: " + why);
         return;
     }
+    LogOcr(Utils::Format("boot: gave the game back %lu KB (%s)", (unsigned long)(plugin / 1024),
+                         raised.empty() ? "commit limit already high enough" : raised.c_str()));
     // 2. The questions about memory: only once the limit really is at least APPMEMALLOC + the share
-    std::string hooks = HookMemoryQuestions(plugin, committed);
-    LogOcr(Utils::Format("boot: gave the game back %lu KB (%s; %s; %s)", (unsigned long)(plugin / 1024),
-                         raised.empty() ? "commit limit already high enough" : raised.c_str(), formula.c_str(),
-                         hooks.c_str()));
-}
-
-// how often the patched calls changed an answer, a while after start (the log shows whether the
-// game asked, and which way)
-static void LogMemoryHooks(const char *when) {
-    if (g_memHookSites == 0) return;
-    LogOcr(Utils::Format("memory (%s): answers changed: system info %lu, process info %lu, limit %lu, in use %lu",
-                         when, (unsigned long)g_memCounts.systemInfo, (unsigned long)g_memCounts.processInfo,
-                         (unsigned long)g_memCounts.limitValues, (unsigned long)g_memCounts.currentValues));
+    LogOcr("boot: memory answers: " + HookMemoryQuestions(plugin, committed));
 }
 
 void OnProcessExit(void) {
