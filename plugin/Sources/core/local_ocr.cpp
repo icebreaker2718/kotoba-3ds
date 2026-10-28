@@ -878,17 +878,32 @@ bool readScreenScored(LocalOcr &ocr, Dictionary *dict, const uint8_t *grey, unsi
         const size_t kMaxRead = 8;
         std::vector<LocalOcr::LineBox> toRead;
         for (size_t i = 0; i < ranked.size() && i < kMaxRead; i++) toRead.push_back(ranked[i].second);
-        st.bandRead = (unsigned)toRead.size();
         std::vector<TextLine> lines, kept;
         std::string e;
         const uint64_t tRead = now();
         st.bandFindMs = (uint32_t)(tRead - tFind);
-        const bool gotLines = !toRead.empty() && ocr.readLines(grey, w, h, toRead, lines, e, progress);
-        st.bandReadMs = (uint32_t)(now() - tRead);
-        if (gotLines) {
+        // a line found twice at different heights (a tight box and a taller one): the likelier box
+        // first; the other only if that one didn't read clearly
+        std::vector<LocalOcr::LineBox> first, second;
+        for (size_t i = 0; i < toRead.size(); i++) {
+            bool dup = false;
+            for (size_t j = 0; j < i && !dup; j++) dup = boxesOverlap(toRead[i], toRead[j], 0.6f);
+            (dup ? second : first).push_back(toRead[i]);
+        }
+        auto readKept = [&](const std::vector<LocalOcr::LineBox> &boxes) {
+            if (boxes.empty() || !ocr.readLines(grey, w, h, boxes, lines, e, progress)) return;
             for (const TextLine &l : lines)
                 if (keepLine(l, dict, false, &st)) kept.push_back(l);
-        }
+        };
+        readKept(first);
+        second.erase(std::remove_if(second.begin(), second.end(), [&](const LocalOcr::LineBox &b) {
+                         for (const TextLine &l : kept)
+                             if (l.confidence >= 0.93f && lineOverlaps(l, b, w, h)) return true;
+                         return false;
+                     }), second.end());
+        readKept(second);
+        st.bandRead = (unsigned)(first.size() + second.size());
+        st.bandReadMs = (uint32_t)(now() - tRead);
         // two readings of one line (a tight box and a taller one): the one the recognizer was surer of
         {
             auto box = [w, h](const TextLine &l) {

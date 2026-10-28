@@ -652,6 +652,7 @@ static void MarkKnown(kt::LookupView &v) {
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
 static bool g_shotKept = false;  // Start in the lookup: keep its screenshot even with no word saved
+static bool g_benchDiffer = false;  // benchmark build: the readers disagreed on this read
 
 struct ShotJob {
     char path[96];
@@ -1182,6 +1183,21 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
         std::string err;
         kt::ScoredReadStats rst;
         rst.clock = OsTimeMs;
+#if KT_READER_BENCH
+        // alpha benchmark: the current reader and the whole screen on the same picture, for the log;
+        // the readers take turns going first (the first pays for a cold cache)
+        static unsigned benchRuns = 0;
+        const bool currentFirst = (benchRuns++ & 1) != 0;
+        std::vector<std::string> pa, pb;
+        std::string ea, eb;
+        u64 ta0 = 0, ta1 = 0;
+        auto runCurrent = [&]() {
+            ta0 = osGetTime();
+            kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], pa, ea);
+            ta1 = osGetTime();
+        };
+        if (currentFirst) runCurrent();
+#endif
         const u64 tc0 = osGetTime();
         const bool ok = kt::readScreenScored(g_localOcr, &g_dict, grey[s], ScreenW(s), 240, boxes[s], paras, err,
                                              LocalProgress, &rst);
@@ -1195,12 +1211,9 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                                            : "; no bands",
                              rst.dictChecks, (unsigned long)rst.dictMs));
 #if KT_READER_BENCH
-        {   // alpha benchmark: the current reader and the whole screen on the same picture, for the log
-            std::vector<std::string> pa, pb;
-            std::string ea, eb;
-            const u64 ta0 = osGetTime();
-            kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], pa, ea);
-            const u64 ta1 = osGetTime();
+        {
+            if (!currentFirst) runCurrent();
+            const u64 tb0 = osGetTime();
             kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, std::vector<kt::TextBox>(), pb, eb);
             const u64 tb1 = osGetTime();
             auto flat = [](const std::vector<std::string> &v) {
@@ -1209,10 +1222,14 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                 return o;
             };
             LogOcr(Utils::Format("bench: %s option1 %lu ms, current %lu ms (+ box search %lu ms), whole %lu ms; same text: "
-                                 "current %d, whole %d",
+                                 "current %d, whole %d; %s first",
                                  s == 0 ? "top" : "touchscreen", (unsigned long)(tc1 - tc0), (unsigned long)(ta1 - ta0),
-                                 (unsigned long)(tBoxes - tMem), (unsigned long)(tb1 - ta1), pa == paras, pb == paras));
-            if (pa != paras) LogOcr("bench: option1: " + flat(paras) + "  ||  current: " + flat(pa));
+                                 (unsigned long)(tBoxes - tMem), (unsigned long)(tb1 - tb0), pa == paras, pb == paras,
+                                 currentFirst ? "current" : "option1"));
+            if (pa != paras) {
+                LogOcr("bench: option1: " + flat(paras) + "  ||  current: " + flat(pa));
+                g_benchDiffer = true;
+            }
         }
 #endif
         if (ok) {
@@ -1295,6 +1312,7 @@ static void ReadAndLookUp(int mode) {
     g_readBottom = mode != kReadTop;
     g_lookupShot = "";
     g_shotKept = false;
+    g_benchDiffer = false;
     std::vector<std::string> blocks;
     std::string error;
     if (!OpenDict()) {
@@ -1307,6 +1325,12 @@ static void ReadAndLookUp(int mode) {
     } else {
         g_viewOpenedAt = osGetTime();
         OpenLookup(blocks, g_readBottom && g_textOnTop);
+#if KT_READER_BENCH
+        if (g_benchDiffer && g_lookupShot.empty()) {  // the readers disagreed: keep the screen to replay
+            const std::string shot = SaveScreenshot();
+            if (!shot.empty()) LogOcr("bench: readers disagreed, screenshot kept: " + shot);
+        }
+#endif
     }
     RestoreScreens();
     WriteScreenshotLater();  // the game goes on while it is written
