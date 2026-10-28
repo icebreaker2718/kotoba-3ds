@@ -81,7 +81,7 @@ works on the code.
   them, and diff the `PARAGRAPH`/`FAILED` lines. About 320 screens so far, mostly Mario & Luigi:
   Dream Team, plus Pokémon Sun/Moon and Ace Attorney.
 
-## Status (2026-10-26)
+## Status (2026-10-27)
 
 - `main` = the confirmed release (lid-close fix, no OCR needed on the PC, flag retry,
   overlapping-box OCR fixes, saved-word spelling option, README feature list).
@@ -95,19 +95,22 @@ works on the code.
      (00040000001AE200), Corpse Party BR (000400000015D500) and Mario & Luigi (0004000000060600)
      each asked "in use" (resource-limit current value) once at start; 逆転裁判123
      (0004000000108800) asks nothing and is covered by the raised limit alone. All four start.
-- On `alpha` (2026-10-26), not yet tried on a console: Start on the lookup screen keeps the
-  screenshot without saving a word (Start again takes it back; undoing a word save keeps it).
-  For collecting screens from games where reading goes wrong, ahead of a box-free reader.
-- On `alpha` (2026-10-26), not yet tried on a console: a speed pass over what changed since the
-  last one (04d3b1e). The shaded-box growth (aeb83e1) had made the box search 2.7x slower (Mario &
-  Luigi top screen ~10 ms -> 130-250 ms on the console): it now grows as a flood fill from the
-  box's edge instead of up to 16 sweeps of a region 3 box-heights tall (same boxes on all 608
-  saved screens; tests/ has no runner for this yet: the benchmark lived in the session's scratch
-  space). Pictures painted and taken, and glyphs on 16-bit screens, with the format chosen once
-  per column instead of per pixel (byte-identical; tested in test_ocr_core). The read log line
-  splits "box" into memory check / boxes / pictures, and no longer loses its end to
-  Utils::Format's 255-character cap; the view line names the screens' framebuffer formats. The
-  memory fix scans the game's code once instead of four times.
+  3. Start on the lookup screen keeps the screenshot without saving a word (Start again takes it
+     back; undoing a word save keeps it), for collecting screens where reading goes wrong.
+  4. A speed pass over what changed since the last one (04d3b1e), tried on the console
+     (2026-10-27). The shaded-box growth (aeb83e1) had made the box search much slower; it now
+     grows as a flood fill from the box's edge (same boxes on all 661 saved screens: the plugin's
+     shots/ and luma/screenshots/). Console, median box search: Mii Plaza top 313 -> 116 ms,
+     Corpse Party 80 -> 42 ms, RE Revelations (0004000000053B00) 148 -> 158 ms, unchanged: its
+     screens mostly find no box, so the cost is elsewhere in findTextBoxes (next to look at; needs
+     its screenshots). Mario & Luigi not measured yet. Pictures painted/taken and glyphs on 16-bit
+     screens with the format chosen once per column (byte-identical, test_ocr_core): redraws
+     26 -> 22 ms (RGB565 screens). The read log line splits "box" into memory check / boxes /
+     pictures (the box search is nearly all of it) and keeps its end; the view line names the
+     screens' formats. The memory fix scans the game's code once.
+- `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
+  notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-4 to the
+  changelog before the owner reviews it again.
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
   README.
