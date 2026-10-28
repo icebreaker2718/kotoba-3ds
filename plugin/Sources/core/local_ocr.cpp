@@ -130,7 +130,7 @@ bool LocalOcr::setUp(uint32_t n, std::string &error) {
     memset(blob_ + n, 0, 32);
     int r = vocr_load(m, blob_, n);
     // the CRC pass costs ~0.1 s on the 3DS: once per file per session is enough
-    static uint32_t checkedSize[2] = {0, 0};  // two models (the benchmark build swaps them)
+    static uint32_t checkedSize[2] = {0, 0};  // the last two model files loaded
     if (r == VOCR_OK && checkedSize[0] != n && checkedSize[1] != n) {
         if (vocr_check_crc(blob_, n) != VOCR_OK) r = VOCR_E_FORMAT;
         else checkedSize[1] = checkedSize[0], checkedSize[0] = n;

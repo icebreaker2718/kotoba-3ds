@@ -64,7 +64,6 @@ static const char *const kModeNames[kModes] = {"Read the top screen", "Read the 
 static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
 static bool g_kanjiForm = true;  // saved words in their kanji form (or as the game wrote them)
 static bool g_fastMode = false;  // fast mode: flat-colour text boxes only, no text spotter
-static int g_ocrModel = 0;       // 0 VOCR6 (or VOCR5 if VOCR6 isn't on the SD card), 1 VOCR5
 static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
 enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
 static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
@@ -107,10 +106,10 @@ static bool WriteWholeFile(const std::string &path, const std::string &data) {
 
 static void SaveSettings() {
     WriteWholeFile(kSettingsPath, Utils::Format("key_top=%lu\nkey_bottom=%lu\nkey_both=%lu\ntext_on_top=%d\nhide=%d\n"
-                                                "kanji_form=%d\nfast=%d\nocr_model=%d\nserver=",
+                                                "kanji_form=%d\nfast=%d\nserver=",
                                                 (unsigned long)g_combo[0], (unsigned long)g_combo[1],
                                                 (unsigned long)g_combo[2], g_textOnTop ? 1 : 0, g_hideMode,
-                                                g_kanjiForm ? 1 : 0, g_fastMode ? 1 : 0, g_ocrModel) +
+                                                g_kanjiForm ? 1 : 0, g_fastMode ? 1 : 0) +
                                       g_server + "\n");
 }
 
@@ -151,8 +150,6 @@ static void LoadSettings() {
     if (!v.empty()) g_kanjiForm = v != "0";
     v = SettingValue(s, "fast");
     if (!v.empty()) g_fastMode = v == "1";
-    v = SettingValue(s, "ocr_model");
-    if (!v.empty()) g_ocrModel = v == "1" ? 1 : 0;
     g_server = SettingValue(s, "server");
 }
 
@@ -234,9 +231,6 @@ static u32 HeapFree() {
 
 // The biggest block malloc can give now (KB): the free memory may be in pieces.
 static uint64_t OsTimeMs() { return osGetTime(); }  // for the reader's timings
-
-// Alpha: also time the current reader and the whole screen on each read, for the log.
-#define KT_READER_BENCH 1
 
 static u32 LargestFreeKB() {
     u32 lo = 0, hi = HeapFree() / 1024;  // never ask for more than there is
@@ -658,7 +652,6 @@ static void MarkKnown(kt::LookupView &v) {
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
 static bool g_shotKept = false;  // Start in the lookup: keep its screenshot even with no word saved
-static bool g_benchDiffer = false;  // benchmark build: the readers disagreed on this read
 
 struct ShotJob {
     char path[96];
@@ -1257,9 +1250,7 @@ static std::string *g_modelNamePtr = nullptr;  // file the loaded model came fro
 #define g_modelName Leaky(g_modelNamePtr)
 
 static std::string FindModel() {
-    for (const char *n : kModelNames)  // VOCR5 first when it was chosen in the settings
-        if ((g_ocrModel != 1 || !strncmp(n, "VOCR5", 5)) && File::Exists(std::string(kModelDir) + n) == 1) return n;
-    for (const char *n : kModelNames)
+    for (const char *n : kModelNames)  // VOCR6 first; VOCR5 when VOCR6 isn't on the SD card
         if (File::Exists(std::string(kModelDir) + n) == 1) return n;
     return "";
 }
@@ -1361,13 +1352,7 @@ static bool LoadModel(const std::string &name, std::string &error) {
 // it): the text boxes found by their colour, and the grey picture (malloc'd; nullptr on failure).
 static u64 g_boxSearchMs[2] = {0, 0};  // the last ScreenGrey's text-box search, per screen
 
-// The benchmark build's text boxes: both searches on the same picture, timed.
-struct BenchBoxes {
-    std::vector<kt::TextBox> shaded, flat;  // with growing into a gradient (the test build), without (fast mode)
-    u64 shadedMs = 0, flatMs = 0;
-};
-
-static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxes = true, BenchBoxes *bench = nullptr) {
+static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxes = true) {
     const Screen &s = ScreenOf(i);
     const u32 W = ScreenW(i), bpp = s.BytesPerPixel;
     if (bpp < 2 || bpp > 4) return nullptr;
@@ -1386,26 +1371,9 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxe
     boxes.clear();
     if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240, 3, !g_fastMode);
     g_boxSearchMs[i] = osGetTime() - tb;
-    if (bench) {
-        u64 t = osGetTime();
-        bench->shaded = kt::findTextBoxes(rgb, W, 240, 3, true);
-        bench->shadedMs = osGetTime() - t;
-        t = osGetTime();
-        bench->flat = kt::findTextBoxes(rgb, W, 240, 3, false);
-        bench->flatMs = osGetTime() - t;
-    }
     uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
     free(rgb);
     return grey;
-}
-
-static std::string FlatText(const std::vector<std::string> &v) {  // one line for the log
-    std::string o;
-    for (const std::string &x : v) {
-        if (!o.empty()) o += " / ";
-        for (char c : x) o += c == '\n' ? '|' : c;
-    }
-    return o;
 }
 
 // One screen read as the settings say: the reading area (if set), the text spotter, or the text
@@ -1449,83 +1417,6 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
     return ok;
 }
 
-#if KT_READER_BENCH
-// The benchmark build: every reader on the screens just read, with each OCR model on the SD card
-// (one in memory at a time: the other is loaded for it, then the one in use again). One log line
-// per reader: "bench: <screen> <model> <reader> <ms> | <text>"; a reader that disagrees with the
-// text shown keeps the screenshot.
-static void BenchAllReaders(const bool screens[2], uint8_t *const grey[2], const BenchBoxes bb[2],
-                            const std::vector<std::string> shown[2], const std::string &inUse) {
-    static unsigned runs = 0;
-    const unsigned rot = runs++;
-    const bool haveSpot = LoadSpotter();
-    std::vector<std::string> models;
-    models.push_back(inUse);
-    for (const char *n : {"VOCR6.2_N_w8g2.vocr", "VOCR5_N_w8.vocr"})
-        if (inUse != n && File::Exists(std::string(kModelDir) + n) == 1) models.push_back(n);
-    const char *const kNames[] = {"test build (shaded boxes)", "fast mode (flat boxes)", "spotter", "area + line finder",
-                                  "area + spotter"};
-    const unsigned kReaders = 5;
-    for (size_t mi = 0; mi < models.size(); mi++) {
-        if (g_modelName != models[mi]) {
-            std::string e;
-            const u64 tl = osGetTime();
-            if (!LoadModel(models[mi], e)) {
-                LogOcr("bench: could not load " + models[mi] + " (" + e + ")");
-                continue;
-            }
-            LogOcr(Utils::Format("bench: %s loaded in %lu ms", models[mi].c_str(), (unsigned long)(osGetTime() - tl)));
-        }
-        const std::string mshort = models[mi].substr(0, models[mi].find('_'));
-        for (int s = 0; s < 2; s++) {
-            if (!screens[s] || !grey[s]) continue;
-            const char *sn = s == 0 ? "top" : "touchscreen";
-            if (s == 0 || mi == 0)
-                LogOcr(Utils::Format("bench: %s box search: shaded %lu ms (%u boxes), flat %lu ms (%u boxes)", sn,
-                                     (unsigned long)bb[s].shadedMs, (unsigned)bb[s].shaded.size(),
-                                     (unsigned long)bb[s].flatMs, (unsigned)bb[s].flat.size()));
-            for (unsigned k = 0; k < kReaders; k++) {
-                const unsigned r = (k + rot) % kReaders;  // the readers take turns going first (a cold cache)
-                if ((r == 2 || r == 4) && !haveSpot) continue;
-                if (r >= 3 && !g_area[s].set) continue;
-                std::vector<std::string> out;
-                std::string e;
-                ShowBusy("Benchmark...", Utils::Format("%s: %s", mshort.c_str(), kNames[r]));
-                const u64 t = osGetTime();
-                if (r == 0) {
-                    kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, bb[s].shaded, out, e);
-                } else if (r == 1) {
-                    kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, bb[s].flat, out, e);
-                } else if (r == 2) {
-                    kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey[s], ScreenW(s), 240, out, e);
-                } else {
-                    const ReadArea &a = g_area[s];
-                    uint8_t *crop = (uint8_t *)malloc((size_t)a.w * a.h);
-                    if (!crop) continue;
-                    for (unsigned y = 0; y < a.h; y++)
-                        memcpy(crop + (size_t)y * a.w, grey[s] + (size_t)(a.y + y) * ScreenW(s) + a.x, a.w);
-                    if (r == 3) kt::localReadScreen(g_localOcr, crop, a.w, a.h, std::vector<kt::TextBox>(), out, e);
-                    else kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, crop, a.w, a.h, out, e);
-                    free(crop);
-                }
-                u64 ms = osGetTime() - t;
-                if (r == 0) ms += bb[s].shadedMs;  // with the reader's own box search
-                if (r == 1) ms += bb[s].flatMs;
-                const bool same = out == shown[s];
-                if (!same) g_benchDiffer = true;
-                LogOcr(Utils::Format("bench: %s %s %s %lu ms%s | ", sn, mshort.c_str(), kNames[r], (unsigned long)ms,
-                                     same ? ", same as shown" : "") +
-                       FlatText(out));
-            }
-        }
-    }
-    if (g_modelName != inUse) {  // the model in use again, for the next read
-        std::string e;
-        if (!LoadModel(inUse, e)) LogOcr("bench: could not load " + inUse + " again (" + e + ")");
-    }
-}
-#endif
-
 // Reads the screens of `mode` -> text blocks (the top screen's first; with the text spotter in its
 // reading order, else each screen's text boxes top to bottom). Call with the game paused and
 // nothing drawn yet.
@@ -1553,10 +1444,9 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     const bool screens[2] = {mode != kReadBottom, mode != kReadTop};
     uint8_t *grey[2] = {nullptr, nullptr};
     std::vector<kt::TextBox> boxes[2];
-    BenchBoxes bb[2];
     for (int s = 0; s < 2; s++)
         if (screens[s])  // the spotter and an area need no boxes
-            grey[s] = ScreenGrey(s, boxes[s], !g_area[s].set && !spot, KT_READER_BENCH ? &bb[s] : nullptr);
+            grey[s] = ScreenGrey(s, boxes[s], !g_area[s].set && !spot);
     const u64 tBoxes = osGetTime();
     // then the game's screens as they are, for drawing under the lookup and the card's
     // screenshot (after the colour copies above are freed: the pictures take their place): the
@@ -1599,13 +1489,6 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                          (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
                          (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
            first);
-#if KT_READER_BENCH
-    {
-        const u64 tb = osGetTime();
-        BenchAllReaders(screens, grey, bb, shown, name);
-        LogOcr(Utils::Format("bench: all readers %lu ms", (unsigned long)(osGetTime() - tb)));
-    }
-#endif
     for (int s = 0; s < 2; s++) free(grey[s]);
     return any;
 }
@@ -1663,7 +1546,6 @@ static void ReadAndLookUp(int mode) {
     g_readBottom = mode != kReadTop;
     g_lookupShot = "";
     g_shotKept = false;
-    g_benchDiffer = false;
     std::vector<std::string> blocks;
     std::string error;
     if (!OpenDict()) {
@@ -1676,12 +1558,6 @@ static void ReadAndLookUp(int mode) {
     } else {
         g_viewOpenedAt = osGetTime();
         OpenLookup(blocks, g_readBottom && g_textOnTop);
-#if KT_READER_BENCH
-        if (g_benchDiffer && g_lookupShot.empty()) {  // the readers disagreed: keep the screen to replay
-            const std::string shot = SaveScreenshot();
-            if (!shot.empty()) LogOcr("bench: readers disagreed, screenshot kept: " + shot);
-        }
-#endif
     }
     RestoreScreens();
     WriteScreenshotLater();  // the game goes on while it is written
@@ -2139,7 +2015,7 @@ static void Settings() {
     kt::MenuView m(Text());
     m.setTitle("Kotoba3DS");
     m.setButtons({" Choose", " Close"});
-    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kFast, kArea, kModel, kLast, kSaved, kCards,
+    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kFast, kArea, kLast, kSaved, kCards,
                kKnown, kPc, kHelp, kRows };
     FinishScreenshot();  // "Make Anki cards" may send it
     LoadAreas();
@@ -2191,12 +2067,6 @@ static void Settings() {
             "For a game whose text always shows in one place: only that part of the screen is read "
             "(quicker, and nothing else on the screen gets in). Set for this game only, for each "
             "screen.\n\nA: set it on the paused game.";
-        items[kModel].label = "OCR model";
-        items[kModel].value = g_ocrModel == 1 ? "VOCR5" : "VOCR6";
-        items[kModel].help =
-            "The recognizer that reads the text: VOCR6 (newer, quicker) or VOCR5 (the one before). It uses "
-            "the other when the chosen one isn't in SD:/3ds/kotoba3ds/ocr/. Loaded at the next read.\n\n"
-            "A,  or : change.";
         items[kLast].label = "Last lookup";
         items[kLast].dim = g_lastBlocks.empty();
         items[kLast].help = "Opens the text of your last lookup again.";
@@ -2234,9 +2104,6 @@ static void Settings() {
             SaveSettings();
         } else if (row == kFast) {
             g_fastMode = !g_fastMode;
-            SaveSettings();
-        } else if (row == kModel) {
-            g_ocrModel = 1 - g_ocrModel;
             SaveSettings();
         } else if (dir) {
             continue;
