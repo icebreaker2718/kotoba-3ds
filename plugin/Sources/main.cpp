@@ -1038,6 +1038,209 @@ static void RunLookupView(kt::LookupView &v) {
 }
 
 // ---------------------------------------------------------------------------
+// Reading areas: for a game whose text always shows in one place, a part of a screen that is read
+// instead of the whole screen (no text-box search: quicker, and nothing else on the screen gets
+// in). Per game and per screen, in /3ds/kotoba3ds/areas.txt: "<title ID> top|touch x y w h".
+// ---------------------------------------------------------------------------
+struct ReadArea {
+    bool set = false;
+    unsigned x = 0, y = 0, w = 0, h = 0;
+};
+static const char *kAreasPath = "/3ds/kotoba3ds/areas.txt";
+static ReadArea g_area[2];
+static std::string *g_areaTitlePtr = nullptr;  // the game they are for
+#define g_areaTitle Leaky(g_areaTitlePtr)
+static const unsigned kAreaMinW = 24, kAreaMinH = 16;
+
+static bool AreaFits(const ReadArea &a, int screen) {
+    return a.w >= kAreaMinW && a.h >= kAreaMinH && a.x + a.w <= ScreenW(screen) && a.y + a.h <= 240;
+}
+
+static void LoadAreas() {
+    const std::string tid = TitleIdHex();
+    if (g_areaTitle == tid && !tid.empty()) return;
+    g_areaTitle = tid;
+    g_area[0] = g_area[1] = ReadArea();
+    std::string all;
+    if (!ReadWholeFile(kAreasPath, all, 64 * 1024)) return;
+    size_t p = 0;
+    while (p < all.size()) {
+        size_t e = all.find('\n', p);
+        if (e == std::string::npos) e = all.size();
+        char id[40] = {0}, scr[8] = {0};
+        unsigned x, y, w, h;
+        if (sscanf(all.substr(p, e - p).c_str(), "%39s %7s %u %u %u %u", id, scr, &x, &y, &w, &h) == 6 && tid == id) {
+            const int i = !strcmp(scr, "touch") ? 1 : 0;
+            ReadArea a;
+            a.set = true;
+            a.x = x, a.y = y, a.w = w, a.h = h;
+            if (AreaFits(a, i)) g_area[i] = a;
+        }
+        p = e + 1;
+    }
+}
+
+static void SaveAreas() {
+    const std::string tid = TitleIdHex();
+    std::string all, out;
+    ReadWholeFile(kAreasPath, all, 64 * 1024);
+    size_t p = 0;
+    while (p < all.size()) {  // other games' lines stay
+        size_t e = all.find('\n', p);
+        if (e == std::string::npos) e = all.size();
+        const std::string line = all.substr(p, e - p);
+        if (!line.empty() && line.compare(0, tid.size() + 1, tid + " ") != 0) out += line + "\n";
+        p = e + 1;
+    }
+    for (int i = 0; i < 2; i++)
+        if (g_area[i].set)
+            out += Utils::Format("%s %s %u %u %u %u\n", tid.c_str(), i ? "touch" : "top", g_area[i].x, g_area[i].y,
+                                 g_area[i].w, g_area[i].h);
+    WriteWholeFile(kAreasPath, out);
+}
+
+static std::string AreaSummary() {
+    if (!g_area[0].set && !g_area[1].set) return "whole screen";
+    if (g_area[0].set && g_area[1].set) return "set (both screens)";
+    return g_area[0].set ? "set (top screen)" : "set (touchscreen)";
+}
+
+// The editor: the paused game's screen with the area on it. D-Pad moves it, L + D-Pad changes
+// its size (R held: in bigger steps); on the touchscreen it can also be drawn with the stylus.
+// X: the other screen. A: save, Y: whole screen again, B: back without saving.
+static void EditReadArea() {
+    ReadArea area[2] = {g_area[0], g_area[1]};
+    for (int i = 0; i < 2; i++)
+        if (!area[i].set) {  // a start: a dialogue box's usual place, the bottom third
+            area[i].x = 8;
+            area[i].y = 156;
+            area[i].w = ScreenW(i) - 16;
+            area[i].h = 76;
+        }
+    bool changed[2] = {false, false};
+    int scr = 0;
+    auto draw = [&]() {
+        const ReadArea &a = area[scr];
+        const Screen &s = ScreenOf(scr);
+        ScreenCanvas c(s);
+        if (!PaintScreen(scr, 0)) c.fill(0, 0, ScreenW(scr), 240, kPanel);
+        const int x = (int)a.x, y = (int)a.y, w = (int)a.w, h = (int)a.h, W = (int)ScreenW(scr);
+        c.shade(0, 0, W, y, 150);
+        c.shade(0, y + h, W, 240 - y - h, 150);
+        c.shade(0, y, x, h, 150);
+        c.shade(x + w, y, W - x - w, h, 150);
+        const kt::Rgb edge = (area[scr].set || changed[scr]) ? kGood : kWarn;
+        c.fill(x, y, w, 2, edge);
+        c.fill(x, y + h - 2, w, 2, edge);
+        c.fill(x, y, 2, h, edge);
+        c.fill(x + w - 2, y, 2, h, edge);
+        // the help on the other screen
+        ScreenCanvas o(ScreenOf(1 - scr));
+        const int ow = (int)ScreenW(1 - scr);
+        o.fill(0, 0, ow, 240, kPanel);
+        kt::TextRenderer &tr = Text();
+        tr.draw(o, 12, 10, scr == 0 ? "Reading area: top screen" : "Reading area: touchscreen", 18, kInk);
+        static const char *const kLines[] = {
+            "Only this part of the screen is read",
+            "(for this game). The rest is ignored.",
+            "",
+            "D-Pad: move     L + D-Pad: size",
+            "Hold R: bigger steps",
+            "X: the other screen",
+            "A: save   Y: whole screen   B: back",
+        };
+        int ly = 40;
+        for (const char *l : kLines) {
+            tr.draw(o, 12, ly, l, 15, kGreyInk);
+            ly += 22;
+        }
+        if (scr == 1) tr.draw(o, 12, ly + 4, "Or draw it with the stylus.", 15, kGreyInk);
+        tr.draw(o, 12, 214, Utils::Format("x %u  y %u  %u x %u%s", a.x, a.y, a.w, a.h,
+                                          (area[scr].set || changed[scr]) ? "" : "  (not set)"), 15, kInk);
+        Present();
+    };
+    draw();
+    u32 repeatKey = 0;
+    u64 repeatAt = 0;
+    bool touchWas = true;
+    unsigned tx0 = 0, ty0 = 0;
+    const u32 kDirs = Key::DPadUp | Key::DPadDown | Key::DPadLeft | Key::DPadRight;
+    while (true) {
+        Controller::Update();
+        const u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
+        const u64 now = osGetTime();
+        if (SleepRequested() || (down & Key::B)) return;
+        if (down & Key::A) {
+            for (int i = 0; i < 2; i++)
+                if (changed[i]) {
+                    area[i].set = true;
+                    g_area[i] = area[i];
+                }
+            SaveAreas();
+            return;
+        }
+        if (down & Key::Y) {
+            g_area[scr] = ReadArea();
+            area[scr].set = false;
+            changed[scr] = false;
+            SaveAreas();
+            draw();
+            continue;
+        }
+        if (down & Key::X) {
+            scr = 1 - scr;
+            draw();
+            continue;
+        }
+        u32 mv = down & kDirs;
+        if (mv) {
+            repeatKey = mv;
+            repeatAt = now + 250;
+        } else if (repeatKey && (held & repeatKey) && now >= repeatAt) {
+            mv = held & repeatKey;
+            repeatAt = now + 40;
+        } else if (!(held & repeatKey)) {
+            repeatKey = 0;
+        }
+        bool moved = false;
+        if (mv) {
+            ReadArea &a = area[scr];
+            const int step = (held & Key::R) ? 8 : 2, W = (int)ScreenW(scr);
+            int x = (int)a.x, y = (int)a.y, w = (int)a.w, h = (int)a.h;
+            const int dx = (mv & Key::DPadLeft) ? -step : (mv & Key::DPadRight) ? step : 0;
+            const int dy = (mv & Key::DPadUp) ? -step : (mv & Key::DPadDown) ? step : 0;
+            if (held & Key::L) {
+                w = std::max((int)kAreaMinW, std::min(W - x, w + dx));
+                h = std::max((int)kAreaMinH, std::min(240 - y, h + dy));
+            } else {
+                x = std::max(0, std::min(W - w, x + dx));
+                y = std::max(0, std::min(240 - h, y + dy));
+            }
+            a.x = (unsigned)x, a.y = (unsigned)y, a.w = (unsigned)w, a.h = (unsigned)h;
+            changed[scr] = moved = true;
+        }
+        const bool touch = Touch::IsDown();
+        if (scr == 1 && touch) {  // drawn with the stylus: from where it touched to where it is
+            UIntVector p = Touch::GetPosition();
+            if (!touchWas) {
+                tx0 = std::min(p.x, 319u);
+                ty0 = std::min(p.y, 239u);
+            }
+            const unsigned tx = std::min(p.x, 319u), ty = std::min(p.y, 239u);
+            ReadArea &a = area[1];
+            const unsigned x0 = std::min(tx0, tx), x1 = std::max(tx0, tx), y0 = std::min(ty0, ty), y1 = std::max(ty0, ty);
+            if (x1 - x0 + 1 >= kAreaMinW && y1 - y0 + 1 >= kAreaMinH) {
+                a.x = x0, a.y = y0, a.w = x1 - x0 + 1, a.h = y1 - y0 + 1;
+                changed[1] = moved = true;
+            }
+        }
+        touchWas = touch;
+        if (moved) draw();
+        else Sleep(Milliseconds(16));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Reading the screen on the 3DS (VOCR): no PC, no internet. Needs the model on the SD card.
 // ---------------------------------------------------------------------------
 static const char *const kModelNames[] = {"VOCR6.2_N_w8g2.vocr", "VOCR5_N_w8.vocr", "VOCR5_S_w8.vocr",
@@ -1870,209 +2073,6 @@ static void HowToUse() {
     while (true) {
         MenuEvent ev = MenuInput(m);
         if ((ev.key & Key::B) || ev.type == MenuEvent::kButton) return;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Reading areas: for a game whose text always shows in one place, a part of a screen that is read
-// instead of the whole screen (no text-box search: quicker, and nothing else on the screen gets
-// in). Per game and per screen, in /3ds/kotoba3ds/areas.txt: "<title ID> top|touch x y w h".
-// ---------------------------------------------------------------------------
-struct ReadArea {
-    bool set = false;
-    unsigned x = 0, y = 0, w = 0, h = 0;
-};
-static const char *kAreasPath = "/3ds/kotoba3ds/areas.txt";
-static ReadArea g_area[2];
-static std::string *g_areaTitlePtr = nullptr;  // the game they are for
-#define g_areaTitle Leaky(g_areaTitlePtr)
-static const unsigned kAreaMinW = 24, kAreaMinH = 16;
-
-static bool AreaFits(const ReadArea &a, int screen) {
-    return a.w >= kAreaMinW && a.h >= kAreaMinH && a.x + a.w <= ScreenW(screen) && a.y + a.h <= 240;
-}
-
-static void LoadAreas() {
-    const std::string tid = TitleIdHex();
-    if (g_areaTitle == tid && !tid.empty()) return;
-    g_areaTitle = tid;
-    g_area[0] = g_area[1] = ReadArea();
-    std::string all;
-    if (!ReadWholeFile(kAreasPath, all, 64 * 1024)) return;
-    size_t p = 0;
-    while (p < all.size()) {
-        size_t e = all.find('\n', p);
-        if (e == std::string::npos) e = all.size();
-        char id[40] = {0}, scr[8] = {0};
-        unsigned x, y, w, h;
-        if (sscanf(all.substr(p, e - p).c_str(), "%39s %7s %u %u %u %u", id, scr, &x, &y, &w, &h) == 6 && tid == id) {
-            const int i = !strcmp(scr, "touch") ? 1 : 0;
-            ReadArea a;
-            a.set = true;
-            a.x = x, a.y = y, a.w = w, a.h = h;
-            if (AreaFits(a, i)) g_area[i] = a;
-        }
-        p = e + 1;
-    }
-}
-
-static void SaveAreas() {
-    const std::string tid = TitleIdHex();
-    std::string all, out;
-    ReadWholeFile(kAreasPath, all, 64 * 1024);
-    size_t p = 0;
-    while (p < all.size()) {  // other games' lines stay
-        size_t e = all.find('\n', p);
-        if (e == std::string::npos) e = all.size();
-        const std::string line = all.substr(p, e - p);
-        if (!line.empty() && line.compare(0, tid.size() + 1, tid + " ") != 0) out += line + "\n";
-        p = e + 1;
-    }
-    for (int i = 0; i < 2; i++)
-        if (g_area[i].set)
-            out += Utils::Format("%s %s %u %u %u %u\n", tid.c_str(), i ? "touch" : "top", g_area[i].x, g_area[i].y,
-                                 g_area[i].w, g_area[i].h);
-    WriteWholeFile(kAreasPath, out);
-}
-
-static std::string AreaSummary() {
-    if (!g_area[0].set && !g_area[1].set) return "whole screen";
-    if (g_area[0].set && g_area[1].set) return "set (both screens)";
-    return g_area[0].set ? "set (top screen)" : "set (touchscreen)";
-}
-
-// The editor: the paused game's screen with the area on it. D-Pad moves it, L + D-Pad changes
-// its size (R held: in bigger steps); on the touchscreen it can also be drawn with the stylus.
-// X: the other screen. A: save, Y: whole screen again, B: back without saving.
-static void EditReadArea() {
-    ReadArea area[2] = {g_area[0], g_area[1]};
-    for (int i = 0; i < 2; i++)
-        if (!area[i].set) {  // a start: a dialogue box's usual place, the bottom third
-            area[i].x = 8;
-            area[i].y = 156;
-            area[i].w = ScreenW(i) - 16;
-            area[i].h = 76;
-        }
-    bool changed[2] = {false, false};
-    int scr = 0;
-    auto draw = [&]() {
-        const ReadArea &a = area[scr];
-        const Screen &s = ScreenOf(scr);
-        ScreenCanvas c(s);
-        if (!PaintScreen(scr, 0)) c.fill(0, 0, ScreenW(scr), 240, kPanel);
-        const int x = (int)a.x, y = (int)a.y, w = (int)a.w, h = (int)a.h, W = (int)ScreenW(scr);
-        c.shade(0, 0, W, y, 150);
-        c.shade(0, y + h, W, 240 - y - h, 150);
-        c.shade(0, y, x, h, 150);
-        c.shade(x + w, y, W - x - w, h, 150);
-        const kt::Rgb edge = (area[scr].set || changed[scr]) ? kGood : kWarn;
-        c.fill(x, y, w, 2, edge);
-        c.fill(x, y + h - 2, w, 2, edge);
-        c.fill(x, y, 2, h, edge);
-        c.fill(x + w - 2, y, 2, h, edge);
-        // the help on the other screen
-        ScreenCanvas o(ScreenOf(1 - scr));
-        const int ow = (int)ScreenW(1 - scr);
-        o.fill(0, 0, ow, 240, kPanel);
-        kt::TextRenderer &tr = Text();
-        tr.draw(o, 12, 10, scr == 0 ? "Reading area: top screen" : "Reading area: touchscreen", 18, kInk);
-        static const char *const kLines[] = {
-            "Only this part of the screen is read",
-            "(for this game). The rest is ignored.",
-            "",
-            "D-Pad: move     L + D-Pad: size",
-            "Hold R: bigger steps",
-            "X: the other screen",
-            "A: save   Y: whole screen   B: back",
-        };
-        int ly = 40;
-        for (const char *l : kLines) {
-            tr.draw(o, 12, ly, l, 15, kGreyInk);
-            ly += 22;
-        }
-        if (scr == 1) tr.draw(o, 12, ly + 4, "Or draw it with the stylus.", 15, kGreyInk);
-        tr.draw(o, 12, 214, Utils::Format("x %u  y %u  %u x %u%s", a.x, a.y, a.w, a.h,
-                                          (area[scr].set || changed[scr]) ? "" : "  (not set)"), 15, kInk);
-        Present();
-    };
-    draw();
-    u32 repeatKey = 0;
-    u64 repeatAt = 0;
-    bool touchWas = true;
-    unsigned tx0 = 0, ty0 = 0;
-    const u32 kDirs = Key::DPadUp | Key::DPadDown | Key::DPadLeft | Key::DPadRight;
-    while (true) {
-        Controller::Update();
-        const u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
-        const u64 now = osGetTime();
-        if (SleepRequested() || (down & Key::B)) return;
-        if (down & Key::A) {
-            for (int i = 0; i < 2; i++)
-                if (changed[i]) {
-                    area[i].set = true;
-                    g_area[i] = area[i];
-                }
-            SaveAreas();
-            return;
-        }
-        if (down & Key::Y) {
-            g_area[scr] = ReadArea();
-            area[scr].set = false;
-            changed[scr] = false;
-            SaveAreas();
-            draw();
-            continue;
-        }
-        if (down & Key::X) {
-            scr = 1 - scr;
-            draw();
-            continue;
-        }
-        u32 mv = down & kDirs;
-        if (mv) {
-            repeatKey = mv;
-            repeatAt = now + 250;
-        } else if (repeatKey && (held & repeatKey) && now >= repeatAt) {
-            mv = held & repeatKey;
-            repeatAt = now + 40;
-        } else if (!(held & repeatKey)) {
-            repeatKey = 0;
-        }
-        bool moved = false;
-        if (mv) {
-            ReadArea &a = area[scr];
-            const int step = (held & Key::R) ? 8 : 2, W = (int)ScreenW(scr);
-            int x = (int)a.x, y = (int)a.y, w = (int)a.w, h = (int)a.h;
-            const int dx = (mv & Key::DPadLeft) ? -step : (mv & Key::DPadRight) ? step : 0;
-            const int dy = (mv & Key::DPadUp) ? -step : (mv & Key::DPadDown) ? step : 0;
-            if (held & Key::L) {
-                w = std::max((int)kAreaMinW, std::min(W - x, w + dx));
-                h = std::max((int)kAreaMinH, std::min(240 - y, h + dy));
-            } else {
-                x = std::max(0, std::min(W - w, x + dx));
-                y = std::max(0, std::min(240 - h, y + dy));
-            }
-            a.x = (unsigned)x, a.y = (unsigned)y, a.w = (unsigned)w, a.h = (unsigned)h;
-            changed[scr] = moved = true;
-        }
-        const bool touch = Touch::IsDown();
-        if (scr == 1 && touch) {  // drawn with the stylus: from where it touched to where it is
-            UIntVector p = Touch::GetPosition();
-            if (!touchWas) {
-                tx0 = std::min(p.x, 319u);
-                ty0 = std::min(p.y, 239u);
-            }
-            const unsigned tx = std::min(p.x, 319u), ty = std::min(p.y, 239u);
-            ReadArea &a = area[1];
-            const unsigned x0 = std::min(tx0, tx), x1 = std::max(tx0, tx), y0 = std::min(ty0, ty), y1 = std::max(ty0, ty);
-            if (x1 - x0 + 1 >= kAreaMinW && y1 - y0 + 1 >= kAreaMinH) {
-                a.x = x0, a.y = y0, a.w = x1 - x0 + 1, a.h = y1 - y0 + 1;
-                changed[1] = moved = true;
-            }
-        }
-        touchWas = touch;
-        if (moved) draw();
-        else Sleep(Milliseconds(16));
     }
 }
 
