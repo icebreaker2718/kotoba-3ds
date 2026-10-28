@@ -27,13 +27,6 @@ jobs:
           fi
           cat build.log
 
-      - name: Build a test copy that asks Luma for 2 MiB instead of 5 (games short of memory)
-        run: |
-          export PATH="$DEVKITPRO/tools/bin:$PATH"
-          sed 's/^MemorySize: .*/MemorySize: 2MiB/' plugin/Kotoba3DS.plgInfo > plugin/test2mib.plgInfo
-          3gxtool -s plugin/Kotoba3DS.elf plugin/test2mib.plgInfo plugin/Kotoba3DS-2MiB-test.3gx
-          ls -la plugin/*.3gx
-
       - name: Symbolize crash addresses
         if: hashFiles('.github/crash-addresses.txt') != ''
         continue-on-error: true
@@ -55,9 +48,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Kotoba3DS-plugin
-          path: |
-            plugin/Kotoba3DS.3gx
-            plugin/Kotoba3DS-2MiB-test.3gx
+          path: plugin/Kotoba3DS.3gx
 
   dictionary:
     runs-on: ubuntu-latest
@@ -98,21 +89,33 @@ jobs:
       - name: Install Japanese fonts (for the on-device OCR tests)
         run: sudo apt-get update -q && sudo apt-get install -y -q fonts-noto-cjk fonts-misaki
 
-      - name: Get the on-device OCR model (VOCR5 Normal, from bee-san/vita-vn-ocr)
+      - name: Get the on-device OCR models (VOCR6 Normal + the textspot8 line spotter, from bee-san/vita-vn-ocr)
         run: |
-          mkdir -p ocrpkg/3ds/kotoba3ds/ocr
-          base=https://github.com/bee-san/vita-vn-ocr/releases/download/v0.3.0
-          for f in VOCR5_N_w8.vocr MODEL_CARD_VOCR5_N.md ATTRIBUTION.md; do
-            curl -fsSL --retry 3 -o ocrpkg/3ds/kotoba3ds/ocr/$f $base/$f
+          d=ocrpkg/3ds/kotoba3ds/ocr
+          mkdir -p $d vocr5
+          base=https://github.com/bee-san/vita-vn-ocr/releases/download/v0.5.0
+          for f in VOCR6.2_N_w8g2.vocr MODEL_CARD_VOCR6.2_N.md VOCR6-ATTRIBUTION.md \
+                   textspot8_t64n8c16_w8.vtsp MODEL_CARD_TEXTSPOT8.md SPOTTER-ATTRIBUTION.md; do
+            curl -fsSL --retry 3 -o $d/$f $base/$f
           done
-          test "$(stat -c %s ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr)" = 1185632
-          cat > ocrpkg/3ds/kotoba3ds/ocr/README.txt <<'EOF'
-          On-device OCR model for Kotoba3DS: VOCR5 Normal from https://github.com/bee-san/vita-vn-ocr
-          (release v0.3.0), unchanged. The code is GPL-3.0-or-later; the weights are for
-          NON-COMMERCIAL use only (see ATTRIBUTION.md and MODEL_CARD_VOCR5_N.md).
-          Copy the "3ds" folder to the root of the SD card: the model goes to /3ds/kotoba3ds/ocr/.
+          (cd $d && sha256sum -c - <<'EOF'
+          107cf084cc0c1a3a61ce4c3f9b9cf6b31d6dff80f0a1bdb94afd3f7ee9ae3bc9  VOCR6.2_N_w8g2.vocr
+          e129d41adfa02c658a7d13d6f98064e6ab6ce9a2bc8c7a56da700a21357b5e1c  textspot8_t64n8c16_w8.vtsp
+          EOF
+          )
+          cat > $d/README.txt <<'EOF'
+          On-device OCR models for Kotoba3DS, from https://github.com/bee-san/vita-vn-ocr (release
+          v0.5.0), unchanged: VOCR6 Normal (VOCR6.2_N_w8g2.vocr), the recognizer, and textspot8
+          (textspot8_t64n8c16_w8.vtsp), which finds the lines of text on the screen. The code is
+          GPL-3.0-or-later; the weights are for NON-COMMERCIAL use only (see VOCR6-ATTRIBUTION.md,
+          SPOTTER-ATTRIBUTION.md and the model cards).
+          Copy the "3ds" folder to the root of the SD card: the files go to /3ds/kotoba3ds/ocr/.
+          An older VOCR5_N_w8.vocr there can stay or go: VOCR6 is used when both are there.
           EOF
           (cd ocrpkg && zip -qr ../Kotoba3DS-ocr-model.zip 3ds)
+          # VOCR5, for the tests only: the plugin still reads with it when VOCR6 isn't on the SD card
+          curl -fsSL --retry 3 -o vocr5/VOCR5_N_w8.vocr https://github.com/bee-san/vita-vn-ocr/releases/download/v0.3.0/VOCR5_N_w8.vocr
+          test "$(stat -c %s vocr5/VOCR5_N_w8.vocr)" = 1185632
 
       - uses: actions/upload-artifact@v4
         with:
@@ -122,14 +125,16 @@ jobs:
       - name: Test the plugin core against it
         run: make -C tests run DICT=../dict.bin
 
-      - name: Test on-device OCR on rendered 3DS screens
-        run: python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr
+      - name: Test on-device OCR on rendered 3DS screens (VOCR6, and VOCR5 as the fallback)
+        run: |
+          python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR6.2_N_w8g2.vocr
+          python tests/test_local_ocr.py vocr5/VOCR5_N_w8.vocr
 
       - name: Test on-device OCR built for the 3DS CPU (ARMv6 SIMD kernel, under qemu-arm)
         run: |
           sudo apt-get install -y -q gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user
           tests/build_arm_cli.sh
-          OCR_PROBE="qemu-arm -cpu cortex-a15 $PWD/tests/ocr_cli_arm" python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr
+          OCR_PROBE="qemu-arm -cpu cortex-a15 $PWD/tests/ocr_cli_arm" python tests/test_local_ocr.py ocrpkg/3ds/kotoba3ds/ocr/VOCR6.2_N_w8g2.vocr
 
       - name: Test the memory-call stand-ins on an ARM CPU (under qemu-arm)
         run: tests/build_memhooks_arm.sh
@@ -170,16 +175,14 @@ jobs:
         run: |
           ls -la out
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest out/Kotoba3DS.3gx out/dict.bin out/Kotoba3DS-ocr-model.zip out/Kotoba3DS-2MiB-test.3gx \
+          gh release create latest out/Kotoba3DS.3gx out/dict.bin out/Kotoba3DS-ocr-model.zip \
             --target "$GITHUB_SHA" --latest \
             --title "Kotoba3DS (latest build)" \
             --notes "Built automatically from ${GITHUB_SHA::7} on $(date -u +%Y-%m-%d).
 
           1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\` (every game), or \`/luma/plugins/<TitleID>/Kotoba3DS.3gx\` for one game.
           2. Copy **dict.bin** to \`/3ds/kotoba3ds/dict.bin\`.
-          3. Unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card (the on-device OCR model). The model is [VOCR5 by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only.
-
-          **Kotoba3DS-2MiB-test.3gx** is a test copy for games that crash at start with the plugin: it asks Luma for 2 MiB of the game's memory instead of 5. Reading the screen doesn't fit in 2 MiB, so it only shows whether the game starts (and its start-up line in ocr_log.txt).
+          3. Unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card (the on-device OCR models: VOCR6 and the textspot8 line spotter, [by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only).
 
           See the README for the PC tools (OCR server, Anki cards)."
 
@@ -207,8 +210,8 @@ jobs:
             --notes "NOT FOR TESTERS OR PLAYERS. This is the developer's experimental alpha build (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)), published only so it can be copied onto the developer's own SD card. It may crash, run slowly (it benchmarks every reader on each read) or need files that aren't in any release. For trying new features use the \"Kotoba3DS test build\" pre-release; for normal use, the latest release."
 
   test-release:
-    # The test branch's plugin as a pre-release ("test"), for trying on the console before main.
-    needs: [plugin]
+    # The test branch's plugin and OCR models as a pre-release ("test"), for trying on the console before main.
+    needs: [plugin, dictionary]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/test'
     runs-on: ubuntu-latest
     permissions:
@@ -218,12 +221,21 @@ jobs:
         with:
           name: Kotoba3DS-plugin
           path: out
+      - uses: actions/download-artifact@v4
+        with:
+          name: Kotoba3DS-ocr-model
+          path: out
       - name: Publish the "test" pre-release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete test-build --yes --cleanup-tag 2>/dev/null || true
-          gh release create test-build out/Kotoba3DS.3gx --target "$GITHUB_SHA" --prerelease \
+          gh release create test-build out/Kotoba3DS.3gx out/Kotoba3DS-ocr-model.zip --target "$GITHUB_SHA" --prerelease \
             --title "Kotoba3DS test build" \
-            --notes "From the test branch (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)): changes not yet confirmed on a console. Uses the latest release's dict.bin and OCR model."
+            --notes "From the test branch (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)): changes not yet confirmed on a console.
+
+          1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\`.
+          2. Unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card: the new OCR models (VOCR6 and the textspot8 line spotter, [by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only) go to \`/3ds/kotoba3ds/ocr/\`. Without them the plugin reads with the older VOCR5 model, as before.
+
+          The dictionary (dict.bin) is the latest release's."
