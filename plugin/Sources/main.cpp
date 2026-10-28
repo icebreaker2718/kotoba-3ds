@@ -1599,6 +1599,49 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     return any;
 }
 
+static void OpenLookup(const std::vector<std::string> &blocks, bool textOnTop) {
+    g_lastBlocks = blocks;
+    g_lastTextOnTop = textOnTop;
+    kt::LookupView &v = View();
+    v.setTextOnTop(textOnTop);
+    LoadKnown();
+    v.setKnown(&g_known);
+    v.setText(blocks);
+    RunLookupView(v);
+    DropView();
+}
+
+// Before the game goes on: wait until every button (and the touchscreen) is let go, and a few
+// frames more. Otherwise the B (or A) that closed the plugin still reaches the game as a press
+// and skips the line you were reading.
+static void WaitForRelease() {
+    const u64 until = osGetTime() + 3000;  // a button held on purpose doesn't keep the game paused
+    while (osGetTime() < until && !SleepRequested()) {
+        Controller::Update();
+        if (!Controller::GetKeysDown(true) && !Touch::IsDown()) break;
+        Sleep(Milliseconds(10));
+    }
+    if (SleepRequested()) return;
+    Sleep(Milliseconds(80));
+    Controller::Update();  // the game's next reading is "nothing pressed"
+}
+
+// The game goes on; if the lid was closed meanwhile, the system's sleep goes ahead now.
+static void ResumeGame() {
+    const bool lid = SleepRequested();
+    Process::Play();
+    int extra = 0;
+    while (Process::IsPaused() && extra < 8) {  // paused twice somewhere: the game must go on all the same
+        Process::Play();
+        extra++;
+    }
+    if (lid)
+        LogOcr(Utils::Format("power %llu: lid closed with the plugin open: the game goes on (paused %s, %d extra), "
+                             "sleep flag %d", (unsigned long long)osGetTime(), Process::IsPaused() ? "STILL" : "no",
+                             extra, SystemImpl::WantsToSleep() ? 1 : 0));
+    if (SystemImpl::WantsToSleep()) SystemImpl::ReadyToSleep();
+}
+
 // A hotkey: pause the game, read its screen(s), look a word up.
 static void ReadAndLookUp(int mode) {
     Process::Pause();
