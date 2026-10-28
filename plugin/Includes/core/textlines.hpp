@@ -12,6 +12,10 @@ struct TextLine {
     float centerY = 0;
     float centerX = 0, width = 0;
     int paragraph = 0;
+    // how sure the recognizer was: the mean, over its characters, of each one's share among the
+    // recognizer's top guesses (0..1); -1 when not measured
+    float confidence = -1;
+    bool dark = false;  // text darker than its background
 };
 
 // One string per block, furigana dropped (kana-only lines much shorter than the text around

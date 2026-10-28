@@ -227,6 +227,11 @@ static u32 HeapFree() {
 }
 
 // The biggest block malloc can give now (KB): the free memory may be in pieces.
+static uint64_t OsTimeMs() { return osGetTime(); }  // for the reader's timings
+
+// Alpha: also time the current reader and the whole screen on each read, for the log.
+#define KT_READER_BENCH 1
+
 static u32 LargestFreeKB() {
     u32 lo = 0, hi = HeapFree() / 1024;  // never ask for more than there is
     while (lo < hi) {
@@ -1175,11 +1180,42 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
         }
         std::vector<std::string> paras;
         std::string err;
-        int used = -1;
-        if (kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], paras, err, LocalProgress, &used)) {
-            if (used < 0)  // the whole screen: the longest first (the dialogue, usually)
-                std::stable_sort(paras.begin(), paras.end(),
-                                 [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
+        kt::ScoredReadStats rst;
+        rst.clock = OsTimeMs;
+        const u64 tc0 = osGetTime();
+        const bool ok = kt::readScreenScored(g_localOcr, &g_dict, grey[s], ScreenW(s), 240, boxes[s], paras, err,
+                                             LocalProgress, &rst);
+        const u64 tc1 = osGetTime();
+        LogOcr(Utils::Format("reader: %s %lu ms: boxes %lu ms (%u lines, %u dropped)%s, dictionary %u checks %lu ms",
+                             s == 0 ? "top" : "touchscreen", (unsigned long)(tc1 - tc0), (unsigned long)rst.boxMs,
+                             rst.boxLines, rst.boxDropped,
+                             rst.usedBands ? Utils::Format("; bands: find %lu ms, %u candidates, read %u in %lu ms, kept %u",
+                                                           (unsigned long)rst.bandFindMs, rst.bandCandidates, rst.bandRead,
+                                                           (unsigned long)rst.bandReadMs, rst.bandKept).c_str()
+                                           : "; no bands",
+                             rst.dictChecks, (unsigned long)rst.dictMs));
+#if KT_READER_BENCH
+        {   // alpha benchmark: the current reader and the whole screen on the same picture, for the log
+            std::vector<std::string> pa, pb;
+            std::string ea, eb;
+            const u64 ta0 = osGetTime();
+            kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], pa, ea);
+            const u64 ta1 = osGetTime();
+            kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, std::vector<kt::TextBox>(), pb, eb);
+            const u64 tb1 = osGetTime();
+            auto flat = [](const std::vector<std::string> &v) {
+                std::string o;
+                for (const std::string &x : v) { if (!o.empty()) o += " / "; for (char c : x) o += c == '\n' ? '|' : c; }
+                return o;
+            };
+            LogOcr(Utils::Format("bench: %s option1 %lu ms, current %lu ms (+ box search %lu ms), whole %lu ms; same text: "
+                                 "current %d, whole %d",
+                                 s == 0 ? "top" : "touchscreen", (unsigned long)(tc1 - tc0), (unsigned long)(ta1 - ta0),
+                                 (unsigned long)(tBoxes - tMem), (unsigned long)(tb1 - ta1), pa == paras, pb == paras));
+            if (pa != paras) LogOcr("bench: option1: " + flat(paras) + "  ||  current: " + flat(pa));
+        }
+#endif
+        if (ok) {
             blocks.insert(blocks.end(), paras.begin(), paras.end());
             any = true;
         } else if (firstError.empty()) {

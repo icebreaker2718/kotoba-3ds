@@ -108,6 +108,19 @@ works on the code.
      26 -> 22 ms (RGB565 screens). The read log line splits "box" into memory check / boxes /
      pictures (the box search is nearly all of it) and keeps its end; the view line names the
      screens' formats. The memory fix scans the game's code once.
+- On `alpha` (2026-10-27), benchmark build, not yet tried on a console: option 1, "text boxes as
+  a hint" (`readScreenScored` in core/local_ocr.cpp). Box lines are scored (recognizer confidence
+  per line, now in TextLine; dictionary coverage via chunkText) and junk dropped; when the boxes
+  give no confident text, the screen is searched in 60-px bands (step 30) with the line finder,
+  candidates ranked by `textLikeness` (logistic fit on 1,534 band lines), up to 8 recognized and
+  scored; a weak box line gives way to a band line in the same place. Replaces the whole-screen
+  fallback, whose line finder can't separate text from a busy scene. Backtest against 171
+  hand-labelled screens (labels in the session scratch space, not the repo): current reader P 0.991
+  R 0.986, 156 fully right; option 1 P 0.996 R 0.993, 160 fully right (RE Revelations' subtitles,
+  Mii Plaza labels, junk next to icons fixed); whole screen R 0.624. Held-out 483 screens: 36 differ,
+  reviewed by eye: better or neutral but for name/button labels it now reads (セーブ, メニュー). PC
+  time +7%. KT_READER_BENCH in main.cpp also times the current reader and the whole screen on
+  every read ("bench:" log lines): turn it off before this goes to `test`.
 - `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
   notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-4 to the
   changelog before the owner reviews it again.
