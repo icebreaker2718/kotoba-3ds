@@ -86,10 +86,10 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     if (!m || !c) { error = "not enough memory for the OCR model"; return false; }
     int r = vocr_load(m, blob, n);
     // the CRC pass costs ~0.1 s on the 3DS: once per file per session is enough
-    static uint32_t checkedSize = 0;
-    if (r == VOCR_OK && checkedSize != n) {
+    static uint32_t checkedSize[2] = {0, 0};  // two models (the benchmark build swaps them)
+    if (r == VOCR_OK && checkedSize[0] != n && checkedSize[1] != n) {
         if (vocr_check_crc(blob, n) != VOCR_OK) r = VOCR_E_FORMAT;
-        else checkedSize = n;
+        else checkedSize[1] = checkedSize[0], checkedSize[0] = n;
     }
     if (r == VOCR_OK) vocr_pack_simd32(m);  // ARM11: weights reordered for 2-at-a-time multiplies
     if (r != VOCR_OK) {
