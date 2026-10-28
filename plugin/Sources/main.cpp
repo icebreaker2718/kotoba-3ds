@@ -63,6 +63,8 @@ enum ReadMode { kReadTop = 0, kReadBottom = 1, kReadBoth = 2, kModes = 3 };
 static const char *const kModeNames[kModes] = {"Read the top screen", "Read the touchscreen", "Read both screens"};
 static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
 static bool g_kanjiForm = true;  // saved words in their kanji form (or as the game wrote them)
+static bool g_fastMode = false;  // fast mode: flat-colour text boxes only, no text spotter
+static int g_ocrModel = 0;       // 0 VOCR6 (or VOCR5 if VOCR6 isn't on the SD card), 1 VOCR5
 static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
 enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
 static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
@@ -105,10 +107,10 @@ static bool WriteWholeFile(const std::string &path, const std::string &data) {
 
 static void SaveSettings() {
     WriteWholeFile(kSettingsPath, Utils::Format("key_top=%lu\nkey_bottom=%lu\nkey_both=%lu\ntext_on_top=%d\nhide=%d\n"
-                                                "kanji_form=%d\nserver=",
+                                                "kanji_form=%d\nfast=%d\nocr_model=%d\nserver=",
                                                 (unsigned long)g_combo[0], (unsigned long)g_combo[1],
                                                 (unsigned long)g_combo[2], g_textOnTop ? 1 : 0, g_hideMode,
-                                                g_kanjiForm ? 1 : 0) +
+                                                g_kanjiForm ? 1 : 0, g_fastMode ? 1 : 0, g_ocrModel) +
                                       g_server + "\n");
 }
 
@@ -147,6 +149,10 @@ static void LoadSettings() {
     if (!v.empty()) g_hideMode = std::max(0, std::min(2, atoi(v.c_str())));
     v = SettingValue(s, "kanji_form");
     if (!v.empty()) g_kanjiForm = v != "0";
+    v = SettingValue(s, "fast");
+    if (!v.empty()) g_fastMode = v == "1";
+    v = SettingValue(s, "ocr_model");
+    if (!v.empty()) g_ocrModel = v == "1" ? 1 : 0;
     g_server = SettingValue(s, "server");
 }
 
@@ -1048,6 +1054,8 @@ static std::string *g_modelNamePtr = nullptr;  // file the loaded model came fro
 #define g_modelName Leaky(g_modelNamePtr)
 
 static std::string FindModel() {
+    for (const char *n : kModelNames)  // VOCR5 first when it was chosen in the settings
+        if ((g_ocrModel != 1 || !strncmp(n, "VOCR5", 5)) && File::Exists(std::string(kModelDir) + n) == 1) return n;
     for (const char *n : kModelNames)
         if (File::Exists(std::string(kModelDir) + n) == 1) return n;
     return "";
@@ -1155,7 +1163,7 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxe
     }
     const u64 tb = osGetTime();
     boxes.clear();
-    if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240);
+    if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240, 3, !g_fastMode);
     g_boxSearchMs[i] = osGetTime() - tb;
     uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
     free(rgb);
@@ -1180,7 +1188,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
-    const bool spot = LoadSpotter();
+    const bool spot = !g_fastMode && LoadSpotter();
     u64 t1 = osGetTime();
     const u32 largestBefore = LargestFreeKB();  // for the log: room for the read's buffers?
     const u64 tMem = osGetTime();
@@ -1190,6 +1198,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     std::vector<kt::TextBox> boxes[2];
     for (int s = 0; s < 2; s++)
         if (screens[s]) grey[s] = ScreenGrey(s, boxes[s], !spot || KT_READER_BENCH);  // the spotter needs no boxes
+    // fast mode: the plain flat-colour box search (no growing into a gradient), and the text boxes' lines
     const u64 tBoxes = osGetTime();
     // then the game's screens as they are, for drawing under the lookup and the card's
     // screenshot (after the colour copies above are freed: the pictures take their place): the
@@ -1224,6 +1233,17 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
             ta1 = osGetTime();
         };
         if (spot && currentFirst) runCurrent();
+        // fast mode: the spotter's reader is the comparison, when its file is there
+        const bool benchSpot = g_fastMode && LoadSpotter();
+        std::vector<std::string> pspot;
+        u64 tsp0 = 0, tsp1 = 0;
+        auto runSpotter = [&]() {
+            std::string e2;
+            tsp0 = osGetTime();
+            kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey[s], ScreenW(s), 240, pspot, e2);
+            tsp1 = osGetTime();
+        };
+        if (benchSpot && currentFirst) runSpotter();
 #endif
         const u64 tc0 = osGetTime();
         bool ok;
@@ -1238,9 +1258,29 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                                  (unsigned long)sst.spotMs, sst.boxes, sst.ruby, sst.vertical, sst.read,
                                  (unsigned long)sst.readMs, sst.kept, sst.dictChecks, (unsigned long)sst.dictMs));
         } else {
-            ok = kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], paras, err, LocalProgress);
+            int usedBox = -1;
+            ok = kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], paras, err, LocalProgress, &usedBox);
+            LogOcr(Utils::Format("%s reader: %s %lu ms + box search %lu ms (%u boxes%s)", g_fastMode ? "fast" : "box",
+                                 s == 0 ? "top" : "touchscreen", (unsigned long)(osGetTime() - tc0),
+                                 (unsigned long)g_boxSearchMs[s], (unsigned)boxes[s].size(),
+                                 boxes[s].empty() ? ", read whole" : ""));
         }
         const u64 tc1 = osGetTime();
+#if KT_READER_BENCH
+        if (benchSpot) {
+            if (!currentFirst) runSpotter();
+            std::string a, b;
+            for (const std::string &x : paras) { if (!a.empty()) a += " / "; for (char c : x) a += c == '\n' ? '|' : c; }
+            for (const std::string &x : pspot) { if (!b.empty()) b += " / "; for (char c : x) b += c == '\n' ? '|' : c; }
+            LogOcr(Utils::Format("bench: %s fast %lu ms + box search %lu ms, spotter reader %lu ms; same text %d; %s first",
+                                 s == 0 ? "top" : "touchscreen", (unsigned long)(tc1 - tc0), (unsigned long)g_boxSearchMs[s],
+                                 (unsigned long)(tsp1 - tsp0), pspot == paras, currentFirst ? "spotter" : "fast"));
+            if (pspot != paras) {
+                LogOcr("bench: fast: " + a + "  ||  spotter: " + b);
+                g_benchDiffer = true;
+            }
+        }
+#endif
 #if KT_READER_BENCH
         if (spot) {
             if (!currentFirst) runCurrent();
@@ -1814,7 +1854,8 @@ static void Settings() {
     kt::MenuView m(Text());
     m.setTitle("Kotoba3DS");
     m.setButtons({" Choose", " Close"});
-    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kLast, kSaved, kCards, kKnown, kPc, kHelp, kRows };
+    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kFast, kModel, kLast, kSaved, kCards, kKnown, kPc,
+               kHelp, kRows };
     FinishScreenshot();  // "Make Anki cards" may send it
     while (true) {
         LoadKnown();
@@ -1848,6 +1889,18 @@ static void Settings() {
             "even when the game wrote it in kana (ちょっと -> 一寸). As in the game: in kanji only when "
             "the game wrote it in kanji, else in kana (たべた -> たべる).\n\n"
             "A,  or : change.";
+        items[kFast].label = "Fast mode";
+        items[kFast].value = g_fastMode ? "on" : "off";
+        items[kFast].help =
+            "On: looks only for text boxes of one flat colour (most games' dialogue boxes) and reads "
+            "their lines: quicker, but text out in the scene, menus and shaded bubbles may be missed or "
+            "read in part. Off: finds every line on the screen with the text spotter.\n\nA,  or : change.";
+        items[kModel].label = "OCR model";
+        items[kModel].value = g_ocrModel == 1 ? "VOCR5" : "VOCR6";
+        items[kModel].help =
+            "The recognizer that reads the text: VOCR6 (newer, quicker) or VOCR5 (the one before). It uses "
+            "the other when the chosen one isn't in SD:/3ds/kotoba3ds/ocr/. Loaded at the next read.\n\n"
+            "A,  or : change.";
         items[kLast].label = "Last lookup";
         items[kLast].dim = g_lastBlocks.empty();
         items[kLast].help = "Opens the text of your last lookup again.";
@@ -1882,6 +1935,12 @@ static void Settings() {
             SaveSettings();
         } else if (row == kSpelling) {
             g_kanjiForm = !g_kanjiForm;
+            SaveSettings();
+        } else if (row == kFast) {
+            g_fastMode = !g_fastMode;
+            SaveSettings();
+        } else if (row == kModel) {
+            g_ocrModel = 1 - g_ocrModel;
             SaveSettings();
         } else if (dir) {
             continue;

@@ -61,7 +61,7 @@ bool scanFill(unsigned sx, unsigned sy, unsigned W, unsigned H, uint32_t *stk, O
 }
 }  // namespace
 
-std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, unsigned maxBoxes) {
+std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, unsigned maxBoxes, bool growShaded) {
     std::vector<TextBox> out;
     const unsigned n = w * h;
     if (!rgb || n == 0 || w > 0xFFFF || h > 0xFFFF) return out;
@@ -172,7 +172,8 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
             // whose colour changes only a little from pixel to pixel: a gradient goes on, the
             // box's outline and the letters stop it. A box is closed by its outline: growth that
             // reaches the edge of the area searched is smooth scenery instead, and is taken back.
-            if (area >= kMinArea && r - l + 1 >= 80 && b - t + 1 >= 16 && next - base < 60000) {  // already box-like
+            if (growShaded && area >= kMinArea && r - l + 1 >= 80 && b - t + 1 >= 16 &&
+                next - base < 60000) {  // already box-like
                 const uint16_t grown = (uint16_t)++next;  // its own number until it's kept
                 const unsigned bw0 = r - l + 1, bh0 = b - t + 1;
                 const unsigned mx = bw0 / 4 + 8, my = bh0 + 16;
