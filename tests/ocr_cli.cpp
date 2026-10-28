@@ -1,12 +1,15 @@
 // Minimal on-device OCR command line (no network code), used to run the 3DS's OCR path built for
 // the ARM11 (ARMv6 SIMD kernel) under qemu-arm:   ocr_cli model.vocr shot.bmp [dict.bin]
-// With dict.bin, misread kanji are corrected with the dictionary as on the console.
+// With dict.bin, misread kanji are corrected with the dictionary as on the console. With the
+// environment variable KT_SPOT set to a text spotter (.vtsp), the screen is read as the console does
+// with the spotter (no text-box search).
 #include <cstdio>
 #include <cstdlib>
 
 #include "core/bmp.hpp"
 #include "core/correct.hpp"
 #include "core/local_ocr.hpp"
+#include "core/text_spot.hpp"
 #include "core/textbox.hpp"
 
 using namespace kt;
@@ -41,7 +44,15 @@ int main(int argc, char **argv) {
     }
     if (!ocr.load(mf, e)) { printf("MODEL FAILED: %s\n", e.c_str()); return 3; }
     std::vector<std::string> paras;
-    bool ok = localReadScreen(ocr, grey, w, h, boxes, paras, e);
+    bool ok;
+    if (const char *sp = getenv("KT_SPOT")) {
+        FileReader sf(sp);
+        TextSpotter spot;
+        if (!spot.load(sf, e)) { printf("SPOTTER FAILED: %s\n", e.c_str()); return 3; }
+        ok = readScreenSpot(ocr, spot, argc > 3 ? &dict : nullptr, grey, w, h, paras, e);
+    } else {
+        ok = localReadScreen(ocr, grey, w, h, boxes, paras, e);
+    }
     free(grey);
     if (!ok) { printf("OCR FAILED: %s\n", e.c_str()); return 3; }
     for (auto &p : paras) {  // the text, then where the game broke its lines

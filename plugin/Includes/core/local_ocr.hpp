@@ -9,6 +9,7 @@
 #include "core/dict.hpp"  // kt::Reader
 #include "core/textlines.hpp"
 #include "core/textbox.hpp"
+#include "core/text_spot.hpp"
 
 namespace kt {
 
@@ -57,6 +58,11 @@ public:
     // VOCR's batch sizes (0 = its defaults): frames per tile and frames per output-head batch.
     // Bigger batches use more memory; the text is the same. Takes effect at the next load().
     void setOptions(unsigned tileFrames, unsigned headFrames) { tileFrames_ = tileFrames; headFrames_ = headFrames; }
+    // A model's speed sections (VOCR6: the head gate skips the output head on blank frames, the
+    // two-level head runs the rare characters' rows only where needed), when it has them; before load.
+    void setSpeedSections(bool on) { speed_ = on; }
+    bool headGate() const { return gate_; }
+    bool twoLevel() const { return twoLevel_; }
     // With a fixer, each line's uncertain characters are passed to it (see fixOcrLine in correct.hpp).
     void setFixer(LineFixer fixer, void *user) { fixer_ = fixer; fixerUser_ = user; }  // how many the last read used
     const std::string &modelInfo() const { return info_; }
@@ -94,6 +100,7 @@ private:
     std::vector<void *> ctxs_; // vocr_ctx per worker (the first is ctx_)
     size_t arenaBytes_ = 0;
     int mode_ = 0;
+    bool speed_ = true, gate_ = false, twoLevel_ = false;
     unsigned workers_ = 1, lastWorkers_ = 1;
     Runner runner_ = nullptr;
     unsigned tileFrames_ = 0, headFrames_ = 0;
@@ -152,5 +159,23 @@ bool readScreenScored(LocalOcr &ocr, Dictionary *dict, const uint8_t *grey, unsi
 // How text-like a candidate line's pixels look, before reading it (higher: likelier text). Cheap:
 // a threshold, ink columns, edges and contrast over the line's box. Exposed for the tests.
 float textLikeness(const uint8_t *grey, unsigned w, unsigned h, const LocalOcr::LineBox &b);
+
+// What readScreenSpot did, for the log.
+struct SpotReadStats {
+    unsigned boxes = 0, vertical = 0;   // boxes the spotter found (vertical ones are not read)
+    unsigned ruby = 0;                  // furigana lines left out
+    unsigned read = 0, kept = 0;        // lines recognized / kept
+    unsigned dictChecks = 0;
+    uint64_t (*clock)() = nullptr;      // with a clock (milliseconds), where the time went
+    uint32_t spotMs = 0, readMs = 0, dictMs = 0;
+};
+
+// The text spotter's reader: the spotter finds the screen's lines (no text-box search, no line
+// finder), the recognizer reads each, and a line keeps its place if it reads like text (two
+// Japanese characters or more, and the recognizer sure of it or words in it). Furigana the spotter
+// found as lines of their own are left out. One paragraph per spotter block, in its reading order.
+bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, const uint8_t *grey, unsigned w,
+                    unsigned h, std::vector<std::string> &paragraphs, std::string &error,
+                    void (*progress)(unsigned i, unsigned n) = nullptr, SpotReadStats *stats = nullptr);
 
 }  // namespace kt

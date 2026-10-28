@@ -1034,7 +1034,14 @@ static void RunLookupView(kt::LookupView &v) {
 // ---------------------------------------------------------------------------
 // Reading the screen on the 3DS (VOCR): no PC, no internet. Needs the model on the SD card.
 // ---------------------------------------------------------------------------
-static const char *const kModelNames[] = {"VOCR5_N_w8.vocr", "VOCR5_S_w8.vocr", "VOCR5_L_w8.vocr", "model.vocr"};
+static const char *const kModelNames[] = {"VOCR6.2_N_w8g2.vocr", "VOCR5_N_w8.vocr", "VOCR5_S_w8.vocr",
+                                          "VOCR5_L_w8.vocr", "model.vocr"};
+// The text spotter (vita-vn-ocr's textspot8): finds the screen's lines, in place of the text-box
+// search and the line finder. Without the file the screen is read as before.
+static const char *const kSpotterName = "textspot8_t64n8c16_w8.vtsp";
+static kt::TextSpotter *g_spotterPtr = nullptr;
+#define g_spotter Leaky(g_spotterPtr)
+static int g_spotterState = 0;  // 0 not tried, 1 loaded, -1 missing or failed (not tried again)
 static kt::LocalOcr *g_localOcrPtr = nullptr;
 #define g_localOcr Leaky(g_localOcrPtr)
 static std::string *g_modelNamePtr = nullptr;  // file the loaded model came from
@@ -1098,6 +1105,23 @@ static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, 
     return g_core3 ? 3 : 2;
 }
 
+static bool LoadSpotter() {
+    if (g_spotterState) return g_spotterState > 0;
+    SdReader f;
+    std::string error;
+    if (!f.open(std::string(kModelDir) + kSpotterName)) {
+        error = "no file";
+    } else if (g_spotter.load(f, error)) {
+        g_spotterState = 1;
+        LogOcr(Utils::Format("spotter: %s loaded, heap free %lu KB", kSpotterName, (unsigned long)(HeapFree() / 1024)));
+        return true;
+    }
+    g_spotterState = -1;
+    LogOcr(Utils::Format("spotter: %s not used (%s): text boxes and the line finder instead", kSpotterName,
+                         error.c_str()));
+    return false;
+}
+
 static bool LoadModel(const std::string &name, std::string &error) {
     g_localOcr.unload();
     SdReader mf;
@@ -1113,7 +1137,8 @@ static bool LoadModel(const std::string &name, std::string &error) {
 
 // The OCR's input for screen i, straight from its framebuffer (call before anything is drawn on
 // it): the text boxes found by their colour, and the grey picture (malloc'd; nullptr on failure).
-static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes) {
+static u64 g_boxSearchMs[2] = {0, 0};  // the last ScreenGrey's text-box search, per screen
+static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxes = true) {
     const Screen &s = ScreenOf(i);
     const u32 W = ScreenW(i), bpp = s.BytesPerPixel;
     if (bpp < 2 || bpp > 4) return nullptr;
@@ -1128,15 +1153,18 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes) {
             for (u32 k = 0; k < 240; k++) kt::framebufferToRGB(col + k * bpp, 1, (int)s.Format, bpp, &rgb[((239 - k) * W + x) * 3]);
         }
     }
-    boxes = kt::findTextBoxes(rgb, W, 240);
+    const u64 tb = osGetTime();
+    boxes.clear();
+    if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240);
+    g_boxSearchMs[i] = osGetTime() - tb;
     uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
     free(rgb);
     return grey;
 }
 
-// Reads the screens of `mode` -> text blocks (the top screen's first; each screen's text boxes
-// top to bottom, or, read whole, its longest text first). Call with the game paused and nothing
-// drawn yet.
+// Reads the screens of `mode` -> text blocks (the top screen's first; with the text spotter in its
+// reading order, else each screen's text boxes top to bottom). Call with the game paused and
+// nothing drawn yet.
 static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string &error) {
     u64 t0 = osGetTime();
     std::string name = FindModel();
@@ -1152,6 +1180,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
+    const bool spot = LoadSpotter();
     u64 t1 = osGetTime();
     const u32 largestBefore = LargestFreeKB();  // for the log: room for the read's buffers?
     const u64 tMem = osGetTime();
@@ -1160,7 +1189,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     uint8_t *grey[2] = {nullptr, nullptr};
     std::vector<kt::TextBox> boxes[2];
     for (int s = 0; s < 2; s++)
-        if (screens[s]) grey[s] = ScreenGrey(s, boxes[s]);
+        if (screens[s]) grey[s] = ScreenGrey(s, boxes[s], !spot || KT_READER_BENCH);  // the spotter needs no boxes
     const u64 tBoxes = osGetTime();
     // then the game's screens as they are, for drawing under the lookup and the card's
     // screenshot (after the colour copies above are freed: the pictures take their place): the
@@ -1181,53 +1210,50 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
         }
         std::vector<std::string> paras;
         std::string err;
-        kt::ScoredReadStats rst;
-        rst.clock = OsTimeMs;
 #if KT_READER_BENCH
-        // alpha benchmark: the current reader and the whole screen on the same picture, for the log;
-        // the readers take turns going first (the first pays for a cold cache)
+        // alpha benchmark: the current reader (text boxes, the line finder) on the same picture, for
+        // the log; the readers take turns going first (the first pays for a cold cache)
         static unsigned benchRuns = 0;
         const bool currentFirst = (benchRuns++ & 1) != 0;
-        std::vector<std::string> pa, pb;
-        std::string ea, eb;
+        std::vector<std::string> pa;
+        std::string ea;
         u64 ta0 = 0, ta1 = 0;
         auto runCurrent = [&]() {
             ta0 = osGetTime();
             kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], pa, ea);
             ta1 = osGetTime();
         };
-        if (currentFirst) runCurrent();
+        if (spot && currentFirst) runCurrent();
 #endif
         const u64 tc0 = osGetTime();
-        const bool ok = kt::readScreenScored(g_localOcr, &g_dict, grey[s], ScreenW(s), 240, boxes[s], paras, err,
-                                             LocalProgress, &rst);
+        bool ok;
+        if (spot) {
+            kt::SpotReadStats sst;
+            sst.clock = OsTimeMs;
+            ok = kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey[s], ScreenW(s), 240, paras, err, LocalProgress,
+                                    &sst);
+            LogOcr(Utils::Format("spotter reader: %s %lu ms: spotter %lu ms (%u lines, %u furigana, %u vertical), "
+                                 "read %u in %lu ms, kept %u, dictionary %u checks %lu ms",
+                                 s == 0 ? "top" : "touchscreen", (unsigned long)(osGetTime() - tc0),
+                                 (unsigned long)sst.spotMs, sst.boxes, sst.ruby, sst.vertical, sst.read,
+                                 (unsigned long)sst.readMs, sst.kept, sst.dictChecks, (unsigned long)sst.dictMs));
+        } else {
+            ok = kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], paras, err, LocalProgress);
+        }
         const u64 tc1 = osGetTime();
-        LogOcr(Utils::Format("reader: %s %lu ms: boxes %lu ms (%u lines, %u dropped)%s, dictionary %u checks %lu ms",
-                             s == 0 ? "top" : "touchscreen", (unsigned long)(tc1 - tc0), (unsigned long)rst.boxMs,
-                             rst.boxLines, rst.boxDropped,
-                             rst.usedBands ? Utils::Format("; bands: find %lu ms, %u candidates, read %u in %lu ms, kept %u",
-                                                           (unsigned long)rst.bandFindMs, rst.bandCandidates, rst.bandRead,
-                                                           (unsigned long)rst.bandReadMs, rst.bandKept).c_str()
-                                           : "; no bands",
-                             rst.dictChecks, (unsigned long)rst.dictMs));
 #if KT_READER_BENCH
-        {
+        if (spot) {
             if (!currentFirst) runCurrent();
-            const u64 tb0 = osGetTime();
-            kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, std::vector<kt::TextBox>(), pb, eb);
-            const u64 tb1 = osGetTime();
             auto flat = [](const std::vector<std::string> &v) {
                 std::string o;
                 for (const std::string &x : v) { if (!o.empty()) o += " / "; for (char c : x) o += c == '\n' ? '|' : c; }
                 return o;
             };
-            LogOcr(Utils::Format("bench: %s option1 %lu ms, current %lu ms (+ box search %lu ms), whole %lu ms; same text: "
-                                 "current %d, whole %d; %s first",
+            LogOcr(Utils::Format("bench: %s spotter reader %lu ms, current %lu ms + box search %lu ms; same text %d; %s first",
                                  s == 0 ? "top" : "touchscreen", (unsigned long)(tc1 - tc0), (unsigned long)(ta1 - ta0),
-                                 (unsigned long)(tBoxes - tMem), (unsigned long)(tb1 - tb0), pa == paras, pb == paras,
-                                 currentFirst ? "current" : "option1"));
+                                 (unsigned long)g_boxSearchMs[s], pa == paras, currentFirst ? "current" : "spotter"));
             if (pa != paras) {
-                LogOcr("bench: option1: " + flat(paras) + "  ||  current: " + flat(pa));
+                LogOcr("bench: spotter: " + flat(paras) + "  ||  current: " + flat(pa));
                 g_benchDiffer = true;
             }
         }

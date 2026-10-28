@@ -103,6 +103,10 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     o.mode = m->int8 ? VOCR_MODE_W8I : VOCR_MODE_F32;
     o.tile_frames = tileFrames_;
     o.head_frames = headFrames_;
+    gate_ = speed_ && vocr_has_gate(m);
+    twoLevel_ = speed_ && o.mode == VOCR_MODE_W8I && vocr_has_two_level(m);
+    o.head_gate = gate_ ? VOCR_HEAD_GATE_ON : VOCR_HEAD_GATE_OFF;
+    o.two_level = twoLevel_ ? 1 : 0;
     size_t need = vocr_arena_bytes(m, &o);
     unsigned char *arena = (unsigned char *)alignedAlloc(need);
     if (!arena) { error = "not enough memory for the OCR"; return false; }
@@ -116,7 +120,8 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     model_ = m;
     ctx_ = c;
     char b[96];
-    snprintf(b, sizeof(b), "%u characters, %u KB", m->n_classes, (unsigned)(n / 1024));
+    snprintf(b, sizeof(b), "%u characters, %u KB%s%s", m->n_classes, (unsigned)(n / 1024), gate_ ? ", head gate" : "",
+             twoLevel_ ? ", two-level head" : "");
     info_ = b;
     if (runner_) ensureWorkers(workers_);
     return true;
@@ -135,6 +140,8 @@ void LocalOcr::ensureWorkers(unsigned n) {
         o.mode = mode_;
         o.tile_frames = tileFrames_;
         o.head_frames = headFrames_;
+        o.head_gate = gate_ ? VOCR_HEAD_GATE_ON : VOCR_HEAD_GATE_OFF;
+        o.two_level = twoLevel_ ? 1 : 0;
         if (!c2 || !a2 || vocr_init(c2, m, &o, a2, arenaBytes_) != VOCR_OK) break;  // fewer workers then
         ctxs_.push_back(c2);
     }
@@ -963,6 +970,138 @@ bool readScreenScored(LocalOcr &ocr, Dictionary *dict, const uint8_t *grey, unsi
     }
     std::stable_sort(blocks.begin(), blocks.end(), [](const Block &a, const Block &b) { return a.y < b.y; });
     for (const Block &b : blocks) paragraphs.insert(paragraphs.end(), b.paras.begin(), b.paras.end());
+    // a scrap (「こー」) goes when there is real text
+    unsigned best = 0;
+    for (const std::string &p : paragraphs) best = std::max(best, japaneseChars({p}));
+    if (best >= 6)
+        paragraphs.erase(std::remove_if(paragraphs.begin(), paragraphs.end(),
+                                        [](const std::string &p) { return japaneseChars({p}) < 3; }),
+                         paragraphs.end());
+    if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
+    return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// The text spotter's reader
+// ---------------------------------------------------------------------------
+static unsigned kanaIn(const std::string &t) {
+    unsigned n = 0;
+    for (size_t i = 0; i < t.size();) {
+        const uint32_t cp = utf8Next(t, i);
+        n += cp >= 0x3041 && cp <= 0x30FF;
+    }
+    return n;
+}
+
+// How far each spotter box is widened on both sides, in % of its height: the spotter stops short of a
+// faint glyph at a line's end (ー, …, ！), which the recognizer then loses (35%: best on the labelled
+// screens). A variable for the tests.
+unsigned g_spotGrowPct = 35;
+
+// Kana and the marks around them only (a line of furigana), at least one kana.
+static bool kanaOnly(const std::string &t) {
+    unsigned kana = 0;
+    for (size_t i = 0; i < t.size();) {
+        const uint32_t cp = utf8Next(t, i);
+        if ((cp >= 0x3041 && cp <= 0x30FF) || cp == 0x30FC) kana++;
+        else if (cp >= 0x3400 && cp <= 0x9FFF) return false;  // a kanji: text, not its reading
+        else if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z')) return false;
+    }
+    return kana > 0;
+}
+
+bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, const uint8_t *grey, unsigned w,
+                    unsigned h, std::vector<std::string> &paragraphs, std::string &error,
+                    void (*progress)(unsigned i, unsigned n), SpotReadStats *stats) {
+    SpotReadStats local;
+    SpotReadStats &st = stats ? *stats : local;
+    uint64_t (*clock)() = st.clock;
+    st = SpotReadStats();
+    st.clock = clock;
+    auto now = [clock]() -> uint64_t { return clock ? clock() : 0; };
+    paragraphs.clear();
+    if (dict && !dict->isOpen()) dict = nullptr;
+    const uint64_t t0 = now();
+    std::vector<SpotBox> boxes;
+    if (!spot.find(grey, w, h, boxes, error)) return false;
+    st.spotMs = (uint32_t)(now() - t0);
+    st.boxes = (unsigned)boxes.size();
+    // furigana: the spotter finds a line of readings as a line of its own. A line shorter than a
+    // line right below it, pressed against it and within its width may be one; it goes if it reads
+    // as kana only and the line below has kanji (below).
+    std::vector<int> ruby(boxes.size(), -1);  // the line it may be the reading of
+    for (size_t i = 0; i < boxes.size(); i++)
+        for (size_t j = 0; j < boxes.size() && ruby[i] < 0; j++) {
+            const SpotBox &r = boxes[i], &t = boxes[j];
+            if (i == j || r.vertical || t.vertical || r.h >= t.h) continue;
+            // above it and pressed against it: the boxes, padded, overlap by a quarter of the reading's
+            // (lines of text stand apart)
+            const int overlap = (int)(r.y + r.h) - (int)t.y;
+            const bool above = r.y < t.y && overlap * 4 >= (int)r.h && r.y * 2 + r.h < t.y * 2 + t.h;
+            const int inX = (int)std::min(r.x + r.w, t.x + t.w) - (int)std::max(r.x, t.x);
+            if (above && inX * 2 >= (int)r.w) ruby[i] = (int)j;
+        }
+    std::vector<LocalOcr::LineBox> toRead;
+    std::vector<const SpotBox *> of;
+    for (size_t i = 0; i < boxes.size(); i++) {
+        const SpotBox &b = boxes[i];
+        if (b.vertical) { st.vertical++; continue; }  // no recognizer here reads a column
+        LocalOcr::LineBox lb;
+        const unsigned grow = g_spotGrowPct * b.h / 100u;  // the spotter stops short of a faint last glyph (ー, …)
+        lb.x = b.x > grow ? b.x - grow : 0;
+        lb.y = b.y;
+        lb.w = std::min(w, b.x + b.w + grow) - lb.x;
+        lb.h = b.h;
+        lb.dark = b.dark;
+        toRead.push_back(lb);
+        of.push_back(&b);
+    }
+    std::vector<TextLine> lines;
+    const uint64_t t1 = now();
+    if (!toRead.empty() && !ocr.readLines(grey, w, h, toRead, lines, error, progress)) return false;
+    st.readMs = (uint32_t)(now() - t1);
+    st.read = (unsigned)toRead.size();
+    // each line back to its box (readLines leaves out the lines that read as nothing)
+    std::vector<const TextLine *> lineOf(boxes.size(), nullptr);
+    for (const TextLine &l : lines)
+        for (size_t i = 0; i < toRead.size(); i++) {
+            const float cx = (toRead[i].x + toRead[i].w * 0.5f) / w, cy = (toRead[i].y + toRead[i].h * 0.5f) / h;
+            if (fabsf(cx - l.centerX) * w < 1.0f && fabsf(cy - l.centerY) * h < 1.0f) {
+                lineOf[of[i] - boxes.data()] = &l;
+                break;
+            }
+        }
+    struct Kept { unsigned block; TextLine line; };
+    std::vector<Kept> kept;
+    const uint32_t dict0 = st.dictMs;
+    ScoredReadStats sst;
+    sst.clock = clock;
+    for (size_t i = 0; i < boxes.size(); i++) {
+        const TextLine *l = lineOf[i];
+        if (!l) continue;
+        const TextLine *below = ruby[i] >= 0 ? lineOf[ruby[i]] : nullptr;
+        if (below && kanaOnly(l->text) && japaneseIn(below->text) > kanaIn(below->text)) { st.ruby++; continue; }
+        // as a line found out in the scene: the recognizer sure of it, or words in it (judged as a text
+        // box's line, the spotter's dialogue kept sprites and decorations read as text: 「ーロエロー」)
+        if (!keepLine(*l, dict, false, &sst)) continue;
+        kept.push_back({boxes[i].block, *l});
+    }
+    st.dictChecks = sst.dictChecks;
+    st.dictMs = dict0 + sst.dictMs;
+    st.kept = (unsigned)kept.size();
+    // one paragraph per block, its lines in the spotter's order, one per row
+    for (size_t i = 0; i < kept.size();) {
+        std::string p;
+        size_t j = i;
+        for (; j < kept.size() && kept[j].block == kept[i].block; j++) {
+            if (!p.empty()) p += '\n';
+            p += kept[j].line.text;
+        }
+        paragraphs.push_back(p);
+        i = j;
+    }
+    cleanParagraphs(paragraphs);
     // a scrap (「こー」) goes when there is real text
     unsigned best = 0;
     for (const std::string &p : paragraphs) best = std::max(best, japaneseChars({p}));
