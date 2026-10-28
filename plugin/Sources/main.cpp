@@ -1334,9 +1334,20 @@ static bool LoadSpotter() {
 }
 
 static bool LoadModel(const std::string &name, std::string &error) {
-    g_localOcr.unload();
     SdReader mf;
     if (!mf.open(kModelDir + name)) { error = "could not open " + name; return false; }
+    // another model in the loaded one's memory: freed and taken again, 1.2 MB in one piece would
+    // soon not be found any more (the pictures of each read come and go above it)
+    if (g_localOcr.loaded()) {
+        std::string e;
+        if (g_localOcr.reloadInPlace(mf, e)) {
+            g_modelName = name;
+            return true;
+        }
+        LogOcr(Utils::Format("%s: not loaded in place (%s), heap free %lu KB", name.c_str(), e.c_str(),
+                             (unsigned long)(HeapFree() / 1024)));
+        g_localOcr.unload();
+    }
     if (!g_localOcr.load(mf, error)) {
         LogOcr(Utils::Format("%s: load failed (%s), heap free %lu KB", name.c_str(), error.c_str(),
                              (unsigned long)(HeapFree() / 1024)));

@@ -48,6 +48,10 @@ public:
     bool loaded() const { return blob_ != nullptr; }
     // Frees the model and its working memory (load() again to use it).
     void unload();
+    // Another model file into the memory of the one loaded (its weights, contexts and working memory
+    // are reused: nothing is freed or allocated, so swapping models doesn't break up the heap). False
+    // if it doesn't fit (then nothing is loaded: load() it) or can't be read.
+    bool reloadInPlace(Reader &file, std::string &error);
 
     // Lines can be read in parallel: runner(n, job, arg) must run job(arg) on n threads at once
     // and return when all have finished. Each extra worker needs its own ~180 KB of memory, taken
@@ -98,7 +102,9 @@ private:
     std::string info_;
     std::vector<void *> raw_;  // every allocation, for the destructor
     std::vector<void *> ctxs_; // vocr_ctx per worker (the first is ctx_)
-    size_t arenaBytes_ = 0;
+    std::vector<void *> arenas_;  // each context's arena (arenaBytes_ each)
+    size_t arenaBytes_ = 0;       // allocated per arena: a little more than the model needs, for another
+    size_t blobCap_ = 0;          // bytes allocated for the model file (the same)
     int mode_ = 0;
     bool speed_ = true, gate_ = false, twoLevel_ = false;
     unsigned workers_ = 1, lastWorkers_ = 1;
@@ -109,6 +115,7 @@ private:
     std::vector<TopK> topk_;
     void *alignedAlloc(size_t bytes);
     bool loadInner(Reader &file, std::string &error);
+    bool setUp(uint32_t n, std::string &error);  // after the file is in blob_: parse, check, contexts
     void ensureWorkers(unsigned n);
 };
 

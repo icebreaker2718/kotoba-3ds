@@ -58,6 +58,8 @@ void LocalOcr::unload() {
     blob_ = arena_ = nullptr;
     model_ = ctx_ = nullptr;
     ctxs_.clear();
+    arenas_.clear();
+    blobCap_ = arenaBytes_ = 0;
     topk_.clear();
     info_.clear();
 }
@@ -71,24 +73,66 @@ bool LocalOcr::load(Reader &file, std::string &error) {
     return ok;
 }
 
-bool LocalOcr::loadInner(Reader &file, std::string &error) {
-    uint32_t n = file.size();
-    if (n < 64 || n > 8 * 1024 * 1024) { error = "the OCR model file looks wrong"; return false; }
-    unsigned char *blob = (unsigned char *)alignedAlloc(n + 32);  // + the bytes VOCR's ARM kernel may read past the end
-    if (!blob) { error = "not enough memory for the OCR model"; return false; }
+// Headroom in the model's memory, so another model file (VOCR5 and VOCR6 differ by a few KB) can
+// take its place without a new allocation.
+static const size_t kBlobSpare = 16 * 1024, kArenaSpare = 8 * 1024;
+
+static bool readModelFile(Reader &file, unsigned char *blob, uint32_t n, std::string &error) {
     for (uint32_t off = 0; off < n;) {  // in pieces: SD reads of a few hundred KB at a time
         uint32_t piece = n - off > 256 * 1024 ? 256 * 1024 : n - off;
         if (!file.read(off, blob + off, piece)) { error = "could not read the OCR model"; return false; }
         off += piece;
     }
+    return true;
+}
+
+bool LocalOcr::loadInner(Reader &file, std::string &error) {
+    uint32_t n = file.size();
+    if (n < 64 || n > 8 * 1024 * 1024) { error = "the OCR model file looks wrong"; return false; }
+    blobCap_ = n + 32 + kBlobSpare;  // + the bytes VOCR's ARM kernel may read past the end
+    unsigned char *blob = (unsigned char *)alignedAlloc(blobCap_);
+    if (!blob) { error = "not enough memory for the OCR model"; return false; }
+    if (!readModelFile(file, blob, n, error)) return false;
     vocr_model *m = (vocr_model *)alignedAlloc(sizeof(vocr_model));
     vocr_ctx *c = (vocr_ctx *)alignedAlloc(sizeof(vocr_ctx));
     if (!m || !c) { error = "not enough memory for the OCR model"; return false; }
-    int r = vocr_load(m, blob, n);
+    blob_ = blob;
+    model_ = m;
+    ctx_ = c;
+    arena_ = nullptr;
+    arenaBytes_ = 0;
+    ctxs_.assign(1, c);
+    arenas_.clear();
+    if (!setUp(n, error)) {
+        blob_ = nullptr;
+        return false;
+    }
+    if (runner_) ensureWorkers(workers_);
+    return true;
+}
+
+bool LocalOcr::reloadInPlace(Reader &file, std::string &error) {
+    if (!blob_ || !model_) { error = "no model loaded"; return false; }
+    const uint32_t n = file.size();
+    if (n < 64 || (size_t)n + 32 > blobCap_) { error = "the other model doesn't fit"; return false; }
+    // past this point the old model is gone: on a failure nothing is loaded
+    if (!readModelFile(file, blob_, n, error) || !setUp(n, error)) {
+        unload();
+        return false;
+    }
+    return true;
+}
+
+// The model file is in blob_ (n bytes): parse and check it, then plan every context's working
+// memory, in the arenas already there when they are big enough (a model swapped in place).
+bool LocalOcr::setUp(uint32_t n, std::string &error) {
+    vocr_model *m = (vocr_model *)model_;
+    memset(blob_ + n, 0, 32);
+    int r = vocr_load(m, blob_, n);
     // the CRC pass costs ~0.1 s on the 3DS: once per file per session is enough
     static uint32_t checkedSize[2] = {0, 0};  // two models (the benchmark build swaps them)
     if (r == VOCR_OK && checkedSize[0] != n && checkedSize[1] != n) {
-        if (vocr_check_crc(blob, n) != VOCR_OK) r = VOCR_E_FORMAT;
+        if (vocr_check_crc(blob_, n) != VOCR_OK) r = VOCR_E_FORMAT;
         else checkedSize[1] = checkedSize[0], checkedSize[0] = n;
     }
     if (r == VOCR_OK) vocr_pack_simd32(m);  // ARM11: weights reordered for 2-at-a-time multiplies
@@ -107,23 +151,29 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     twoLevel_ = speed_ && o.mode == VOCR_MODE_W8I && vocr_has_two_level(m);
     o.head_gate = gate_ ? VOCR_HEAD_GATE_ON : VOCR_HEAD_GATE_OFF;
     o.two_level = twoLevel_ ? 1 : 0;
-    size_t need = vocr_arena_bytes(m, &o);
-    unsigned char *arena = (unsigned char *)alignedAlloc(need);
-    if (!arena) { error = "not enough memory for the OCR"; return false; }
-    r = vocr_init(c, m, &o, arena, need);
-    if (r != VOCR_OK) { error = "could not start the OCR"; return false; }
-    arenaBytes_ = need;
+    const size_t need = vocr_arena_bytes(m, &o);
+    if (!need) { error = "could not start the OCR"; return false; }
+    if (!arena_) {  // the first load: the main context's arena, with room for another model
+        arenaBytes_ = need + kArenaSpare;
+        arena_ = (unsigned char *)alignedAlloc(arenaBytes_);
+        if (!arena_) { error = "not enough memory for the OCR"; return false; }
+        arenas_.assign(1, arena_);
+    }
+    if (need > arenaBytes_) { error = "the other model doesn't fit"; return false; }
+    for (unsigned k = 0; k < topk_.size(); k++)
+        if (topk_[k].logit && topk_[k].cap < m->max_width / m->stride + 8) topk_[k] = TopK();  // too small now: none
+    for (size_t k = 0; k < ctxs_.size(); k++)  // every worker's context again, in its own arena
+        if (vocr_init((vocr_ctx *)ctxs_[k], m, &o, arenas_[k], arenaBytes_) != VOCR_OK) {
+            if (k == 0) { error = "could not start the OCR"; return false; }
+            ctxs_.resize(k);  // fewer workers then
+            arenas_.resize(k);
+            break;
+        }
     mode_ = o.mode;
-    ctxs_.assign(1, c);
-    blob_ = blob;
-    arena_ = arena;
-    model_ = m;
-    ctx_ = c;
     char b[96];
     snprintf(b, sizeof(b), "%u characters, %u KB%s%s", m->n_classes, (unsigned)(n / 1024), gate_ ? ", head gate" : "",
              twoLevel_ ? ", two-level head" : "");
     info_ = b;
-    if (runner_) ensureWorkers(workers_);
     return true;
 }
 
@@ -144,6 +194,7 @@ void LocalOcr::ensureWorkers(unsigned n) {
         o.two_level = twoLevel_ ? 1 : 0;
         if (!c2 || !a2 || vocr_init(c2, m, &o, a2, arenaBytes_) != VOCR_OK) break;  // fewer workers then
         ctxs_.push_back(c2);
+        arenas_.push_back(a2);
     }
     while (topk_.size() < ctxs_.size()) {  // a few KB each
         TopK t;
