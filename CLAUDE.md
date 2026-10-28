@@ -81,7 +81,7 @@ works on the code.
   them, and diff the `PARAGRAPH`/`FAILED` lines. About 320 screens so far, mostly Mario & Luigi:
   Dream Team, plus Pokémon Sun/Moon and Ace Attorney.
 
-## Status (2026-10-27)
+## Status (2026-10-28)
 
 - `main` = the confirmed release (lid-close fix, no OCR needed on the PC, flag retry,
   overlapping-box OCR fixes, saved-word spelling option, README feature list).
@@ -108,6 +108,24 @@ works on the code.
      26 -> 22 ms (RGB565 screens). The read log line splits "box" into memory check / boxes /
      pictures (the box search is nearly all of it) and keeps its end; the view line names the
      screens' formats. The memory fix scans the game's code once.
+- On `alpha` (2026-10-28, 2b3a59b), benchmark build, not yet tried on a console: **VOCR6 and the text spotter**
+  (vita-vn-ocr v0.5.0, runtime at 205f47e). `VOCR6.2_N_w8g2.vocr` (preferred over VOCR5 when on the SD card; run
+  with its head gate and two-level head) and `textspot8_t64n8c16_w8.vtsp` (core/text_spot.cpp) are in the SD card's
+  `ocr/` folder. `readScreenSpot` (core/local_ocr.cpp): the spotter finds every line on the screen with its kind
+  (dialogue, name, choice, UI, scene); no text-box search, line finder or bands. Furigana lines dropped (kana-only,
+  pressed above a line with kanji), boxes widened by 35% of their height (the spotter cuts faint last glyphs: ー,
+  …), lines kept by option 1's scene rule (`keepLine`, not lenient). Without the .vtsp the old reader runs.
+  Our ARM11 kernels were carried into the new vocr.c (same text as upstream); the spotter's 1x1 layers go through
+  `vocr__k2x8` (`vocr_textspot6_pack_simd32`): 242 -> 151 M ARM instructions per top screen, boxes bit-identical.
+  Backtest (labelled 171, labels 92/145 corrected for VOCR5's own misreads): test build P 0.991 R 0.985, 154
+  fully right; option 1 0.996 / 0.992 / 158; spotter + VOCR6 0.987 / 0.995 / 156, 0 missed, 0 junk; VOCR6 with
+  the old finder 0.981 / 0.984 / 151. Held-out 537: 328 identical, 82 layout only; the rest mostly menus, item
+  lists and name tags it now reads, and better kanji (叶える, ちょっと), some losses (遠心カ, 確楽). ARM instructions
+  over 8 screens (qemu): test build 3.2 G, VOCR6 + old finder 2.5 G (-21%), spotter + VOCR6 3.3 G (+3%; the
+  spotter is 115-151 M a screen, single-threaded). Option 1 (2bc79be, `readScreenScored`) is still in core/ but
+  no longer called. The bench build also runs the current reader each read ("bench:" lines) and keeps the
+  screenshot when they disagree: turn KT_READER_BENCH off before `test`; the old finder code goes once the
+  spotter is confirmed. Next speed step if needed: the spotter's 3x3 layers (`feed`, 45 M), splitting it over cores.
 - `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
   notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-4 to the
   changelog before the owner reviews it again.
