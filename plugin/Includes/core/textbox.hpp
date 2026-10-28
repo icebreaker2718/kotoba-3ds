@@ -17,7 +17,10 @@ struct TextBox {
     float score = 0;
 };
 
-// rgb: w*h*3 bytes (R, G, B), rows top to bottom. Best candidate first; empty if none.
-std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, unsigned maxBoxes = 3);
+// rgb: w*h*3 bytes (R, G, B), rows top to bottom. Best candidate first; empty if none. Without
+// shaded, only flat-colour boxes: a box isn't grown into a gradient (Pokémon's bubbles), which is
+// most of the search's time on some screens ("fast mode").
+std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, unsigned maxBoxes = 3,
+                                   bool shaded = true);
 
 }  // namespace kt

@@ -183,6 +183,29 @@ jobs:
 
           See the README for the PC tools (OCR server, Anki cards)."
 
+  alpha-release:
+    # The alpha branch's plugin as a development pre-release ("alpha-dev"), so the console build can be
+    # fetched through the REST API and put on the owner's SD card (the owner's OK, 2026-10-28). Not for testers.
+    needs: [plugin]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/alpha'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Kotoba3DS-plugin
+          path: out
+      - name: Publish the "alpha-dev" pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete alpha-dev --yes --cleanup-tag 2>/dev/null || true
+          gh release create alpha-dev out/Kotoba3DS.3gx --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "DEVELOPMENT ONLY - do not use (alpha, experimental)" \
+            --notes "NOT FOR TESTERS OR PLAYERS. This is the developer's experimental alpha build (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)), published only so it can be copied onto the developer's own SD card. It may crash, run slowly (it benchmarks every reader on each read) or need files that aren't in any release. For trying new features use the \"Kotoba3DS test build\" pre-release; for normal use, the latest release."
+
   test-release:
     # The test branch's plugin as a pre-release ("test"), for trying on the console before main.
     needs: [plugin]
