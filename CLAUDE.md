@@ -130,6 +130,11 @@ works on the code.
   gradient, + the box reader / whole-screen fallback, no spotter; P 0.991 R 0.959 with VOCR5, 0.989 / 0.958 with
   VOCR6: loses Pokemon bubbles' second lines and scene text; ARM 2.8 G / 2.2 G over the 8 screens, box search
   -45%) and "OCR model" (`ocr_model=`: VOCR6 or VOCR5). In fast mode the bench compares with the spotter.
+  Then (5c4bceb) "Reading area": per game (title ID) and per screen, /3ds/kotoba3ds/areas.txt; editor on the
+  paused game (pictures taken when the Select menu opens): D-Pad move, L + D-Pad size, R bigger steps, stylus
+  on the touchscreen, X other screen, A save, Y clear. A screen with an area is cropped and read with the
+  spotter (or, in fast mode, the line finder alone), no box search. Biohazard subtitles 320x72: same text,
+  ARM 167 M (finder) / 185 M (spotter) against 236 M fast mode.
 - `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
   notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-4 to the
   changelog before the owner reviews it again.
