@@ -18,6 +18,15 @@ static bool kanaOnly(const std::string &s) {
     return any;
 }
 
+static bool hasKatakana(const std::string &s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        uint32_t cp = utf8Next(s, i);
+        if (cp >= 0x30A1 && cp <= 0x30FA) return true;  // ァ..ヺ (not ー, which hiragana words use too)
+    }
+    return false;
+}
+
 static size_t countKanji(const std::string &s) {
     size_t i = 0, n = 0;
     while (i < s.size()) {
@@ -46,9 +55,10 @@ std::vector<std::string> textParagraphs(const std::vector<TextLine> &lines, bool
         const TextLine &l = lines[li];
         bool furigana = typical > 0 && l.height > 0 && l.height < typical * 0.7f && kanaOnly(l.text) &&
                         utf8Length(l.text) <= 10;
-        // Or: a short kana-only line (no punctuation) right above a line with enough kanji to be
-        // its reading (its box can be as tall as a text line when it takes in the box's frame).
-        if (!furigana && kanaOnly(l.text) && li + 1 < lines.size()) {
+        // Or: a short hiragana-only line (no punctuation) right above a line with enough kanji to
+        // be its reading (its box can be as tall as a text line when it takes in the box's frame).
+        // Not with katakana: a line of names over the next row (「クリスとジェシカが」) is text.
+        if (!furigana && kanaOnly(l.text) && !hasKatakana(l.text) && li + 1 < lines.size()) {
             const TextLine &next = lines[li + 1];
             size_t kana = utf8Length(l.text), kanji = countKanji(next.text);
             float gap = next.centerY - l.centerY;

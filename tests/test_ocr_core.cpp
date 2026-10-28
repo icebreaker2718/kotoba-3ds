@@ -101,6 +101,16 @@ int main(int argc, char **argv) {
         check(ps.size() == 3 && ps[0] == "メニュー" && ps[2] == "はい", "menu and a far-off choice stay separate");
         std::vector<std::string> br = textParagraphs(ls, true);
         check(br.size() == 3 && br[1] == "また夢世界へ行く時は\n声をかけるんじゃぞ!", "the game's line break kept");
+        // a kana line right over a line with kanji: a reading if it is hiragana, text if it has katakana
+        std::vector<TextLine> sub = {L("クリスとジェシカが", 0, 0.235f, 0.30f, 0.45f, 0.35f),
+                                     L("行方不明になって94分が経過…", 1, 0.37f, 0.70f, 0.72f, 0.35f)};
+        std::vector<std::string> sp = textParagraphs(sub);
+        check(sp.size() == 1 && sp[0] == "クリスとジェシカが行方不明になって94分が経過…",
+              "a katakana line over kanji is text" + (sp.empty() ? std::string() : ": " + sp[0]));
+        std::vector<TextLine> rb = {L("ゆくえふめい", 0, 0.30f, 0.30f, 0.30f, 0.35f),
+                                    L("行方不明になって94分が経過…", 1, 0.37f, 0.70f, 0.72f, 0.35f)};
+        std::vector<std::string> rp = textParagraphs(rb);
+        check(rp.size() == 1 && rp[0] == "行方不明になって94分が経過…", "a hiragana reading over kanji is dropped");
         std::vector<std::string> cl = {"今日はいい天気だね!\nク"};
         cleanParagraphs(cl);
         check(cl[0] == "今日はいい天気だね!", "a speck after a line break dropped: " + cl[0]);
