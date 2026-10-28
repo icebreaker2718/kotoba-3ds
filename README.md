@@ -12,8 +12,9 @@ Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-
   which has no ZL/ZR, needs another hotkey set in the menu) and the game pauses while the 3DS reads the
   text with on-device OCR, in under a second. It needs no PC and no internet. The touchscreen,
   or both screens, can be read too, each with its own hotkey.
-- **Finds every text box.** Speech bubbles, menus and dialogue boxes are found by their colour,
-  wherever they are. Furigana and the "next" arrow are left out, and the dictionary corrects
+- **Finds the text wherever it is.** Dialogue boxes, speech bubbles, menus and subtitles over the
+  scene are found by a line spotter; a *Fast mode* and a fixed *Reading area* per game are there
+  for speed. Furigana and the "next" arrow are left out, and the dictionary corrects
   kanji the OCR wasn't sure of (造跡 → 遺跡).
 - **Tap a word to look it up.** The full Jitendex entry shows over the paused game, with the
   reading, how common the word is (JPDB rank) and other matches for the same spelling.
@@ -101,7 +102,7 @@ python tools/build_dict.py --jmdict JMdict_e.gz -o dict.bin  # current one from 
 |---|---|
 | `Kotoba3DS.3gx` | `SD:/luma/plugins/default.3gx` (every game), **or** `SD:/luma/plugins/<TitleID>/Kotoba3DS.3gx` for one game |
 | `dict.bin` (~55 MB) | `SD:/3ds/kotoba3ds/dict.bin` |
-| `Kotoba3DS-ocr-model.zip` (the OCR model) | unzip to the root of the SD card: `SD:/3ds/kotoba3ds/ocr/VOCR5_N_w8.vocr` |
+| `Kotoba3DS-ocr-model.zip` (the OCR models) | unzip to the root of the SD card: `SD:/3ds/kotoba3ds/ocr/` (`VOCR6.2_N_w8g2.vocr`, `textspot8_t64n8c16_w8.vtsp`) |
 
 Then open the Rosalina menu (**L + Down + Select**), set **Plugin loader: [Enabled]**, and
 start a game. After a few seconds the plugin is ready; press **Select** to open its menu.
@@ -154,6 +155,8 @@ The **Select** menu (drawn like the lookup: tap, or D-pad / Circle Pad and A) ha
 | *Touchscreen text shows on* | the touchscreen (tap the words) or the top screen (the entry then goes on the touchscreen) |
 | *Hide (X)* | see-through, hidden, or see-through then hidden |
 | *Saved words are written* | in kanji (the word's usual kanji form, even when the game wrote it in kana: ちょっと → 一寸) or as in the game (kana stays kana: たべた → たべる) |
+| *Fast mode* | on: only text boxes of one flat colour (most dialogue boxes) are read, which is quicker, but text out in the scene, menus and shaded bubbles may be missed or read in part; off (the default): every line on the screen is found |
+| *Reading area* | for a game whose text always shows in one place (subtitles, a fixed dialogue box): only that part of the screen is read, quicker and with nothing else getting in. Set per game and per screen on the paused game: D-pad moves it, L + D-pad sizes it (R for bigger steps), or drag with the stylus on the touchscreen; X the other screen, A saves, Y clears |
 | *Last lookup* | reopen the text of your last lookup |
 | *Saved words* | review them with their entry; Y deletes one |
 | *Make Anki cards* | send the saved words to your PC (below) |
@@ -161,15 +164,16 @@ The **Select** menu (drawn like the lookup: tap, or D-pad / Circle Pad and A) ha
 | *PC* | find your PC, or type its address |
 | *How to use* | the controls in short |
 
-**How it reads the screen.** The text boxes are found by their flat colour (so a box that moves
-around is fine; every box with Japanese in it is read), their lines are read, furigana and stray marks (the "next" arrow) are dropped.
-With no box on screen it reads the whole screen. Where the recognizer was unsure of a kanji, the
-dictionary decides: a guess that makes a word replaces one that doesn't (造跡 → 遺跡). The OCR is VOCR from
+**How it reads the screen.** A line spotter (textspot8) finds every line of text on the screen,
+wherever it is: dialogue boxes, speech bubbles, menus, names, subtitles over the scene. Each line is
+read, and furigana and stray marks (the "next" arrow) are dropped. With *Fast mode* on, only
+flat-colour text boxes are looked for instead (with no box on screen, the whole screen is read); with
+a *Reading area* set, only that area is read. Where the recognizer was unsure of a kanji, the
+dictionary decides: a guess that makes a word replaces one that doesn't (造跡 → 遺跡). The OCR is VOCR6 from
 [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), the recognizer
 [Rubi](https://github.com/bee-san/Rubi_for_vita) uses on the PS Vita, trained for game dialogue.
-`VOCR5_S_w8.vocr` (smaller, faster) or `VOCR5_L_w8.vocr` (bigger, a bit more accurate) from its
-[releases](https://github.com/bee-san/vita-vn-ocr/releases) also work: put one in
-`/3ds/kotoba3ds/ocr/` (Normal is used when several are there). The weights are for
+The older `VOCR5_N_w8.vocr` still works if VOCR6 isn't in `/3ds/kotoba3ds/ocr/` (VOCR6 is used when
+both are there); without the spotter file, text boxes are found by their colour, as in earlier versions. The weights are for
 **non-commercial use only**. Each read's timing goes into `SD:/3ds/kotoba3ds/ocr_log.txt`.
 
 On a New 3DS / 2DS the plugin runs the CPU at full speed (804 MHz + L2 cache, as Rosalina's
@@ -297,7 +301,8 @@ either returning an audio file or Yomitan's JSON audio-source list:
 /3ds/kotoba3ds/settings.txt    hotkeys and the menu's choices
 /3ds/kotoba3ds/known.txt       words of your Anki cards (green in lookups; from Known words or mine.py known)
 /3ds/kotoba3ds/marked.txt      words you marked known with Y
-/3ds/kotoba3ds/ocr/            the OCR model (VOCR5_N_w8.vocr)
+/3ds/kotoba3ds/ocr/            the OCR models (VOCR6.2_N_w8g2.vocr, textspot8_t64n8c16_w8.vtsp)
+/3ds/kotoba3ds/areas.txt       the reading areas you set, per game
 /3ds/kotoba3ds/ocr_log.txt     each read's timing, and notes for bug reports
 ```
 
@@ -344,13 +349,13 @@ either returning an audio file or Yomitan's JSON audio-source list:
   (The Pixellizer Group licence) and [Luma3DS](https://github.com/LumaTeam/Luma3DS)'s plugin
   loader.
 - Conjugation handling follows the approach of [Yomitan](https://github.com/yomidevs/yomitan).
-- On-device OCR: the VOCR runtime and VOCR5 models of
+- On-device OCR: the VOCR runtime, the VOCR6 and VOCR5 models and the textspot8 line spotter of
   [bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr) (GPL-3.0-or-later; the model weights
-  are for non-commercial use only, see the `ATTRIBUTION.md` that comes with them), the OCR of
+  are for non-commercial use only, see the attribution files that come with them), the OCR of
   [Rubi](https://github.com/bee-san/Rubi_for_vita).
 
 ## Licence
 
 Kotoba3DS is free software under the GNU General Public License v3.0 or later ([LICENSE](LICENSE)),
-because it includes the GPL-licensed VOCR runtime. The dictionaries, the OCR model and the
+because it includes the GPL-licensed VOCR runtime. The dictionaries, the OCR models and the
 third-party code keep their own licences (above).

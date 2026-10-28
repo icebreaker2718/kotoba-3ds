@@ -27,9 +27,10 @@ works on the code.
 ## Branches, CI and releases
 
 - `.github/workflows/build.yml`: jobs `plugin` (devkitPro + CTRPF), `dictionary` (builds
-  `dict.bin`, ~7 min), `release` (on `main`: the **latest** release with `Kotoba3DS.3gx`,
-  `Kotoba3DS-2MiB-test.3gx`, `dict.bin`, `Kotoba3DS-ocr-model.zip`), `test-release` (on `test`:
-  the **test-build** prerelease with the plugin only).
+  `dict.bin`, ~7 min; also zips the OCR models: VOCR6 Normal + textspot8 from vita-vn-ocr v0.5.0, SHA-256
+  checked), `release` (on `main`: the **latest** release with `Kotoba3DS.3gx`, `dict.bin`,
+  `Kotoba3DS-ocr-model.zip`), `test-release` (on `test`: the **test-build** prerelease with the plugin
+  and `Kotoba3DS-ocr-model.zip`), `alpha-release` (on `alpha`: `alpha-dev`).
 - The plugin is only built by CI (no devkitPro locally). Download assets through the REST API;
   GraphQL (`gh release download`, `gh run watch` output) can be blocked:
   `gh api repos/icebreaker2718/kotoba-3ds/releases/tags/test-build` → asset id →
@@ -39,7 +40,7 @@ works on the code.
 ## The owner's SD card and laptop (when linked)
 
 - SD card (drive `E:` on the laptop): plugin at `/luma/plugins/default.3gx`; data in
-  `/3ds/kotoba3ds/` (`dict.bin`, `ocr/VOCR5_N_w8.vocr`, `mined.tsv`, `shots/`, `known.txt`,
+  `/3ds/kotoba3ds/` (`dict.bin`, `ocr/` (`VOCR6.2_N_w8g2.vocr`, `textspot8_t64n8c16_w8.vtsp`, `VOCR5_N_w8.vocr`), `areas.txt`, `mined.tsv`, `shots/`, `known.txt`,
   `marked.txt`, `settings.txt`, `ocr_log.txt`); crash dumps in `/luma/dumps/arm11/`.
 - Writing to the card: stage the file under a **new, unique name** each time (reusing a staged
   path can write stale content) and check the size on the card afterwards.
@@ -110,39 +111,32 @@ works on the code.
      26 -> 22 ms (RGB565 screens). The read log line splits "box" into memory check / boxes /
      pictures (the box search is nearly all of it) and keeps its end; the view line names the
      screens' formats. The memory fix scans the game's code once.
-- On `alpha` (2026-10-28, 2b3a59b), benchmark build, not yet tried on a console: **VOCR6 and the text spotter**
-  (vita-vn-ocr v0.5.0, runtime at 205f47e). `VOCR6.2_N_w8g2.vocr` (preferred over VOCR5 when on the SD card; run
-  with its head gate and two-level head) and `textspot8_t64n8c16_w8.vtsp` (core/text_spot.cpp) are in the SD card's
-  `ocr/` folder. `readScreenSpot` (core/local_ocr.cpp): the spotter finds every line on the screen with its kind
-  (dialogue, name, choice, UI, scene); no text-box search, line finder or bands. Furigana lines dropped (kana-only,
-  pressed above a line with kanji), boxes widened by 35% of their height (the spotter cuts faint last glyphs: ー,
-  …), lines kept by option 1's scene rule (`keepLine`, not lenient). Without the .vtsp the old reader runs.
-  Our ARM11 kernels were carried into the new vocr.c (same text as upstream); the spotter's 1x1 layers go through
-  `vocr__k2x8` (`vocr_textspot6_pack_simd32`): 242 -> 151 M ARM instructions per top screen, boxes bit-identical.
-  Backtest (labelled 171, labels 92/145 corrected for VOCR5's own misreads): test build P 0.991 R 0.985, 154
-  fully right; option 1 0.996 / 0.992 / 158; spotter + VOCR6 0.987 / 0.995 / 156, 0 missed, 0 junk; VOCR6 with
-  the old finder 0.981 / 0.984 / 151. Held-out 537: 328 identical, 82 layout only; the rest mostly menus, item
-  lists and name tags it now reads, and better kanji (叶える, ちょっと), some losses (遠心カ, 確楽). ARM instructions
-  over 8 screens (qemu): test build 3.2 G, VOCR6 + old finder 2.5 G (-21%), spotter + VOCR6 3.3 G (+3%; the
-  spotter is 115-151 M a screen, single-threaded). Option 1 (2bc79be, `readScreenScored`) is still in core/ but
-  no longer called. The bench build also runs the current reader each read ("bench:" lines) and keeps the
-  screenshot when they disagree: turn KT_READER_BENCH off before `test`; the old finder code goes once the
-  spotter is confirmed. Next speed step if needed: the spotter's 3x3 layers (`feed`, 45 M), splitting it over cores.
-  Then (0bf2357) two settings: "Fast mode" (`fast=`: `findTextBoxes(..., shaded=false)`, no growing into a
-  gradient, + the box reader / whole-screen fallback, no spotter; P 0.991 R 0.959 with VOCR5, 0.989 / 0.958 with
-  VOCR6: loses Pokemon bubbles' second lines and scene text; ARM 2.8 G / 2.2 G over the 8 screens, box search
-  -45%) and "OCR model" (`ocr_model=`: VOCR6 or VOCR5). In fast mode the bench compares with the spotter.
-  Then (5c4bceb) "Reading area": per game (title ID) and per screen, /3ds/kotoba3ds/areas.txt; editor on the
-  paused game (pictures taken when the Select menu opens): D-Pad move, L + D-Pad size, R bigger steps, stylus
-  on the touchscreen, X other screen, A save, Y clear. A screen with an area is cropped and read with the
-  spotter (or, in fast mode, the line finder alone), no box search. Biohazard subtitles 320x72: same text,
-  ARM 167 M (finder) / 185 M (spotter) against 236 M fast mode.
-  Then (8ef134e) the bench runs everything on every read (`BenchAllReaders` in main.cpp): after the read shown
-  (as the settings say), the test build's reader, fast mode, the spotter and, with an area, area + line finder
-  and area + spotter, with the model in use and then the other model on the SD card (loaded for it, then the one
-  in use again). Log: "bench: <screen> <model> <reader> <ms>[, same as shown] | <text>", both box searches timed.
+  5. From `alpha` (merged 2026-10-28, owner's request): **VOCR6 and the text spotter**, **fast mode**, **reading
+     areas**; the benchmark reads (`KT_READER_BENCH`, `BenchAllReaders`) and the "OCR model" setting removed (VOCR6
+     when on the SD card, else VOCR5; an old `ocr_model=` line is ignored); the 2 MiB test copy no longer built.
+     - VOCR6 (vita-vn-ocr v0.5.0, runtime at 205f47e): `VOCR6.2_N_w8g2.vocr`, head gate + two-level head. The
+       spotter `textspot8_t64n8c16_w8.vtsp` (core/text_spot.cpp, `readScreenSpot` in core/local_ocr.cpp) finds
+       every line with its kind; furigana lines dropped, boxes widened by 35% of their height, lines kept by
+       `keepLine`. Without the .vtsp: shaded box search + box reader, as before. Our ARM11 kernels carried into
+       vocr.c; the spotter's 1x1 layers through `vocr__k2x8` (242 -> 151 M ARM instructions per top screen).
+     - Fast mode (`fast=`): `findTextBoxes(..., shaded=false)` + box reader / whole-screen fallback, no spotter.
+     - Reading area: per game and screen in `/3ds/kotoba3ds/areas.txt`; editor on the paused game (D-Pad move,
+       L + D-Pad size, R bigger steps, stylus, X other screen, A save, Y clear). Read with the spotter, or the
+       line finder in fast mode, no box search.
+     - PC backtest (171 hand-labelled screens; labels partly seeded from VOCR5): test build P 0.991 R 0.985, 154
+       fully right; spotter + VOCR6 0.987 / 0.995 / 156, 0 missed; VOCR6 + old finder 0.981 / 0.984 / 151; fast
+       mode 0.991 / 0.959 (VOCR5), 0.989 / 0.958 (VOCR6). ARM instructions over 8 screens: test build 3.2 G,
+       spotter + VOCR6 3.3 G, fast mode 2.8 G (VOCR5) / 2.2 G (VOCR6).
+     - Console benchmark (alpha bb3e00a, 2026-10-28; 38 reads over 大逆転裁判2, Corpse Party, Mario & Luigi,
+       Mii Plaza, RE Revelations; graded against the screenshots): VOCR6 ~21% faster than VOCR5 in recognition
+       (~45 ms a read, faster on every box/area read), accuracy about equal (slightly better on hard text).
+       Exact dialogue, VOCR6: area + line finder 20/22 (158 ms median), area + spotter 20/22 (228 ms), spotter
+       29/36 (434 ms, but extra UI text on half the reads), box readers 28/36 (fast 260 ms / shaded 317 ms; same
+       boxes and text either way on these games; weak on RE subtitles). Model swaps in place held up; heap before
+       a read settles ~1,000 KB. Open question (owner's call): the default for games with no area.
+     - Option 1 (`readScreenScored`) is still in core/, unused.
 - `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
-  notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-4 to the
+  notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-5 to the
   changelog before the owner reviews it again.
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
