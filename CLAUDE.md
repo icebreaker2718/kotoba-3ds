@@ -135,6 +135,10 @@ works on the code.
   on the touchscreen, X other screen, A save, Y clear. A screen with an area is cropped and read with the
   spotter (or, in fast mode, the line finder alone), no box search. Biohazard subtitles 320x72: same text,
   ARM 167 M (finder) / 185 M (spotter) against 236 M fast mode.
+  Then (8ef134e) the bench runs everything on every read (`BenchAllReaders` in main.cpp): after the read shown
+  (as the settings say), the test build's reader, fast mode, the spotter and, with an area, area + line finder
+  and area + spotter, with the model in use and then the other model on the SD card (loaded for it, then the one
+  in use again). Log: "bench: <screen> <model> <reader> <ms>[, same as shown] | <text>", both box searches timed.
 - `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
   notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-4 to the
   changelog before the owner reviews it again.
