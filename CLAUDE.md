@@ -126,6 +126,10 @@ works on the code.
   no longer called. The bench build also runs the current reader each read ("bench:" lines) and keeps the
   screenshot when they disagree: turn KT_READER_BENCH off before `test`; the old finder code goes once the
   spotter is confirmed. Next speed step if needed: the spotter's 3x3 layers (`feed`, 45 M), splitting it over cores.
+  Then (0bf2357) two settings: "Fast mode" (`fast=`: `findTextBoxes(..., shaded=false)`, no growing into a
+  gradient, + the box reader / whole-screen fallback, no spotter; P 0.991 R 0.959 with VOCR5, 0.989 / 0.958 with
+  VOCR6: loses Pokemon bubbles' second lines and scene text; ARM 2.8 G / 2.2 G over the 8 screens, box search
+  -45%) and "OCR model" (`ocr_model=`: VOCR6 or VOCR5). In fast mode the bench compares with the spotter.
 - `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
   notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-4 to the
   changelog before the owner reviews it again.
