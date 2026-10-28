@@ -10,9 +10,11 @@ works on the code.
 - **New work goes to the `test` branch.** Nothing new reaches `main` until the owner has
   confirmed it on real hardware and says to merge. Docs-only changes (README, this file) may go
   straight to `main`; then merge `main` into `test`.
-- **Experiments the owner wants kept away from the test branch's users go to `alpha`.** No
-  release for it: CI's run artifact goes straight onto the owner's SD card. It moves to `test`
-  only when the owner says so.
+- **Experiments the owner wants kept away from the test branch's users go to `alpha`.** It moves
+  to `test` only when the owner says so. CI publishes each alpha build as the `alpha-dev`
+  pre-release, titled "DEVELOPMENT ONLY - do not use" (the owner's OK, 2026-10-28): run artifacts
+  can't be downloaded from this environment (their storage host is blocked), release assets can.
+  Fetch it through the REST API (as below, tag `alpha-dev`) and put it on the owner's SD card.
 - **When unsure about a design decision, stop and ask** before building it.
 - **Anonymity:** no personal information (names, home paths, emails) in commits or files.
 - **Commits** are authored `Claude <noreply@anthropic.com>` and end with the attribution lines the
