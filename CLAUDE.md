@@ -121,8 +121,13 @@ works on the code.
        vocr.c; the spotter's 1x1 layers through `vocr__k2x8` (242 -> 151 M ARM instructions per top screen).
      - Fast mode (`fast=`): `findTextBoxes(..., shaded=false)` + box reader / whole-screen fallback, no spotter.
      - Reading area: per game and screen in `/3ds/kotoba3ds/areas.txt`; editor on the paused game (D-Pad move,
-       L + D-Pad size, R bigger steps, stylus, X other screen, A save, Y clear). Read with the spotter, or the
-       line finder in fast mode, no box search.
+       L + D-Pad size, R bigger steps, stylus, X other screen, A save, Y clear). Read with the line finder (fast mode
+       or not), no box search. It was the spotter with fast mode off until 2026-10-28: on 38 saved screens of the
+       three games with areas, the same text on 35 (5 of them layout or ？/? only), 1 character worse (… -> べ), 1
+       better, 1 tie; 25% less PC time, ~70 ms a read less on the console (158 vs 228 ms median).
+     - Furigana rule in `textParagraphs` (textlines.cpp): a kana line over a line with kanji is dropped as its
+       reading only if it has no katakana (「クリスとジェシカが」 over RE's next subtitle row was dropped). Box
+       reader backtest, 405 saved screens: 4 changed, all better (RE x2, Mii Plaza ゴーストが, a ゴースト tag).
      - PC backtest (171 hand-labelled screens; labels partly seeded from VOCR5): test build P 0.991 R 0.985, 154
        fully right; spotter + VOCR6 0.987 / 0.995 / 156, 0 missed; VOCR6 + old finder 0.981 / 0.984 / 151; fast
        mode 0.991 / 0.959 (VOCR5), 0.989 / 0.958 (VOCR6). ARM instructions over 8 screens: test build 3.2 G,

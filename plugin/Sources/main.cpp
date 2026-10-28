@@ -1387,16 +1387,15 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
         bool ok = false;
         if (crop) {
             for (unsigned y = 0; y < a.h; y++) memcpy(crop + (size_t)y * a.w, grey + (size_t)(a.y + y) * ScreenW(s) + a.x, a.w);
-            if (spot)  // the spotter on the area (its best decode: a region read alone)
-                ok = kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, crop, a.w, a.h, paras, err, LocalProgress);
-            else       // the line finder on the area (what it was made for: a region chosen around the text)
-                ok = kt::localReadScreen(g_localOcr, crop, a.w, a.h, std::vector<kt::TextBox>(), paras, err, LocalProgress);
+            // the line finder on the area, fast mode or not: what it was made for, a region chosen
+            // around the text (as right as the spotter there on the console, ~70 ms quicker)
+            ok = kt::localReadScreen(g_localOcr, crop, a.w, a.h, std::vector<kt::TextBox>(), paras, err, LocalProgress);
             free(crop);
         } else {
             err = "not enough memory for the picture";
         }
-        LogOcr(Utils::Format("area reader (%s): %s %ux%u at %u,%u: %lu ms", spot ? "spotter" : "line finder",
-                             s == 0 ? "top" : "touchscreen", a.w, a.h, a.x, a.y, (unsigned long)(osGetTime() - tc0)));
+        LogOcr(Utils::Format("area reader (line finder): %s %ux%u at %u,%u: %lu ms", s == 0 ? "top" : "touchscreen",
+                             a.w, a.h, a.x, a.y, (unsigned long)(osGetTime() - tc0)));
         return ok;
     }
     if (spot) {
