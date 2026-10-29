@@ -219,7 +219,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: TEST-BUILD.md
+          sparse-checkout: README.md
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
@@ -235,8 +235,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete test-build --yes --cleanup-tag 2>/dev/null || true
-          # the notes: the build's commit, then TEST-BUILD.md (what's new, installing, reporting problems)
+          # the notes: the build's commit, then the README's test-build section (what's new, installing, reporting problems)
           { echo "Built from the test branch (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)). The dictionary (dict.bin) is the latest release's."
-            echo; sed '1{/^# /d}' TEST-BUILD.md; } > notes.md
+            echo; sed -n '/<!-- test-build:start/,/<!-- test-build:end/p' README.md | sed '1,2d;$d' | sed -E 's/^#(#+ )/\1/'; } > notes.md
           gh release create test-build out/Kotoba3DS.3gx out/Kotoba3DS-ocr-model.zip --target "$GITHUB_SHA" --prerelease \
             --title "Kotoba3DS test build" --notes-file notes.md

@@ -30,8 +30,8 @@ works on the code.
   `dict.bin`, ~7 min; also zips the OCR models: VOCR6 Normal + textspot8 from vita-vn-ocr v0.5.0, SHA-256
   checked), `release` (on `main`: the **latest** release with `Kotoba3DS.3gx`, `dict.bin`,
   `Kotoba3DS-ocr-model.zip`), `test-release` (on `test`: the **test-build** prerelease with the plugin
-  and `Kotoba3DS-ocr-model.zip`; its notes are `TEST-BUILD.md`, the testers' what's-new: keep it current
-  when test changes), `alpha-release` (on `alpha`: `alpha-dev`).
+  and `Kotoba3DS-ocr-model.zip`; its notes are the README's "Test build: what's new" section, between the
+  `test-build:start`/`end` comments: keep it current when test changes, and remove it when test merges to main), `alpha-release` (on `alpha`: `alpha-dev`).
 - The plugin is only built by CI (no devkitPro locally). Download assets through the REST API;
   GraphQL (`gh release download`, `gh run watch` output) can be blocked:
   `gh api repos/icebreaker2718/kotoba-3ds/releases/tags/test-build` → asset id →
