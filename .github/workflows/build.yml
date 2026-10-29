@@ -217,6 +217,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: TEST-BUILD.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           name: Kotoba3DS-plugin
@@ -231,11 +235,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete test-build --yes --cleanup-tag 2>/dev/null || true
+          # the notes: the build's commit, then TEST-BUILD.md (what's new, installing, reporting problems)
+          { echo "Built from the test branch (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)). The dictionary (dict.bin) is the latest release's."
+            echo; sed '1{/^# /d}' TEST-BUILD.md; } > notes.md
           gh release create test-build out/Kotoba3DS.3gx out/Kotoba3DS-ocr-model.zip --target "$GITHUB_SHA" --prerelease \
-            --title "Kotoba3DS test build" \
-            --notes "From the test branch (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)): changes not yet confirmed on a console.
-
-          1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\`.
-          2. Unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card: the new OCR models (VOCR6 and the textspot8 line spotter, [by bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr), for non-commercial use only) go to \`/3ds/kotoba3ds/ocr/\`. Without them the plugin reads with the older VOCR5 model, as before.
-
-          The dictionary (dict.bin) is the latest release's."
+            --title "Kotoba3DS test build" --notes-file notes.md
