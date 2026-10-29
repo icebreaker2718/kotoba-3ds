@@ -141,6 +141,13 @@ works on the code.
        boxes and text either way on these games; weak on RE subtitles). Model swaps in place held up; heap before
        a read settles ~1,000 KB. Open question (owner's call): the default for games with no area.
      - Option 1 (`readScreenScored`) is still in core/, unused.
+  6. Pictures kept in one block for the session (`g_picPool`, 337 KB, `ReservePictures` after the model at the first
+     read): the game's picture behind the lookup / for X / for the screenshot, and first each read's colour copy for
+     the box search. Before, ~280 KB was malloc'd per read; after a long session that malloc failed every time (owner,
+     Mario & Luigi 2026-10-28, also 2 reads in the bench session: `pictures 0` ms in the read line, ~900 KB free),
+     so no game behind the lookup, X did nothing, words saved without a screenshot. Now: a failed picture logs
+     "picture: ... not kept" (falls back to malloc, 16-bit if 24 doesn't fit), X says why it can't hide, a save says
+     "no screenshot: out of memory". Peak per read (fast mode, all 405 screens, beyond the model): 672 -> 728 KB.
 - `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
   notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-5 to the
   changelog before the owner reviews it again.

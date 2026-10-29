@@ -317,34 +317,71 @@ static void ShowBusy(const std::string &line1, const std::string &line2 = "") {
 // ---------------------------------------------------------------------------
 struct Picture {
     bool valid = false;
+    bool owned = false;  // px malloc'd for it (the pool was missing or too small): freed with it
     u32 w = 0, bytes = 3;
-    u8 *px = nullptr;  // malloc'd: short of memory, there is just no picture (no abort)
+    u8 *px = nullptr;  // in g_picPool, or malloc'd; short of memory, there is just no picture (no abort)
 };
 static Picture *g_picPtr[2] = {nullptr, nullptr};
 static Picture &Pic(int i) { return Leaky(g_picPtr[i]); }
 
+// The pictures' memory: one block, taken once while the plugin's memory is still in one piece and
+// kept for the session. Taking ~300 KB and freeing it again on every read stopped working after a
+// long session (no block for it, so no game behind the lookup, nothing for X to show and no
+// screenshot), though as much was free. Room for both screens at 2 bytes a pixel, which is more
+// than the top screen alone at 3; a read's colour copy (ScreenGrey) goes in it first. In use until
+// the screenshot thread is done (FinishScreenshot): only ReadScreens and Settings use it, both after.
+static const size_t kPicPoolBytes = (size_t)(400 + 320) * 240 * 2;  // 345,600 >= 400 * 240 * 3
+static u8 *g_picPool = nullptr;
+
+static void ReservePictures() {
+    static bool tried = false;
+    if (g_picPool || tried) return;
+    tried = true;
+    g_picPool = (u8 *)malloc(kPicPoolBytes);
+    if (!g_picPool)
+        LogOcr(Utils::Format("pictures: no %u KB block to keep for them (heap free %lu KB): taken each read instead",
+                             (unsigned)(kPicPoolBytes / 1024), (unsigned long)(HeapFree() / 1024)));
+}
+
+static void ReleasePicture(Picture &p) {
+    if (p.owned) free(p.px);
+    p.px = nullptr;
+    p.owned = false;
+    p.valid = false;
+}
+
 static void TakePicture(int i, u32 bytes) {  // call while the game is paused and nothing is drawn on it
     Picture &p = Pic(i);
     const Screen &s = ScreenOf(i);
-    p.valid = false;
-    free(p.px);
-    p.px = nullptr;
-    if (s.BytesPerPixel < 2 || s.BytesPerPixel > 4) return;
+    ReleasePicture(p);
+    if (s.BytesPerPixel < 2 || s.BytesPerPixel > 4) {
+        LogOcr(Utils::Format("picture: %s not kept (%u bytes a pixel)", i == 0 ? "top screen" : "touchscreen",
+                             (unsigned)s.BytesPerPixel));
+        return;
+    }
     p.w = ScreenW(i);
     p.bytes = bytes;
-    p.px = (u8 *)malloc((size_t)p.w * 240 * bytes);
-    if (!p.px) return;
+    const size_t at = i == 0 ? 0 : (size_t)400 * 240 * bytes;  // the touchscreen's after the top screen's
+    if (g_picPool && at + (size_t)p.w * 240 * bytes <= kPicPoolBytes) p.px = g_picPool + at;
+    if (!p.px) {  // no pool: a block of its own, or at 2 bytes a pixel if 3 don't fit
+        p.px = (u8 *)malloc((size_t)p.w * 240 * bytes);
+        if (!p.px && bytes == 3) p.px = (u8 *)malloc((size_t)p.w * 240 * (p.bytes = 2));
+        p.owned = p.px != nullptr;
+    }
+    if (!p.px) {
+        LogOcr(Utils::Format("picture: %s not kept: no %u KB block (heap free %lu KB, largest %lu KB)",
+                             i == 0 ? "top screen" : "touchscreen", (unsigned)(p.w * 240 * bytes / 1024),
+                             (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB()));
+        return;
+    }
     for (u32 x = 0; x < p.w; x++)
-        kt::framebufferColumnToPicture(Column(s, x), 240, (int)s.Format, s.BytesPerPixel, bytes, &p.px[(size_t)x * 240 * bytes]);
+        kt::framebufferColumnToPicture(Column(s, x), 240, (int)s.Format, s.BytesPerPixel, p.bytes,
+                                       &p.px[(size_t)x * 240 * p.bytes]);
     p.valid = true;
 }
 
 static void DropPictures() {
-    for (int i = 0; i < 2; i++) {
-        Pic(i).valid = false;
-        free(Pic(i).px);
-        Pic(i).px = nullptr;
-    }
+    for (int i = 0; i < 2; i++) ReleasePicture(Pic(i));
 }
 
 // The kept picture onto screen i's draw buffer: tone 0 as it was, 1 dimmed (behind the lookup),
@@ -504,6 +541,8 @@ static int Ask(const std::string &title, const std::string &question, const std:
 // Saving words
 // ---------------------------------------------------------------------------
 static bool g_readTop = true, g_readBottom = false;  // what the open lookup read
+// The screens that were read all have their picture (else nothing to show behind the lookup).
+static bool PicturesKept() { return (!g_readTop || Pic(0).valid) && (!g_readBottom || Pic(1).valid); }
 
 static void SplitTabs(const std::string &line, std::vector<std::string> &cols) {
     cols.clear();
@@ -695,11 +734,7 @@ static void WriteShot(void *) {
         f.Close();
     }
     free(buf);
-    for (Picture &p : j.pic) {
-        free(p.px);
-        p.px = nullptr;
-        p.valid = false;
-    }
+    for (Picture &p : j.pic) ReleasePicture(p);
     j.ms = (u32)(osGetTime() - t0);
 }
 
@@ -754,6 +789,7 @@ static void WriteScreenshotLater() {
     for (int i = 0; i < 2; i++) {  // the pictures move to the job
         j.pic[i] = Pic(i);
         Pic(i).px = nullptr;
+        Pic(i).owned = false;
         Pic(i).valid = false;
     }
     // its own thread with room on its stack (CTRPF's tasks have 4 KB), below the game's priority so
@@ -794,7 +830,10 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
         return false;
     }
     int n = CountSaved();
-    status = "Saved " + (g_kanjiForm ? kt::cardExpressionFor(e, r.matchedKey) : kt::writtenExpressionFor(e, r)) + Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s");
+    status = "Saved " + (g_kanjiForm ? kt::cardExpressionFor(e, r.matchedKey) : kt::writtenExpressionFor(e, r)) +
+             (shot.empty() && (g_readTop || g_readBottom)  // read from the game, but its picture couldn't be kept
+                  ? std::string(" (no screenshot: out of memory)")
+                  : Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s"));
     LogOcr(Utils::Format("saved a word in %lu ms", (unsigned long)(osGetTime() - t0)));
     return true;
 }
@@ -823,6 +862,15 @@ static int NextHide(int h) {
     if (g_hideMode == kHideSeeThrough) return h ? 0 : 1;
     if (g_hideMode == kHideHidden) return h ? 0 : 2;
     return (h + 1) % 3;
+}
+
+// X / Hide pressed: without the game's picture there is nothing to uncover, so it says so.
+static void ToggleHide(kt::LookupView &v) {
+    if (g_hide == 0 && !PicturesKept()) {
+        v.setStatus("Can't show the game: there was no memory to keep its picture", kWarn);
+        return;
+    }
+    g_hide = NextHide(g_hide);
 }
 
 static kt::LookupView::Panel PanelFor(int screen) {
@@ -965,7 +1013,7 @@ static void RunLookupView(kt::LookupView &v) {
         u64 t0 = osGetTime();
         if ((down & Key::B) || SleepRequested()) break;
         if (down & Key::A) { SaveOrUndo(v); changed = true; }
-        if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
+        if (down & Key::X) { ToggleHide(v); changed = true; }
         if (down & Key::Y) { MarkKnown(v); changed = true; }
         if (down & Key::Start) { KeepScreenshot(v); changed = true; }
         if (down & (Key::L | Key::DPadLeft)) moved |= v.page(-1);
@@ -1001,7 +1049,7 @@ static void RunLookupView(kt::LookupView &v) {
                 moved |= v.tap((int)p.x, (int)p.y, b);
                 if (b == kt::LookupView::kClose) break;
                 if (b == kt::LookupView::kSave) { SaveOrUndo(v); changed = true; }
-                if (b == kt::LookupView::kHide) { g_hide = NextHide(g_hide); changed = true; }
+                if (b == kt::LookupView::kHide) { ToggleHide(v); changed = true; }
             }
         }
         touchWas = touch;
@@ -1356,7 +1404,10 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxe
     const Screen &s = ScreenOf(i);
     const u32 W = ScreenW(i), bpp = s.BytesPerPixel;
     if (bpp < 2 || bpp > 4) return nullptr;
-    uint8_t *rgb = (uint8_t *)malloc((size_t)W * 240 * 3);
+    // the colour copy in the pictures' memory (the pictures are taken after it, from the screens
+    // themselves): no ~300 KB block to find each read, and only that much more while boxes are searched
+    const bool inPool = g_picPool && (size_t)W * 240 * 3 <= kPicPoolBytes;
+    uint8_t *rgb = inPool ? g_picPool : (uint8_t *)malloc((size_t)W * 240 * 3);
     if (!rgb) return nullptr;
     u8 *base = Column(s, 0);
     if (W > 1 && Column(s, 1) - base == (int)(240 * bpp)) {  // columns back to back: in one go
@@ -1372,7 +1423,7 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxe
     if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240, 3, !g_fastMode);
     g_boxSearchMs[i] = osGetTime() - tb;
     uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
-    free(rgb);
+    if (!inPool) free(rgb);
     return grey;
 }
 
@@ -1434,6 +1485,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
+    ReservePictures();  // kept from the first read on, beside the model
     const bool spot = !g_fastMode && LoadSpotter();
     LoadAreas();
     u64 t1 = osGetTime();
@@ -1443,6 +1495,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     const bool screens[2] = {mode != kReadBottom, mode != kReadTop};
     uint8_t *grey[2] = {nullptr, nullptr};
     std::vector<kt::TextBox> boxes[2];
+    DropPictures();  // the last lookup's (written out by now): their memory is the colour copies' first
     for (int s = 0; s < 2; s++)
         if (screens[s])  // the spotter and an area need no boxes
             grey[s] = ScreenGrey(s, boxes[s], !g_area[s].set && !spot);
@@ -2019,6 +2072,7 @@ static void Settings() {
     FinishScreenshot();  // "Make Anki cards" may send it
     LoadAreas();
     // the paused game, as it is, for the reading-area editor (before anything is drawn on it)
+    ReservePictures();
     TakePicture(0, 2);
     TakePicture(1, 2);
     struct DropAtEnd { ~DropAtEnd() { DropPictures(); } } dropAtEnd;
