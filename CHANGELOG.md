@@ -19,7 +19,7 @@ a little better on hard text (small print, text with furigana), and recognizes e
 ### Text is found anywhere on the screen
 
 Earlier versions only found text inside solid-coloured text boxes. Subtitles over the game
-scene (Resident Evil Revelations) and text without a box could be missed or cut off. The plugin
+scene and text without a box could be missed or cut off. The plugin 
 now uses **textspot8**, the line spotter from bee-san's
 [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr) (the same project as the OCR model). It
 looks at the whole screen and finds every line of text: dialogue boxes, speech bubbles, menus,
@@ -34,7 +34,7 @@ dialogue. If that gets in the way, use a *Reading area* (below).
 
 - **Off (default):** vita-vn-ocr's line spotter finds every line on the screen.
 - **On:** only solid-coloured text boxes are read, as in earlier versions. This is quicker in
-  games with plain dialogue boxes (Mario & Luigi, for example). Text over the game scene,
+  games with plain dialogue boxes. Text over the game scene,
   menus, and shaded speech bubbles may be missed or only partly read.
 
 ### Reading area
@@ -62,11 +62,6 @@ The area is saved **for this game only** and **for each screen** separately, in
 later scenes may be wider than the one you set it on. Anything outside the area is ignored, so
 if a lookup comes up empty or cut off, the text was probably outside it.
 
-### Pokémon speech bubbles read in full
-
-Pokémon Sun/Moon's speech bubbles fade from top to bottom, and earlier versions only read their
-first line. The whole bubble is read now.
-
 ### Games that crashed at start now work
 
 Some games crashed when they started with the plugin installed (逆転裁判123 /
@@ -83,8 +78,6 @@ Press Start again to take it back. This is useful for reporting screens that wer
 
 - **Reading the text:** VOCR6 recognizes each line about 20% faster than VOCR5, saving about
   45 ms per read.
-- **Finding text boxes:** on screens with text boxes, the box search takes about half the time
-  it did before.
 - **Redrawing:** the lookup screens redraw about 15% faster.
 - **Reading area:** about 30% faster per read than finding the text with the line spotter.
 
