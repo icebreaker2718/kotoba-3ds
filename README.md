@@ -102,6 +102,29 @@ python tools/build_dict.py --jmdict JMdict_e.gz -o dict.bin  # current one from 
 
 ## 2. Install on the 3DS
 
+### Install over Wi-Fi with 3dsDL
+
+No SD card reader needed. [3dsDL](https://ankush.one/3dsDL/) downloads files straight onto the
+SD card; install it once with FBI (**Remote Install → Scan QR Code**, with the code on its page).
+
+1. In 3dsDL, scan this code, or type the link under it. Keep the download folder at the root of
+   the SD card (`sdmc:/`, 3dsDL's default).
+
+   <img src="docs/qr-sd-zip.png" alt="QR code for Kotoba3DS-SD.zip" width="180">
+
+   `https://github.com/icebreaker2718/kotoba-3ds/releases/latest/download/Kotoba3DS-SD.zip`
+2. In **Files**, pick **Kotoba3DS-SD.zip** → **Extract** → **Here**. The plugin goes to
+   `/luma/plugins/default.3gx`, the dictionary and the OCR models to `/3ds/kotoba3ds/`.
+   (With **Settings → Ask to Extract** on, 3dsDL offers this as soon as the download ends.)
+3. If it asks about files that already exist, choose **Overwrite** to update them. Your saved
+   words, screenshots and settings aren't in the zip, so they stay. This also replaces any other
+   plugin you kept as `default.3gx`.
+4. **Delete Archive** frees the space, then turn on the plugin loader (below).
+
+The zip holds the same three files as the table below, already in their folders.
+
+### Or copy the files yourself
+
 | File | Put it at |
 |---|---|
 | `Kotoba3DS.3gx` | `SD:/luma/plugins/default.3gx` (every game), **or** `SD:/luma/plugins/<TitleID>/Kotoba3DS.3gx` for one game |

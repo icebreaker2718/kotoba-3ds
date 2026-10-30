@@ -1,5 +1,14 @@
 # Changelog
 
+## Next release (on the test build)
+
+### Install over Wi-Fi
+
+Each release now has **Kotoba3DS-SD.zip**: the plugin, the dictionary and the OCR models,
+already in their SD card folders. With [3dsDL](https://ankush.one/3dsDL/), scan its QR code,
+then extract the zip at the root of the card, and everything is in place. No SD card reader
+needed. The steps are in the [README](README.md#install-over-wi-fi-with-3dsdl).
+
 ## 1.1.0
 
 Thank you for using kotoba3ds! This is the changelog for the newest release, you can download it from the

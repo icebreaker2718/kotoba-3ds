@@ -29,9 +29,17 @@ works on the code.
 - `.github/workflows/build.yml`: jobs `plugin` (devkitPro + CTRPF), `dictionary` (builds
   `dict.bin`, ~7 min; also zips the OCR models: VOCR6 Normal + textspot8 from vita-vn-ocr v0.5.0, SHA-256
   checked), `release` (on `main`: the **latest** release, titled with the version from
-  `plugin/Kotoba3DS.plgInfo`, with `Kotoba3DS.3gx`, `dict.bin`, `Kotoba3DS-ocr-model.zip`; its notes link
-  CHANGELOG.md and UPDATING.md), `test-release` (on `test`: the **test-build** prerelease with the plugin
-  and `Kotoba3DS-ocr-model.zip`; its notes are CHANGELOG.md's newest entry, links made absolute), `alpha-release` (on `alpha`: `alpha-dev`).
+  `plugin/Kotoba3DS.plgInfo`, with `Kotoba3DS.3gx`, `dict.bin`, `Kotoba3DS-ocr-model.zip`, `Kotoba3DS-SD.zip`; its
+  notes link CHANGELOG.md and UPDATING.md), `test-release` (on `test`: the **test-build** prerelease with the
+  plugin, `Kotoba3DS-ocr-model.zip` and `Kotoba3DS-SD.zip`; its notes are CHANGELOG.md's newest entry, links made
+  absolute), `alpha-release` (on `alpha`: `alpha-dev`).
+- `Kotoba3DS-SD.zip` (`.github/workflows/sd-zip.sh`): plugin as `luma/plugins/default.3gx`, `3ds/kotoba3ds/dict.bin`
+  (the same run's build) and the OCR zip's `3ds/kotoba3ds/ocr/`, for installing over Wi-Fi with 3dsDL (owner's
+  choice, 2026-10-30): Files → the zip → Extract → Here at `sdmc:/`. 3dsDL (checked in its source at 04f3c98): a zip
+  with several top-level folders offers Here / New Folder, makes missing folders, reads deflate, asks Overwrite /
+  Skip Them (Skip preselected) for existing files; its "Ask to Extract" after a download is off by default. The
+  QR codes in `docs/` (README, release notes) are fixed URLs: `releases/latest/download/…` and
+  `releases/download/test-build/…`; regenerate them only if the asset name or tags change.
 - The plugin is only built by CI (no devkitPro locally). Download assets through the REST API;
   GraphQL (`gh release download`, `gh run watch` output) can be blocked:
   `gh api repos/icebreaker2718/kotoba-3ds/releases/tags/test-build` → asset id →
