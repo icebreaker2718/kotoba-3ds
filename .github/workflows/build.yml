@@ -164,6 +164,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4  # for the version number in plugin/Kotoba3DS.plgInfo
       - uses: actions/download-artifact@v4
         with:
           path: out
@@ -174,11 +175,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           ls -la out
+          VERSION=$(awk '/Major:/{a=$2} /Minor:/{b=$2} /Revision:/{c=$2} END{print a"."b"."c}' plugin/Kotoba3DS.plgInfo)
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
           gh release create latest out/Kotoba3DS.3gx out/dict.bin out/Kotoba3DS-ocr-model.zip \
             --target "$GITHUB_SHA" --latest \
-            --title "Kotoba3DS (latest build)" \
-            --notes "Built automatically from ${GITHUB_SHA::7} on $(date -u +%Y-%m-%d).
+            --title "Kotoba3DS $VERSION" \
+            --notes "Kotoba3DS $VERSION, built from ${GITHUB_SHA::7} on $(date -u +%Y-%m-%d). What's new: [CHANGELOG.md](https://github.com/icebreaker2718/kotoba-3ds/blob/main/CHANGELOG.md). **Already using Kotoba3DS?** Follow [UPDATING.md](https://github.com/icebreaker2718/kotoba-3ds/blob/main/UPDATING.md) instead of the steps below.
 
           1. Copy **Kotoba3DS.3gx** to your SD card as \`/luma/plugins/default.3gx\` (every game), or \`/luma/plugins/<TitleID>/Kotoba3DS.3gx\` for one game.
           2. Copy **dict.bin** to \`/3ds/kotoba3ds/dict.bin\`.
@@ -219,7 +221,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: README.md
+          sparse-checkout: CHANGELOG.md
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
@@ -235,8 +237,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete test-build --yes --cleanup-tag 2>/dev/null || true
-          # the notes: the build's commit, then the README's test-build section (what's new, installing, reporting problems)
+          # the notes: the build's commit, then the changelog's newest entry (what's new in the coming release)
           { echo "Built from the test branch (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)). The dictionary (dict.bin) is the latest release's."
-            echo; sed -n '/<!-- test-build:start/,/<!-- test-build:end/p' README.md | sed '1,2d;$d' | sed -E 's/^#(#+ )/\1/'; } > notes.md
+            echo "Install: copy **Kotoba3DS.3gx** to \`/luma/plugins/default.3gx\` and unzip **Kotoba3DS-ocr-model.zip** to the root of the SD card."
+            echo; awk '/^## /{n++} n==1' CHANGELOG.md \
+              | sed -E "s#\]\(([A-Z]+\.md[^)]*)\)#](https://github.com/$GH_REPO/blob/$GITHUB_SHA/\1)#g"; } > notes.md
           gh release create test-build out/Kotoba3DS.3gx out/Kotoba3DS-ocr-model.zip --target "$GITHUB_SHA" --prerelease \
             --title "Kotoba3DS test build" --notes-file notes.md

@@ -28,10 +28,10 @@ works on the code.
 
 - `.github/workflows/build.yml`: jobs `plugin` (devkitPro + CTRPF), `dictionary` (builds
   `dict.bin`, ~7 min; also zips the OCR models: VOCR6 Normal + textspot8 from vita-vn-ocr v0.5.0, SHA-256
-  checked), `release` (on `main`: the **latest** release with `Kotoba3DS.3gx`, `dict.bin`,
-  `Kotoba3DS-ocr-model.zip`), `test-release` (on `test`: the **test-build** prerelease with the plugin
-  and `Kotoba3DS-ocr-model.zip`; its notes are the README's "Test build: what's new" section, between the
-  `test-build:start`/`end` comments: keep it current when test changes, and remove it when test merges to main), `alpha-release` (on `alpha`: `alpha-dev`).
+  checked), `release` (on `main`: the **latest** release, titled with the version from
+  `plugin/Kotoba3DS.plgInfo`, with `Kotoba3DS.3gx`, `dict.bin`, `Kotoba3DS-ocr-model.zip`; its notes link
+  CHANGELOG.md and UPDATING.md), `test-release` (on `test`: the **test-build** prerelease with the plugin
+  and `Kotoba3DS-ocr-model.zip`; its notes are CHANGELOG.md's newest entry, links made absolute), `alpha-release` (on `alpha`: `alpha-dev`).
 - The plugin is only built by CI (no devkitPro locally). Download assets through the REST API;
   GraphQL (`gh release download`, `gh run watch` output) can be blocked:
   `gh api repos/icebreaker2718/kotoba-3ds/releases/tags/test-build` → asset id →
@@ -148,9 +148,11 @@ works on the code.
      so no game behind the lookup, X did nothing, words saved without a screenshot. Now: a failed picture logs
      "picture: ... not kept" (falls back to malloc, 16-bit if 24 doesn't fit), X says why it can't hide, a save says
      "no screenshot: out of memory". Peak per read (fast mode, all 405 screens, beyond the model): 672 -> 728 KB.
-- `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
-  notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-5 to the
-  changelog before the owner reviews it again.
+- Release 1.1.0 prepared on `test` (2026-10-29), for the owner's review before merging to main: version 1.1.0
+  (plgInfo + PluginMenu), CHANGELOG.md (items 1-6 for users), UPDATING.md (returning users: new model zip,
+  nothing else changes), README only gained a pointer to both at the top and a crash-at-start troubleshooting
+  entry. Supersedes the `release-1.1.0` branch (drafted on items 1-2 only; can be deleted). Releases: a version
+  bump and a CHANGELOG entry (+ UPDATING.md steps when users must do more than replace the plugin).
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
   README.
