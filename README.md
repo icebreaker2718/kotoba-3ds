@@ -347,7 +347,10 @@ either returning an audio file or Yomitan's JSON audio-source list:
 - `plugin/Sources/main.cpp`: the CTRPF menu/UI.
 
 ## Credits & licences
-
+- On-device OCR: the VOCR runtime, the VOCR6 and VOCR5 models and the textspot8 line spotter of
+  [bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr) (GPL-3.0-or-later; the model weights
+  are for non-commercial use only, see the attribution files that come with them), the OCR of
+  [Rubi](https://github.com/bee-san/Rubi_for_vita).
 - [JMdict](https://www.edrdg.org/jmdict/j_jmdict.html) and
   [RADKFILE](https://www.edrdg.org/krad/kradinf.html) are property of the Electronic
   Dictionary Research and Development Group, used under CC BY-SA 4.0.
@@ -357,10 +360,7 @@ either returning an audio file or Yomitan's JSON audio-source list:
   (The Pixellizer Group licence) and [Luma3DS](https://github.com/LumaTeam/Luma3DS)'s plugin
   loader.
 - Conjugation handling follows the approach of [Yomitan](https://github.com/yomidevs/yomitan).
-- On-device OCR: the VOCR runtime, the VOCR6 and VOCR5 models and the textspot8 line spotter of
-  [bee-san/vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr) (GPL-3.0-or-later; the model weights
-  are for non-commercial use only, see the attribution files that come with them), the OCR of
-  [Rubi](https://github.com/bee-san/Rubi_for_vita).
+
 
 ## Licence
 
