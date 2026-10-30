@@ -8,6 +8,7 @@
 #include <cmath>
 
 #include "core/kana.hpp"
+#include "core/search.hpp"
 #include "vocr.h"
 #include "vocr_lines.h"
 #include "vocr_lines_refine.h"
@@ -57,6 +58,8 @@ void LocalOcr::unload() {
     blob_ = arena_ = nullptr;
     model_ = ctx_ = nullptr;
     ctxs_.clear();
+    arenas_.clear();
+    blobCap_ = arenaBytes_ = 0;
     topk_.clear();
     info_.clear();
 }
@@ -70,25 +73,67 @@ bool LocalOcr::load(Reader &file, std::string &error) {
     return ok;
 }
 
-bool LocalOcr::loadInner(Reader &file, std::string &error) {
-    uint32_t n = file.size();
-    if (n < 64 || n > 8 * 1024 * 1024) { error = "the OCR model file looks wrong"; return false; }
-    unsigned char *blob = (unsigned char *)alignedAlloc(n + 32);  // + the bytes VOCR's ARM kernel may read past the end
-    if (!blob) { error = "not enough memory for the OCR model"; return false; }
+// Headroom in the model's memory, so another model file (VOCR5 and VOCR6 differ by a few KB) can
+// take its place without a new allocation.
+static const size_t kBlobSpare = 16 * 1024, kArenaSpare = 8 * 1024;
+
+static bool readModelFile(Reader &file, unsigned char *blob, uint32_t n, std::string &error) {
     for (uint32_t off = 0; off < n;) {  // in pieces: SD reads of a few hundred KB at a time
         uint32_t piece = n - off > 256 * 1024 ? 256 * 1024 : n - off;
         if (!file.read(off, blob + off, piece)) { error = "could not read the OCR model"; return false; }
         off += piece;
     }
+    return true;
+}
+
+bool LocalOcr::loadInner(Reader &file, std::string &error) {
+    uint32_t n = file.size();
+    if (n < 64 || n > 8 * 1024 * 1024) { error = "the OCR model file looks wrong"; return false; }
+    blobCap_ = n + 32 + kBlobSpare;  // + the bytes VOCR's ARM kernel may read past the end
+    unsigned char *blob = (unsigned char *)alignedAlloc(blobCap_);
+    if (!blob) { error = "not enough memory for the OCR model"; return false; }
+    if (!readModelFile(file, blob, n, error)) return false;
     vocr_model *m = (vocr_model *)alignedAlloc(sizeof(vocr_model));
     vocr_ctx *c = (vocr_ctx *)alignedAlloc(sizeof(vocr_ctx));
     if (!m || !c) { error = "not enough memory for the OCR model"; return false; }
-    int r = vocr_load(m, blob, n);
+    blob_ = blob;
+    model_ = m;
+    ctx_ = c;
+    arena_ = nullptr;
+    arenaBytes_ = 0;
+    ctxs_.assign(1, c);
+    arenas_.clear();
+    if (!setUp(n, error)) {
+        blob_ = nullptr;
+        return false;
+    }
+    if (runner_) ensureWorkers(workers_);
+    return true;
+}
+
+bool LocalOcr::reloadInPlace(Reader &file, std::string &error) {
+    if (!blob_ || !model_) { error = "no model loaded"; return false; }
+    const uint32_t n = file.size();
+    if (n < 64 || (size_t)n + 32 > blobCap_) { error = "the other model doesn't fit"; return false; }
+    // past this point the old model is gone: on a failure nothing is loaded
+    if (!readModelFile(file, blob_, n, error) || !setUp(n, error)) {
+        unload();
+        return false;
+    }
+    return true;
+}
+
+// The model file is in blob_ (n bytes): parse and check it, then plan every context's working
+// memory, in the arenas already there when they are big enough (a model swapped in place).
+bool LocalOcr::setUp(uint32_t n, std::string &error) {
+    vocr_model *m = (vocr_model *)model_;
+    memset(blob_ + n, 0, 32);
+    int r = vocr_load(m, blob_, n);
     // the CRC pass costs ~0.1 s on the 3DS: once per file per session is enough
-    static uint32_t checkedSize = 0;
-    if (r == VOCR_OK && checkedSize != n) {
-        if (vocr_check_crc(blob, n) != VOCR_OK) r = VOCR_E_FORMAT;
-        else checkedSize = n;
+    static uint32_t checkedSize[2] = {0, 0};  // the last two model files loaded
+    if (r == VOCR_OK && checkedSize[0] != n && checkedSize[1] != n) {
+        if (vocr_check_crc(blob_, n) != VOCR_OK) r = VOCR_E_FORMAT;
+        else checkedSize[1] = checkedSize[0], checkedSize[0] = n;
     }
     if (r == VOCR_OK) vocr_pack_simd32(m);  // ARM11: weights reordered for 2-at-a-time multiplies
     if (r != VOCR_OK) {
@@ -102,22 +147,33 @@ bool LocalOcr::loadInner(Reader &file, std::string &error) {
     o.mode = m->int8 ? VOCR_MODE_W8I : VOCR_MODE_F32;
     o.tile_frames = tileFrames_;
     o.head_frames = headFrames_;
-    size_t need = vocr_arena_bytes(m, &o);
-    unsigned char *arena = (unsigned char *)alignedAlloc(need);
-    if (!arena) { error = "not enough memory for the OCR"; return false; }
-    r = vocr_init(c, m, &o, arena, need);
-    if (r != VOCR_OK) { error = "could not start the OCR"; return false; }
-    arenaBytes_ = need;
+    gate_ = speed_ && vocr_has_gate(m);
+    twoLevel_ = speed_ && o.mode == VOCR_MODE_W8I && vocr_has_two_level(m);
+    o.head_gate = gate_ ? VOCR_HEAD_GATE_ON : VOCR_HEAD_GATE_OFF;
+    o.two_level = twoLevel_ ? 1 : 0;
+    const size_t need = vocr_arena_bytes(m, &o);
+    if (!need) { error = "could not start the OCR"; return false; }
+    if (!arena_) {  // the first load: the main context's arena, with room for another model
+        arenaBytes_ = need + kArenaSpare;
+        arena_ = (unsigned char *)alignedAlloc(arenaBytes_);
+        if (!arena_) { error = "not enough memory for the OCR"; return false; }
+        arenas_.assign(1, arena_);
+    }
+    if (need > arenaBytes_) { error = "the other model doesn't fit"; return false; }
+    for (unsigned k = 0; k < topk_.size(); k++)
+        if (topk_[k].logit && topk_[k].cap < m->max_width / m->stride + 8) topk_[k] = TopK();  // too small now: none
+    for (size_t k = 0; k < ctxs_.size(); k++)  // every worker's context again, in its own arena
+        if (vocr_init((vocr_ctx *)ctxs_[k], m, &o, arenas_[k], arenaBytes_) != VOCR_OK) {
+            if (k == 0) { error = "could not start the OCR"; return false; }
+            ctxs_.resize(k);  // fewer workers then
+            arenas_.resize(k);
+            break;
+        }
     mode_ = o.mode;
-    ctxs_.assign(1, c);
-    blob_ = blob;
-    arena_ = arena;
-    model_ = m;
-    ctx_ = c;
     char b[96];
-    snprintf(b, sizeof(b), "%u characters, %u KB", m->n_classes, (unsigned)(n / 1024));
+    snprintf(b, sizeof(b), "%u characters, %u KB%s%s", m->n_classes, (unsigned)(n / 1024), gate_ ? ", head gate" : "",
+             twoLevel_ ? ", two-level head" : "");
     info_ = b;
-    if (runner_) ensureWorkers(workers_);
     return true;
 }
 
@@ -134,8 +190,11 @@ void LocalOcr::ensureWorkers(unsigned n) {
         o.mode = mode_;
         o.tile_frames = tileFrames_;
         o.head_frames = headFrames_;
+        o.head_gate = gate_ ? VOCR_HEAD_GATE_ON : VOCR_HEAD_GATE_OFF;
+        o.two_level = twoLevel_ ? 1 : 0;
         if (!c2 || !a2 || vocr_init(c2, m, &o, a2, arenaBytes_) != VOCR_OK) break;  // fewer workers then
         ctxs_.push_back(c2);
+        arenas_.push_back(a2);
     }
     while (topk_.size() < ctxs_.size()) {  // a few KB each
         TopK t;
@@ -151,9 +210,12 @@ void LocalOcr::ensureWorkers(unsigned n) {
 // in pieces. With tk, also fills alts[0..*nAlts) with the characters the recognizer was unsure of.
 // Runs on worker threads: no allocation, little stack.
 static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsigned stride, const VocrLine &L,
-                   char *out, size_t cap, const TopK *tk, RawAlt *alts, unsigned *nAlts) {
+                   char *out, size_t cap, const TopK *tk, RawAlt *alts, unsigned *nAlts, float *conf) {
     out[0] = 0;
     if (nAlts) *nAlts = 0;
+    float shareSum = 0;
+    unsigned shareN = 0;
+    bool measured = true;
     size_t used = 0;
     int fmt = VOCR_GREY8 | (L.dark ? VOCR_INVERT : 0);
     unsigned pieces = 1;
@@ -172,6 +234,7 @@ static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsign
         memset(&ex, 0, sizeof(ex));
         bool withAlts = tk && tk->logit && alts && nAlts &&
                         vocr_resized_width(m, im.width, im.height) / m->stride + 1 <= tk->cap;
+        if (!withAlts) measured = false;
         if (withAlts) {
             ex.topk = kTopK;
             ex.topk_logit = tk->logit;
@@ -197,6 +260,8 @@ static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsign
                     // the other guesses for this character, with their share of the frame's top K
                     float sum = 1.0f;
                     for (unsigned j = 1; j < kTopK; j++) sum += expf(tv[j] - tv[0]);
+                    shareSum += 1.0f / sum;  // the character's share of its frame's top guesses
+                    shareN++;
                     RawAlt a;
                     a.byte = (uint16_t)at;
                     a.len = (uint16_t)n;
@@ -208,10 +273,11 @@ static int runLine(vocr_ctx *c, const vocr_model *m, const uint8_t *grey, unsign
                 }
                 last = best;
             }
-            if (!same || at != used + len) *nAlts = 0;  // couldn't line them up: no alternatives
+            if (!same || at != used + len) { *nAlts = 0; measured = false; }  // couldn't line them up
         }
         used += len;
     }
+    if (conf) *conf = measured && shareN ? shareSum / shareN : -1;
     return VOCR_OK;
 }
 
@@ -229,6 +295,7 @@ struct LineJob {
     const TopK *tk = nullptr;  // per worker
     RawAlt *alts = nullptr;    // count x kMaxAlts
     unsigned *nAlts = nullptr;
+    float *conf = nullptr;
     const unsigned *order = nullptr;  // the lines in the order they are handed out
     std::atomic<unsigned> next{0}, worker{0};
 };
@@ -240,7 +307,7 @@ void lineWorker(void *arg) {
     for (unsigned k; (k = j->next.fetch_add(1)) < j->count;) {
         const unsigned i = j->order[k];
         j->rc[i] = runLine(c, j->model, j->grey, j->stride, j->lines[i], j->text + (size_t)i * kLineCap, kLineCap,
-                           j->tk ? &j->tk[w] : nullptr, j->alts + (size_t)i * kMaxAlts, &j->nAlts[i]);
+                           j->tk ? &j->tk[w] : nullptr, j->alts + (size_t)i * kMaxAlts, &j->nAlts[i], &j->conf[i]);
     }
 }
 }  // namespace
@@ -277,7 +344,6 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
 #ifndef __3DS__
     if (getenv("LO_DEBUG")) for (unsigned i = 0; i < set.count; i++) fprintf(stderr, "found %u,%u %ux%u dark=%u\n", set.lines[i].x, set.lines[i].y, set.lines[i].w, set.lines[i].h, set.lines[i].dark);
 #endif
-    const vocr_model *m = (const vocr_model *)model_;
     std::vector<VocrLine> todoLines;
     for (unsigned i : todo) {
         VocrLine L = set.lines[i];
@@ -285,7 +351,63 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
         L.y += ry;
         todoLines.push_back(L);
     }
-    unsigned n = (unsigned)todoLines.size();
+    return recognize(grey, w, h, todoLines.data(), (unsigned)todoLines.size(), lines, error, progress);
+}
+
+bool LocalOcr::findLines(const uint8_t *grey, unsigned w, unsigned h, unsigned rx, unsigned ry, unsigned rw,
+                         unsigned rh, std::vector<LineBox> &out) {
+    out.clear();
+    if (!grey || !rw || !rh || rx + rw > w || ry + rh > h) return false;
+    VocrLinesImage im;
+    im.pixels = grey + (size_t)ry * w + rx;
+    im.width = rw;
+    im.height = rh;
+    im.stride = w;
+    im.bpp = VOCR_LINES_GREY;
+    size_t la = vocr_lines_arena_bytes(rw, rh);
+    void *larena = malloc(la);
+    if (!larena) return false;
+    VocrLineSet set;
+    int r = vocr_find_lines(&im, VOCR_LINES_GRAD, larena, la, &set);
+    if (r == VOCR_LINES_OK) vocr_refine_lines(&im, VOCR_REFINE_DEFAULT, larena, la, &set, nullptr);
+    free(larena);
+    if (r != VOCR_LINES_OK) return false;
+    for (unsigned i = 0; i < set.count; i++) {
+        LineBox b;
+        b.x = set.lines[i].x + rx;
+        b.y = set.lines[i].y + ry;
+        b.w = set.lines[i].w;
+        b.h = set.lines[i].h;
+        b.dark = set.lines[i].dark != 0;
+        out.push_back(b);
+    }
+    return true;
+}
+
+bool LocalOcr::readLines(const uint8_t *grey, unsigned w, unsigned h, const std::vector<LineBox> &boxes,
+                         std::vector<TextLine> &lines, std::string &error, void (*progress)(unsigned, unsigned)) {
+    lines.clear();
+    if (!blob_) { error = "no OCR model loaded"; return false; }
+    std::vector<VocrLine> v;
+    for (const LineBox &b : boxes) {
+        if (!b.w || !b.h || b.x + b.w > w || b.y + b.h > h) continue;
+        VocrLine L;
+        memset(&L, 0, sizeof L);
+        L.x = b.x;
+        L.y = b.y;
+        L.w = b.w;
+        L.h = b.h;
+        L.dark = b.dark ? 1 : 0;
+        v.push_back(L);
+    }
+    return recognize(grey, w, h, v.data(), (unsigned)v.size(), lines, error, progress);
+}
+
+bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void *linesIn, unsigned n,
+                         std::vector<TextLine> &lines, std::string &error, void (*progress)(unsigned, unsigned)) {
+    lines.clear();
+    const vocr_model *m = (const vocr_model *)model_;
+    const VocrLine *todoLines = (const VocrLine *)linesIn;
     // workers: one per line up to workers_, each with its own context (made at the load)
     unsigned workers = runner_ ? std::min<unsigned>(workers_, n) : 1;
     ensureWorkers(workers);
@@ -296,12 +418,13 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
     std::vector<int> rc(std::max(n, 1u), VOCR_E_ARG);
     std::vector<RawAlt> rawAlts(fixer_ ? (size_t)std::max(n, 1u) * kMaxAlts : 1);
     std::vector<unsigned> nAlts(std::max(n, 1u), 0);
+    std::vector<float> conf(std::max(n, 1u), -1.0f);
     LineJob job;
     job.model = m;
     job.ctxs = ctxs_.data();
     job.grey = grey;
     job.stride = w;
-    job.lines = todoLines.data();
+    job.lines = todoLines;
     job.count = n;
     job.text = text.data();
     job.rc = rc.data();
@@ -310,6 +433,7 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
     job.tk = tkOk ? (const TopK *)topk_.data() : nullptr;
     job.alts = rawAlts.data();
     job.nAlts = nAlts.data();
+    job.conf = conf.data();
     // the longest lines first: the last one handed out is then a short one, and the workers finish
     // close together (with 2 workers and lines of 10, 10 and 4 characters: 10 | 10 + 4, not 10 + 10 | 4)
     std::vector<unsigned> order(std::max(n, 1u), 0);
@@ -324,7 +448,7 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
         for (unsigned k = 0; k < n; k++) {  // one at a time, with progress
             if (progress) progress(k, n);
             job.rc[k] = runLine((vocr_ctx *)ctxs_[0], m, grey, w, todoLines[k], job.text + (size_t)k * kLineCap, kLineCap,
-                                job.tk, job.alts + (size_t)k * kMaxAlts, &job.nAlts[k]);
+                                job.tk, job.alts + (size_t)k * kMaxAlts, &job.nAlts[k], &job.conf[k]);
         }
     }
     for (unsigned k = 0; k < n; k++) {
@@ -361,6 +485,8 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
             fixer_(line.text, alts, fixerUser_);
         }
         line.paragraph = (int)k;  // each line its own block; textParagraphs() joins a text box's lines
+        line.confidence = conf[k];
+        line.dark = L.dark != 0;
         line.centerX = (L.x + L.w / 2.0f) / w;
         line.centerY = (L.y + L.h / 2.0f) / h;
         line.width = (float)L.w / w;
@@ -435,17 +561,20 @@ static unsigned japaneseChars(const std::vector<std::string> &paragraphs) {
     return n;
 }
 
-bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h, const std::vector<TextBox> &boxes,
-                     std::vector<std::string> &paragraphs, std::string &error,
-                     void (*progress)(unsigned, unsigned), int *usedBox) {
-    paragraphs.clear();
-    if (usedBox) *usedBox = -1;
+namespace {
+struct BoxRead {
+    const TextBox *box;
+    int index;
     std::vector<TextLine> lines;
-    // every box with Japanese in it (a screen can have two speech bubbles), in reading order
-    struct Got { const TextBox *box; std::vector<std::string> paras; int index; };
-    std::vector<Got> got;
-    struct Read { const TextBox *box; int index; std::vector<TextLine> lines; };
-    std::vector<Read> reads;
+};
+
+// Reads each text box (a box mostly inside one read already is skipped), then gives each line
+// read by two overlapping boxes to the box that read the most of it.
+void readBoxLines(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h, const std::vector<TextBox> &boxes,
+                  void (*progress)(unsigned, unsigned), std::vector<BoxRead> &reads) {
+    typedef BoxRead Read;
+    std::vector<TextLine> lines;
+    reads.clear();
     for (size_t bi = 0; bi < boxes.size(); bi++) {
         const TextBox &b = boxes[bi];
         bool inside = false;  // mostly within a box read already (a box inside a box)
@@ -458,6 +587,13 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
         if (inside) continue;
         unsigned x0 = b.x > 2 ? b.x - 2 : 0, y0 = b.y > 2 ? b.y - 2 : 0;
         unsigned x1 = b.x + b.w + 2 < w ? b.x + b.w + 2 : w, y1 = b.y + b.h + 2 < h ? b.y + b.h + 2 : h;
+        if (b.shaded && b.inkW && b.inkH) {  // a rounded shaded box: just around the letters, not its frame
+            const unsigned m = 6;
+            x0 = std::max(x0, b.inkX > m ? b.inkX - m : 0);
+            y0 = std::max(y0, b.inkY > m ? b.inkY - m : 0);
+            x1 = std::min(x1, b.inkX + b.inkW + m);
+            y1 = std::min(y1, b.inkY + b.inkH + m);
+        }
         std::string e;
         if (!ocr.read(grey, w, h, lines, e, progress, x0, y0, x1 - x0, y1 - y0)) continue;
         reads.push_back({&b, (int)bi, lines});
@@ -498,6 +634,21 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
                            return !seen && !theirs.empty() && insideBox(l, *reads[q].box);
                        }), mine.end());
         }
+}
+}  // namespace
+
+bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h, const std::vector<TextBox> &boxes,
+                     std::vector<std::string> &paragraphs, std::string &error,
+                     void (*progress)(unsigned, unsigned), int *usedBox) {
+    paragraphs.clear();
+    if (usedBox) *usedBox = -1;
+    std::vector<TextLine> lines;
+    // every box with Japanese in it (a screen can have two speech bubbles), in reading order
+    struct Got { const TextBox *box; std::vector<std::string> paras; int index; };
+    std::vector<Got> got;
+    typedef BoxRead Read;
+    std::vector<Read> reads;
+    readBoxLines(ocr, grey, w, h, boxes, progress, reads);
     for (const Read &rd : reads) {
         std::vector<std::string> ps = textParagraphs(rd.lines, true);
         cleanParagraphs(ps);
@@ -544,6 +695,471 @@ bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h,
     }
     paragraphs = textParagraphs(kept, true);
     cleanParagraphs(paragraphs);
+    if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Option 1: text boxes as a hint, every line scored
+// ---------------------------------------------------------------------------
+namespace {
+
+unsigned japaneseIn(const std::string &t) {
+    unsigned n = 0;
+    for (size_t i = 0; i < t.size();) {
+        uint32_t cp = utf8Next(t, i);
+        n += (cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0x3400 && cp <= 0x9FFF);
+    }
+    return n;
+}
+
+// Japanese characters of t that are part of a dictionary word of two characters or more (greedy
+// longest match, as the lookup screen splits text).
+unsigned dictCovered(Dictionary &dict, const std::string &t) {
+    unsigned covered = 0;
+    for (const std::string &c : chunkText(dict, t)) {
+        unsigned n = 0, jp = 0;
+        for (size_t i = 0; i < c.size();) {
+            uint32_t cp = utf8Next(c, i);
+            n++;
+            jp += (cp >= 0x3040 && cp <= 0x30FF) || (cp >= 0x3400 && cp <= 0x9FFF);
+        }
+        if (n >= 2) covered += jp;
+    }
+    return covered;
+}
+
+// At least 30% of the line's Japanese is in dictionary words of two characters or more.
+bool checkDict(Dictionary &dict, const std::string &t, unsigned jp, ScoredReadStats *st) {
+    const uint64_t t0 = st && st->clock ? st->clock() : 0;
+    const bool ok = dictCovered(dict, t) * 10 >= jp * 3;
+    if (st) {
+        st->dictChecks++;
+        if (st->clock) st->dictMs += (uint32_t)(st->clock() - t0);
+    }
+    return ok;
+}
+
+// Does the line read like text? A line from a text box is trusted unless the recognizer was unsure
+// of it and the dictionary finds no words in it (a sprite, an icon: 「凛」, 「ート」). A line found
+// out in the scene must earn its place: the recognizer sure of it, or words in it.
+bool keepLine(const TextLine &l, Dictionary *dict, bool fromBox, ScoredReadStats *st) {
+    const unsigned jp = japaneseIn(l.text);
+    const float c = l.confidence;
+    if (fromBox) {
+        if (c < 0 || c >= 0.8f) return true;
+        if (jp == 0) return false;
+        if (!dict) return c >= 0.6f;
+        return checkDict(*dict, l.text, jp, st);
+    }
+    if (jp < 2) return false;  // a single character out in the scene is noise far more often than text
+    if (c >= 0.93f) return true;
+    if (c >= 0 && c < 0.75f) return false;
+    if (!dict) return c >= 0.85f;
+    return checkDict(*dict, l.text, jp, st);
+}
+
+bool boxesOverlap(const LocalOcr::LineBox &a, const LocalOcr::LineBox &b, float frac) {
+    const int ix = std::min<int>(a.x + a.w, b.x + b.w) - std::max<int>(a.x, b.x);
+    const int iy = std::min<int>(a.y + a.h, b.y + b.h) - std::max<int>(a.y, b.y);
+    if (ix <= 0 || iy <= 0) return false;
+    return (float)ix * iy > frac * std::min(a.w * a.h, b.w * b.h);
+}
+
+bool lineOverlaps(const TextLine &l, const LocalOcr::LineBox &b, unsigned w, unsigned h) {
+    LocalOcr::LineBox a;
+    a.x = (unsigned)std::max(0.0f, (l.centerX - l.width / 2) * w);
+    a.y = (unsigned)std::max(0.0f, (l.centerY - l.height / 2) * h);
+    a.w = (unsigned)(l.width * w) + 1;
+    a.h = (unsigned)(l.height * h) + 1;
+    return boxesOverlap(a, b, 0.5f);
+}
+
+}  // namespace
+
+float textLikeness(const uint8_t *grey, unsigned w, unsigned h, const LocalOcr::LineBox &b) {
+    if (!b.w || !b.h || b.x + b.w > w || b.y + b.h > h) return -100;
+    // Otsu threshold over a 64-bin histogram (4 grey levels a bin)
+    unsigned hist[64] = {0}, h256[256] = {0};
+    for (unsigned y = 0; y < b.h; y++) {
+        const uint8_t *row = grey + (size_t)(b.y + y) * w + b.x;
+        for (unsigned x = 0; x < b.w; x++) { hist[row[x] >> 2]++; h256[row[x]]++; }
+    }
+    const float total = (float)b.w * b.h;
+    float best = -1, sumAll = 0;
+    unsigned thr = 128;
+    for (unsigned i = 0; i < 64; i++) sumAll += i * (float)hist[i];
+    float w0 = 0, sum0 = 0;
+    for (unsigned t = 1; t < 64; t++) {
+        w0 += hist[t - 1];
+        sum0 += (t - 1) * (float)hist[t - 1];
+        const float w1 = total - w0;
+        if (w0 < 1 || w1 < 1) continue;
+        const float m0 = sum0 / w0, m1 = (sumAll - sum0) / w1;
+        const float sc = w0 * w1 * (m0 - m1) * (m0 - m1);
+        if (sc > best) { best = sc; thr = t * 4; }
+    }
+    // ink on the text's side of the threshold; columns with ink and their runs; rows with ink
+    unsigned ink = 0, runs = 0, inkRows = 0, edges = 0;
+    std::vector<uint8_t> colInk(b.w, 0);
+    for (unsigned y = 0; y < b.h; y++) {
+        const uint8_t *row = grey + (size_t)(b.y + y) * w + b.x;
+        unsigned rowInk = 0;
+        for (unsigned x = 0; x < b.w; x++) {
+            const bool on = b.dark ? row[x] < thr : row[x] > thr;
+            rowInk += on;
+            if (on) colInk[x] = 1;
+            if (x && abs((int)row[x] - (int)row[x - 1]) > 40) edges++;
+        }
+        ink += rowInk;
+        inkRows += rowInk * 50 > b.w;  // more than 2% of the row
+    }
+    for (unsigned x = 0; x < b.w; x++) runs += colInk[x] && (x == 0 || !colInk[x - 1]);
+    // contrast: 95th minus 5th percentile
+    unsigned acc = 0, p5 = 0, p95 = 255;
+    bool got5 = false;
+    for (unsigned v = 0; v < 256; v++) {
+        acc += h256[v];
+        if (!got5 && acc >= total * 0.05f) { p5 = v; got5 = true; }
+        if (acc >= total * 0.95f) { p95 = v; break; }
+    }
+    const float inkf = ink / total, runsPerH = (float)runs * b.h / b.w, rowBand = (float)inkRows / b.h;
+    const float edge = b.w > 1 ? (float)edges / ((b.w - 1) * (float)b.h) : 0, contrast = (float)(p95 - p5);
+    const float aspect = (float)b.w / b.h;
+    // weights fitted on 1,534 candidate lines from 170 labelled screens (logistic regression)
+    return -1.121f + 1.3619f * runsPerH + 5.4859f * edge + 0.0065f * contrast - 1.075f * inkf - 2.7452f * rowBand +
+           0.0088f * aspect;
+}
+
+bool readScreenScored(LocalOcr &ocr, Dictionary *dict, const uint8_t *grey, unsigned w, unsigned h,
+                      const std::vector<TextBox> &boxes, std::vector<std::string> &paragraphs, std::string &error,
+                      void (*progress)(unsigned, unsigned), ScoredReadStats *stats) {
+    ScoredReadStats local;
+    ScoredReadStats &st = stats ? *stats : local;
+    uint64_t (*clock)() = st.clock;
+    st = ScoredReadStats();
+    st.clock = clock;
+    auto now = [clock]() -> uint64_t { return clock ? clock() : 0; };
+    const uint64_t tBox = now();
+    paragraphs.clear();
+    if (dict && !dict->isOpen()) dict = nullptr;
+    // 1. the text boxes, each line scored; a line the recognizer was unsure of is "weak": it gives
+    //    way to a line the bands read in the same place
+    std::vector<BoxRead> reads;
+    readBoxLines(ocr, grey, w, h, boxes, progress, reads);
+    st.boxMs = (uint32_t)(now() - tBox);
+    struct Block { float y, x; std::vector<std::string> paras; };
+    std::vector<Block> blocks;
+    auto strong = [](const TextLine &l) { return l.confidence < 0 || l.confidence >= 0.85f; };
+    std::vector<std::vector<TextLine>> boxKept(reads.size());
+    std::vector<TextLine> strongBoxLines;
+    unsigned goodChars = 0;
+    for (size_t r = 0; r < reads.size(); r++)
+        for (const TextLine &l : reads[r].lines) {
+            st.boxLines++;
+            if (!keepLine(l, dict, true, &st)) { st.boxDropped++; continue; }
+            boxKept[r].push_back(l);
+            if (strong(l)) {
+                goodChars += japaneseIn(l.text);
+                strongBoxLines.push_back(l);
+            }
+        }
+    std::vector<TextLine> bandKept;
+    // 2. no text a reader would want from the boxes: search the screen in bands
+    if (goodChars < 4) {
+        st.usedBands = true;
+        const uint64_t tFind = now();
+        const unsigned bandH = std::min(60u, h), step = 30;
+        std::vector<LocalOcr::LineBox> cands, found;
+        std::vector<char> cut;  // the line touches the edge of its band: the band may have cut it
+        for (unsigned y0 = 0;; y0 += step) {
+            if (y0 + bandH > h) y0 = h - bandH;
+            LocalOcr::findLines(grey, w, h, 0, y0, w, bandH, found);
+            for (const LocalOcr::LineBox &b : found) {
+                // a line, not a block of scenery: text-sized, wider than tall
+                if (b.h < 9 || b.h > 48 || b.w < 16 || b.w * 2 < b.h * 3) continue;
+                const bool bCut = (b.y <= y0 && y0 > 0) || (b.y + b.h >= y0 + bandH && y0 + bandH < h);
+                bool dup = false;
+                for (size_t k = 0; k < cands.size(); k++)
+                    if (boxesOverlap(b, cands[k], 0.6f)) {
+                        const unsigned lo = std::min(b.h, cands[k].h), hi = std::max(b.h, cands[k].h);
+                        if (hi * 4 > lo * 5) continue;  // much taller or shorter: both are read, the surer kept
+                        // the same line from two bands: the one its band didn't cut, else the tighter
+                        if ((cut[k] && !bCut) || (cut[k] == bCut && b.h < cands[k].h)) {
+                            cands[k] = b;
+                            cut[k] = bCut;
+                        }
+                        dup = true;
+                        break;
+                    }
+                if (!dup) {
+                    cands.push_back(b);
+                    cut.push_back(bCut);
+                }
+            }
+            if (y0 + bandH >= h) break;
+        }
+        // furigana: a line much shorter than one right below it, over it (the reading of its kanji)
+        std::vector<char> ruby(cands.size(), 0);
+        for (size_t i = 0; i < cands.size(); i++)
+            for (size_t j = 0; j < cands.size() && !ruby[i]; j++) {
+                const LocalOcr::LineBox &r = cands[i], &t = cands[j];
+                if (i == j || r.h * 16 > t.h * 10) continue;  // not under 5/8 of its height
+                const int gap = (int)t.y - (int)(r.y + r.h);
+                const bool above = gap >= -(int)r.h / 2 && gap <= (int)t.h / 2;
+                const bool overX = r.x + r.w > t.x && t.x + t.w > r.x;
+                ruby[i] = above && overX;
+            }
+        {
+            size_t k = 0;
+            for (size_t i = 0; i < cands.size(); i++)
+                if (!ruby[i]) cands[k++] = cands[i];
+            cands.resize(k);
+        }
+        st.bandCandidates = (unsigned)cands.size();
+        // not what a box already read well
+        cands.erase(std::remove_if(cands.begin(), cands.end(), [&](const LocalOcr::LineBox &b) {
+                        for (const TextLine &l : strongBoxLines)
+                            if (lineOverlaps(l, b, w, h)) return true;
+                        return false;
+                    }), cands.end());
+        // the likeliest first, a few of them
+        std::vector<std::pair<float, LocalOcr::LineBox>> ranked;
+        for (const LocalOcr::LineBox &b : cands) {
+            const float s = textLikeness(grey, w, h, b);
+            if (s > -3.0f) ranked.push_back({s, b});
+        }
+        std::stable_sort(ranked.begin(), ranked.end(),
+                         [](const std::pair<float, LocalOcr::LineBox> &a, const std::pair<float, LocalOcr::LineBox> &b) {
+                             return a.first > b.first;
+                         });
+        const size_t kMaxRead = 8;
+        std::vector<LocalOcr::LineBox> toRead;
+        for (size_t i = 0; i < ranked.size() && i < kMaxRead; i++) toRead.push_back(ranked[i].second);
+        std::vector<TextLine> lines, kept;
+        std::string e;
+        const uint64_t tRead = now();
+        st.bandFindMs = (uint32_t)(tRead - tFind);
+        // a line found twice at different heights (a tight box and a taller one): the likelier box
+        // first; the other only if that one didn't read clearly
+        std::vector<LocalOcr::LineBox> first, second;
+        for (size_t i = 0; i < toRead.size(); i++) {
+            bool dup = false;
+            for (size_t j = 0; j < i && !dup; j++) dup = boxesOverlap(toRead[i], toRead[j], 0.6f);
+            (dup ? second : first).push_back(toRead[i]);
+        }
+        auto readKept = [&](const std::vector<LocalOcr::LineBox> &boxes) {
+            if (boxes.empty() || !ocr.readLines(grey, w, h, boxes, lines, e, progress)) return;
+            for (const TextLine &l : lines)
+                if (keepLine(l, dict, false, &st)) kept.push_back(l);
+        };
+        readKept(first);
+        second.erase(std::remove_if(second.begin(), second.end(), [&](const LocalOcr::LineBox &b) {
+                         for (const TextLine &l : kept)
+                             if (l.confidence >= 0.93f && lineOverlaps(l, b, w, h)) return true;
+                         return false;
+                     }), second.end());
+        readKept(second);
+        st.bandRead = (unsigned)(first.size() + second.size());
+        st.bandReadMs = (uint32_t)(now() - tRead);
+        // two readings of one line (a tight box and a taller one): the one the recognizer was surer of
+        {
+            auto box = [w, h](const TextLine &l) {
+                LocalOcr::LineBox b;
+                b.x = (unsigned)std::max(0.0f, (l.centerX - l.width / 2) * w);
+                b.y = (unsigned)std::max(0.0f, (l.centerY - l.height / 2) * h);
+                b.w = (unsigned)(l.width * w) + 1;
+                b.h = (unsigned)(l.height * h) + 1;
+                return b;
+            };
+            std::vector<char> drop(kept.size(), 0);
+            for (size_t i = 0; i < kept.size(); i++)
+                for (size_t j = 0; j < kept.size(); j++)
+                    if (i != j && !drop[j] && boxesOverlap(box(kept[i]), box(kept[j]), 0.6f) &&
+                        (kept[j].confidence > kept[i].confidence ||
+                         (kept[j].confidence == kept[i].confidence && j < i)))
+                        drop[i] = 1;
+            size_t k = 0;
+            for (size_t i = 0; i < kept.size(); i++)
+                if (!drop[i]) kept[k++] = kept[i];
+            kept.resize(k);
+        }
+        st.bandKept = (unsigned)kept.size();
+        bandKept = kept;
+        // top to bottom, then left to right, so lines of one block come together
+        std::stable_sort(kept.begin(), kept.end(), [](const TextLine &a, const TextLine &b) {
+            if (fabsf(a.centerY - b.centerY) > 0.5f * std::min(a.height, b.height)) return a.centerY < b.centerY;
+            return a.centerX < b.centerX;
+        });
+        for (size_t i = 0; i < kept.size(); i++) kept[i].paragraph = (int)i;
+        std::vector<std::string> ps = textParagraphs(kept, true);
+        cleanParagraphs(ps);
+        if (!ps.empty() && japaneseChars(ps) >= 2) {
+            float y = kept.empty() ? 0 : kept[0].centerY * h, x = kept.empty() ? 0 : kept[0].centerX * w;
+            blocks.push_back({y, x, ps});
+        }
+    }
+    // the boxes' text, less weak lines the bands read better
+    for (size_t r = 0; r < reads.size(); r++) {
+        std::vector<TextLine> kept;
+        for (const TextLine &l : boxKept[r]) {
+            bool replaced = false;
+            if (!strong(l))
+                for (const TextLine &b : bandKept) {
+                    LocalOcr::LineBox bb;
+                    bb.x = (unsigned)std::max(0.0f, (b.centerX - b.width / 2) * w);
+                    bb.y = (unsigned)std::max(0.0f, (b.centerY - b.height / 2) * h);
+                    bb.w = (unsigned)(b.width * w) + 1;
+                    bb.h = (unsigned)(b.height * h) + 1;
+                    replaced = replaced || lineOverlaps(l, bb, w, h);
+                }
+            if (!replaced) kept.push_back(l);
+        }
+        std::vector<std::string> ps = textParagraphs(kept, true);
+        cleanParagraphs(ps);
+        if (japaneseChars(ps) >= 2) blocks.push_back({(float)reads[r].box->y, (float)reads[r].box->x, ps});
+    }
+    std::stable_sort(blocks.begin(), blocks.end(), [](const Block &a, const Block &b) { return a.y < b.y; });
+    for (const Block &b : blocks) paragraphs.insert(paragraphs.end(), b.paras.begin(), b.paras.end());
+    // a scrap (「こー」) goes when there is real text
+    unsigned best = 0;
+    for (const std::string &p : paragraphs) best = std::max(best, japaneseChars({p}));
+    if (best >= 6)
+        paragraphs.erase(std::remove_if(paragraphs.begin(), paragraphs.end(),
+                                        [](const std::string &p) { return japaneseChars({p}) < 3; }),
+                         paragraphs.end());
+    if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
+    return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// The text spotter's reader
+// ---------------------------------------------------------------------------
+static unsigned kanaIn(const std::string &t) {
+    unsigned n = 0;
+    for (size_t i = 0; i < t.size();) {
+        const uint32_t cp = utf8Next(t, i);
+        n += cp >= 0x3041 && cp <= 0x30FF;
+    }
+    return n;
+}
+
+// How far each spotter box is widened on both sides, in % of its height: the spotter stops short of a
+// faint glyph at a line's end (ー, …, ！), which the recognizer then loses (35%: best on the labelled
+// screens). A variable for the tests.
+unsigned g_spotGrowPct = 35;
+
+// Kana and the marks around them only (a line of furigana), at least one kana.
+static bool kanaOnly(const std::string &t) {
+    unsigned kana = 0;
+    for (size_t i = 0; i < t.size();) {
+        const uint32_t cp = utf8Next(t, i);
+        if ((cp >= 0x3041 && cp <= 0x30FF) || cp == 0x30FC) kana++;
+        else if (cp >= 0x3400 && cp <= 0x9FFF) return false;  // a kanji: text, not its reading
+        else if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z')) return false;
+    }
+    return kana > 0;
+}
+
+bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, const uint8_t *grey, unsigned w,
+                    unsigned h, std::vector<std::string> &paragraphs, std::string &error,
+                    void (*progress)(unsigned i, unsigned n), SpotReadStats *stats) {
+    SpotReadStats local;
+    SpotReadStats &st = stats ? *stats : local;
+    uint64_t (*clock)() = st.clock;
+    st = SpotReadStats();
+    st.clock = clock;
+    auto now = [clock]() -> uint64_t { return clock ? clock() : 0; };
+    paragraphs.clear();
+    if (dict && !dict->isOpen()) dict = nullptr;
+    const uint64_t t0 = now();
+    std::vector<SpotBox> boxes;
+    if (!spot.find(grey, w, h, boxes, error)) return false;
+    st.spotMs = (uint32_t)(now() - t0);
+    st.boxes = (unsigned)boxes.size();
+    // furigana: the spotter finds a line of readings as a line of its own. A line shorter than a
+    // line right below it, pressed against it and within its width may be one; it goes if it reads
+    // as kana only and the line below has kanji (below).
+    std::vector<int> ruby(boxes.size(), -1);  // the line it may be the reading of
+    for (size_t i = 0; i < boxes.size(); i++)
+        for (size_t j = 0; j < boxes.size() && ruby[i] < 0; j++) {
+            const SpotBox &r = boxes[i], &t = boxes[j];
+            if (i == j || r.vertical || t.vertical || r.h >= t.h) continue;
+            // above it and pressed against it: the boxes, padded, overlap by a quarter of the reading's
+            // (lines of text stand apart)
+            const int overlap = (int)(r.y + r.h) - (int)t.y;
+            const bool above = r.y < t.y && overlap * 4 >= (int)r.h && r.y * 2 + r.h < t.y * 2 + t.h;
+            const int inX = (int)std::min(r.x + r.w, t.x + t.w) - (int)std::max(r.x, t.x);
+            if (above && inX * 2 >= (int)r.w) ruby[i] = (int)j;
+        }
+    std::vector<LocalOcr::LineBox> toRead;
+    std::vector<const SpotBox *> of;
+    for (size_t i = 0; i < boxes.size(); i++) {
+        const SpotBox &b = boxes[i];
+        if (b.vertical) { st.vertical++; continue; }  // no recognizer here reads a column
+        LocalOcr::LineBox lb;
+        const unsigned grow = g_spotGrowPct * b.h / 100u;  // the spotter stops short of a faint last glyph (ー, …)
+        lb.x = b.x > grow ? b.x - grow : 0;
+        lb.y = b.y;
+        lb.w = std::min(w, b.x + b.w + grow) - lb.x;
+        lb.h = b.h;
+        lb.dark = b.dark;
+        toRead.push_back(lb);
+        of.push_back(&b);
+    }
+    std::vector<TextLine> lines;
+    const uint64_t t1 = now();
+    if (!toRead.empty() && !ocr.readLines(grey, w, h, toRead, lines, error, progress)) return false;
+    st.readMs = (uint32_t)(now() - t1);
+    st.read = (unsigned)toRead.size();
+    // each line back to its box (readLines leaves out the lines that read as nothing)
+    std::vector<const TextLine *> lineOf(boxes.size(), nullptr);
+    for (const TextLine &l : lines)
+        for (size_t i = 0; i < toRead.size(); i++) {
+            const float cx = (toRead[i].x + toRead[i].w * 0.5f) / w, cy = (toRead[i].y + toRead[i].h * 0.5f) / h;
+            if (fabsf(cx - l.centerX) * w < 1.0f && fabsf(cy - l.centerY) * h < 1.0f) {
+                lineOf[of[i] - boxes.data()] = &l;
+                break;
+            }
+        }
+    struct Kept { unsigned block; TextLine line; };
+    std::vector<Kept> kept;
+    const uint32_t dict0 = st.dictMs;
+    ScoredReadStats sst;
+    sst.clock = clock;
+    for (size_t i = 0; i < boxes.size(); i++) {
+        const TextLine *l = lineOf[i];
+        if (!l) continue;
+        const TextLine *below = ruby[i] >= 0 ? lineOf[ruby[i]] : nullptr;
+        if (below && kanaOnly(l->text) && japaneseIn(below->text) > kanaIn(below->text)) { st.ruby++; continue; }
+        // as a line found out in the scene: the recognizer sure of it, or words in it (judged as a text
+        // box's line, the spotter's dialogue kept sprites and decorations read as text: 「ーロエロー」)
+        if (!keepLine(*l, dict, false, &sst)) continue;
+        kept.push_back({boxes[i].block, *l});
+    }
+    st.dictChecks = sst.dictChecks;
+    st.dictMs = dict0 + sst.dictMs;
+    st.kept = (unsigned)kept.size();
+    // one paragraph per block, its lines in the spotter's order, one per row
+    for (size_t i = 0; i < kept.size();) {
+        std::string p;
+        size_t j = i;
+        for (; j < kept.size() && kept[j].block == kept[i].block; j++) {
+            if (!p.empty()) p += '\n';
+            p += kept[j].line.text;
+        }
+        paragraphs.push_back(p);
+        i = j;
+    }
+    cleanParagraphs(paragraphs);
+    // a scrap (「こー」) goes when there is real text
+    unsigned best = 0;
+    for (const std::string &p : paragraphs) best = std::max(best, japaneseChars({p}));
+    if (best >= 6)
+        paragraphs.erase(std::remove_if(paragraphs.begin(), paragraphs.end(),
+                                        [](const std::string &p) { return japaneseChars({p}) < 3; }),
+                         paragraphs.end());
     if (paragraphs.empty()) { error = "no text found on the screen"; return false; }
     return true;
 }

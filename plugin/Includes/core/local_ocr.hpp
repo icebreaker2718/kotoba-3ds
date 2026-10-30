@@ -9,6 +9,7 @@
 #include "core/dict.hpp"  // kt::Reader
 #include "core/textlines.hpp"
 #include "core/textbox.hpp"
+#include "core/text_spot.hpp"
 
 namespace kt {
 
@@ -47,6 +48,10 @@ public:
     bool loaded() const { return blob_ != nullptr; }
     // Frees the model and its working memory (load() again to use it).
     void unload();
+    // Another model file into the memory of the one loaded (its weights, contexts and working memory
+    // are reused: nothing is freed or allocated, so swapping models doesn't break up the heap). False
+    // if it doesn't fit (then nothing is loaded: load() it) or can't be read.
+    bool reloadInPlace(Reader &file, std::string &error);
 
     // Lines can be read in parallel: runner(n, job, arg) must run job(arg) on n threads at once
     // and return when all have finished. Each extra worker needs its own ~180 KB of memory, taken
@@ -57,6 +62,11 @@ public:
     // VOCR's batch sizes (0 = its defaults): frames per tile and frames per output-head batch.
     // Bigger batches use more memory; the text is the same. Takes effect at the next load().
     void setOptions(unsigned tileFrames, unsigned headFrames) { tileFrames_ = tileFrames; headFrames_ = headFrames; }
+    // A model's speed sections (VOCR6: the head gate skips the output head on blank frames, the
+    // two-level head runs the rare characters' rows only where needed), when it has them; before load.
+    void setSpeedSections(bool on) { speed_ = on; }
+    bool headGate() const { return gate_; }
+    bool twoLevel() const { return twoLevel_; }
     // With a fixer, each line's uncertain characters are passed to it (see fixOcrLine in correct.hpp).
     void setFixer(LineFixer fixer, void *user) { fixer_ = fixer; fixerUser_ = user; }  // how many the last read used
     const std::string &modelInfo() const { return info_; }
@@ -68,7 +78,23 @@ public:
               void (*progress)(unsigned i, unsigned n) = nullptr, unsigned rx = 0, unsigned ry = 0,
               unsigned rw = 0, unsigned rh = 0);
 
+    // A text line's box on the screen, as the line finder gives it.
+    struct LineBox {
+        unsigned x = 0, y = 0, w = 0, h = 0;
+        bool dark = false;  // text darker than its background
+    };
+    // The line finder alone (no model needed): the lines of region (rx, ry, rw, rh), in screen
+    // pixels. Small print (furigana) is kept: the caller decides.
+    static bool findLines(const uint8_t *grey, unsigned w, unsigned h, unsigned rx, unsigned ry, unsigned rw,
+                          unsigned rh, std::vector<LineBox> &out);
+    // Recognizes the given line boxes (no line finding); lines come back in the same order, empty
+    // ones dropped.
+    bool readLines(const uint8_t *grey, unsigned w, unsigned h, const std::vector<LineBox> &boxes,
+                   std::vector<TextLine> &lines, std::string &error, void (*progress)(unsigned i, unsigned n) = nullptr);
+
 private:
+    bool recognize(const uint8_t *grey, unsigned w, unsigned h, const void *lines, unsigned n, std::vector<TextLine> &out,
+                   std::string &error, void (*progress)(unsigned i, unsigned n));
     unsigned char *blob_ = nullptr;   // 16-byte aligned
     unsigned char *arena_ = nullptr;  // recognizer arena, 16-byte aligned
     void *model_ = nullptr;           // vocr_model
@@ -76,8 +102,11 @@ private:
     std::string info_;
     std::vector<void *> raw_;  // every allocation, for the destructor
     std::vector<void *> ctxs_; // vocr_ctx per worker (the first is ctx_)
-    size_t arenaBytes_ = 0;
+    std::vector<void *> arenas_;  // each context's arena (arenaBytes_ each)
+    size_t arenaBytes_ = 0;       // allocated per arena: a little more than the model needs, for another
+    size_t blobCap_ = 0;          // bytes allocated for the model file (the same)
     int mode_ = 0;
+    bool speed_ = true, gate_ = false, twoLevel_ = false;
     unsigned workers_ = 1, lastWorkers_ = 1;
     Runner runner_ = nullptr;
     unsigned tileFrames_ = 0, headFrames_ = 0;
@@ -86,6 +115,7 @@ private:
     std::vector<TopK> topk_;
     void *alignedAlloc(size_t bytes);
     bool loadInner(Reader &file, std::string &error);
+    bool setUp(uint32_t n, std::string &error);  // after the file is in blob_: parse, check, contexts
     void ensureWorkers(unsigned n);
 };
 
@@ -110,5 +140,49 @@ uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h);
 bool localReadScreen(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h, const std::vector<TextBox> &boxes,
                      std::vector<std::string> &paragraphs, std::string &error,
                      void (*progress)(unsigned i, unsigned n) = nullptr, int *usedBox = nullptr);
+
+// What readScreenScored did, for the log.
+struct ScoredReadStats {
+    unsigned boxLines = 0, boxDropped = 0;        // lines read in text boxes, and dropped as junk
+    unsigned bandCandidates = 0, bandRead = 0;    // band lines found / recognized
+    unsigned bandKept = 0;                        // band lines kept
+    unsigned dictChecks = 0;                      // lines checked against the dictionary
+    bool usedBands = false;
+    // with a clock (milliseconds), where the time went
+    uint64_t (*clock)() = nullptr;
+    uint32_t boxMs = 0, bandFindMs = 0, bandReadMs = 0, dictMs = 0;
+};
+
+// Option 1: a text box is a hint, not a gate. Reads the text boxes (if any) and keeps each line
+// only if it reads like text: the recognizer was sure of it, or the dictionary finds words in it.
+// When the boxes give no such text, the screen is searched in horizontal bands instead (subtitles
+// over the scene, labels, boxes the box finder didn't see): each candidate line is ranked by how
+// text-like its pixels are, the likeliest recognized, and the same test keeps the real ones.
+// dict may be null (then only the recognizer's confidence counts).
+bool readScreenScored(LocalOcr &ocr, Dictionary *dict, const uint8_t *grey, unsigned w, unsigned h,
+                      const std::vector<TextBox> &boxes, std::vector<std::string> &paragraphs, std::string &error,
+                      void (*progress)(unsigned i, unsigned n) = nullptr, ScoredReadStats *stats = nullptr);
+
+// How text-like a candidate line's pixels look, before reading it (higher: likelier text). Cheap:
+// a threshold, ink columns, edges and contrast over the line's box. Exposed for the tests.
+float textLikeness(const uint8_t *grey, unsigned w, unsigned h, const LocalOcr::LineBox &b);
+
+// What readScreenSpot did, for the log.
+struct SpotReadStats {
+    unsigned boxes = 0, vertical = 0;   // boxes the spotter found (vertical ones are not read)
+    unsigned ruby = 0;                  // furigana lines left out
+    unsigned read = 0, kept = 0;        // lines recognized / kept
+    unsigned dictChecks = 0;
+    uint64_t (*clock)() = nullptr;      // with a clock (milliseconds), where the time went
+    uint32_t spotMs = 0, readMs = 0, dictMs = 0;
+};
+
+// The text spotter's reader: the spotter finds the screen's lines (no text-box search, no line
+// finder), the recognizer reads each, and a line keeps its place if it reads like text (two
+// Japanese characters or more, and the recognizer sure of it or words in it). Furigana the spotter
+// found as lines of their own are left out. One paragraph per spotter block, in its reading order.
+bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, const uint8_t *grey, unsigned w,
+                    unsigned h, std::vector<std::string> &paragraphs, std::string &error,
+                    void (*progress)(unsigned i, unsigned n) = nullptr, SpotReadStats *stats = nullptr);
 
 }  // namespace kt

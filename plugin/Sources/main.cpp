@@ -8,6 +8,7 @@
 // to tools/ocr_server.py on the PC (or tools/mine.py reads them later).
 #include <3ds.h>
 #include <CTRPluginFramework.hpp>
+#include <csvc.h>  // Luma's extra system calls (cache maintenance for the memory patches)
 
 #include <algorithm>
 #include <cstring>
@@ -24,6 +25,7 @@
 #include "core/hotkeys.hpp"
 #include "core/known_words.hpp"
 #include "core/local_ocr.hpp"
+#include "core/mem_share.hpp"
 #include "core/lookup_view.hpp"
 #include "core/menu_view.hpp"
 #include "core/net.hpp"
@@ -61,6 +63,7 @@ enum ReadMode { kReadTop = 0, kReadBottom = 1, kReadBoth = 2, kModes = 3 };
 static const char *const kModeNames[kModes] = {"Read the top screen", "Read the touchscreen", "Read both screens"};
 static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
 static bool g_kanjiForm = true;  // saved words in their kanji form (or as the game wrote them)
+static bool g_fastMode = false;  // fast mode: flat-colour text boxes only, no text spotter
 static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
 enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
 static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
@@ -103,10 +106,10 @@ static bool WriteWholeFile(const std::string &path, const std::string &data) {
 
 static void SaveSettings() {
     WriteWholeFile(kSettingsPath, Utils::Format("key_top=%lu\nkey_bottom=%lu\nkey_both=%lu\ntext_on_top=%d\nhide=%d\n"
-                                                "kanji_form=%d\nserver=",
+                                                "kanji_form=%d\nfast=%d\nserver=",
                                                 (unsigned long)g_combo[0], (unsigned long)g_combo[1],
                                                 (unsigned long)g_combo[2], g_textOnTop ? 1 : 0, g_hideMode,
-                                                g_kanjiForm ? 1 : 0) +
+                                                g_kanjiForm ? 1 : 0, g_fastMode ? 1 : 0) +
                                       g_server + "\n");
 }
 
@@ -145,6 +148,8 @@ static void LoadSettings() {
     if (!v.empty()) g_hideMode = std::max(0, std::min(2, atoi(v.c_str())));
     v = SettingValue(s, "kanji_form");
     if (!v.empty()) g_kanjiForm = v != "0";
+    v = SettingValue(s, "fast");
+    if (!v.empty()) g_fastMode = v == "1";
     g_server = SettingValue(s, "server");
 }
 
@@ -225,6 +230,8 @@ static u32 HeapFree() {
 }
 
 // The biggest block malloc can give now (KB): the free memory may be in pieces.
+static uint64_t OsTimeMs() { return osGetTime(); }  // for the reader's timings
+
 static u32 LargestFreeKB() {
     u32 lo = 0, hi = HeapFree() / 1024;  // never ask for more than there is
     while (lo < hi) {
@@ -310,34 +317,71 @@ static void ShowBusy(const std::string &line1, const std::string &line2 = "") {
 // ---------------------------------------------------------------------------
 struct Picture {
     bool valid = false;
+    bool owned = false;  // px malloc'd for it (the pool was missing or too small): freed with it
     u32 w = 0, bytes = 3;
-    u8 *px = nullptr;  // malloc'd: short of memory, there is just no picture (no abort)
+    u8 *px = nullptr;  // in g_picPool, or malloc'd; short of memory, there is just no picture (no abort)
 };
 static Picture *g_picPtr[2] = {nullptr, nullptr};
 static Picture &Pic(int i) { return Leaky(g_picPtr[i]); }
 
+// The pictures' memory: one block, taken once while the plugin's memory is still in one piece and
+// kept for the session. Taking ~300 KB and freeing it again on every read stopped working after a
+// long session (no block for it, so no game behind the lookup, nothing for X to show and no
+// screenshot), though as much was free. Room for both screens at 2 bytes a pixel, which is more
+// than the top screen alone at 3; a read's colour copy (ScreenGrey) goes in it first. In use until
+// the screenshot thread is done (FinishScreenshot): only ReadScreens and Settings use it, both after.
+static const size_t kPicPoolBytes = (size_t)(400 + 320) * 240 * 2;  // 345,600 >= 400 * 240 * 3
+static u8 *g_picPool = nullptr;
+
+static void ReservePictures() {
+    static bool tried = false;
+    if (g_picPool || tried) return;
+    tried = true;
+    g_picPool = (u8 *)malloc(kPicPoolBytes);
+    if (!g_picPool)
+        LogOcr(Utils::Format("pictures: no %u KB block to keep for them (heap free %lu KB): taken each read instead",
+                             (unsigned)(kPicPoolBytes / 1024), (unsigned long)(HeapFree() / 1024)));
+}
+
+static void ReleasePicture(Picture &p) {
+    if (p.owned) free(p.px);
+    p.px = nullptr;
+    p.owned = false;
+    p.valid = false;
+}
+
 static void TakePicture(int i, u32 bytes) {  // call while the game is paused and nothing is drawn on it
     Picture &p = Pic(i);
     const Screen &s = ScreenOf(i);
-    p.valid = false;
-    free(p.px);
-    p.px = nullptr;
-    if (s.BytesPerPixel < 2 || s.BytesPerPixel > 4) return;
+    ReleasePicture(p);
+    if (s.BytesPerPixel < 2 || s.BytesPerPixel > 4) {
+        LogOcr(Utils::Format("picture: %s not kept (%u bytes a pixel)", i == 0 ? "top screen" : "touchscreen",
+                             (unsigned)s.BytesPerPixel));
+        return;
+    }
     p.w = ScreenW(i);
     p.bytes = bytes;
-    p.px = (u8 *)malloc((size_t)p.w * 240 * bytes);
-    if (!p.px) return;
+    const size_t at = i == 0 ? 0 : (size_t)400 * 240 * bytes;  // the touchscreen's after the top screen's
+    if (g_picPool && at + (size_t)p.w * 240 * bytes <= kPicPoolBytes) p.px = g_picPool + at;
+    if (!p.px) {  // no pool: a block of its own, or at 2 bytes a pixel if 3 don't fit
+        p.px = (u8 *)malloc((size_t)p.w * 240 * bytes);
+        if (!p.px && bytes == 3) p.px = (u8 *)malloc((size_t)p.w * 240 * (p.bytes = 2));
+        p.owned = p.px != nullptr;
+    }
+    if (!p.px) {
+        LogOcr(Utils::Format("picture: %s not kept: no %u KB block (heap free %lu KB, largest %lu KB)",
+                             i == 0 ? "top screen" : "touchscreen", (unsigned)(p.w * 240 * bytes / 1024),
+                             (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB()));
+        return;
+    }
     for (u32 x = 0; x < p.w; x++)
-        kt::framebufferColumnToPicture(Column(s, x), 240, (int)s.Format, s.BytesPerPixel, bytes, &p.px[(size_t)x * 240 * bytes]);
+        kt::framebufferColumnToPicture(Column(s, x), 240, (int)s.Format, s.BytesPerPixel, p.bytes,
+                                       &p.px[(size_t)x * 240 * p.bytes]);
     p.valid = true;
 }
 
 static void DropPictures() {
-    for (int i = 0; i < 2; i++) {
-        Pic(i).valid = false;
-        free(Pic(i).px);
-        Pic(i).px = nullptr;
-    }
+    for (int i = 0; i < 2; i++) ReleasePicture(Pic(i));
 }
 
 // The kept picture onto screen i's draw buffer: tone 0 as it was, 1 dimmed (behind the lookup),
@@ -497,6 +541,8 @@ static int Ask(const std::string &title, const std::string &question, const std:
 // Saving words
 // ---------------------------------------------------------------------------
 static bool g_readTop = true, g_readBottom = false;  // what the open lookup read
+// The screens that were read all have their picture (else nothing to show behind the lookup).
+static bool PicturesKept() { return (!g_readTop || Pic(0).valid) && (!g_readBottom || Pic(1).valid); }
 
 static void SplitTabs(const std::string &line, std::vector<std::string> &cols) {
     cols.clear();
@@ -644,6 +690,7 @@ static void MarkKnown(kt::LookupView &v) {
 // to, and the lookup's dictionary reads would wait behind it). FinishScreenshot() waits for it.
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
+static bool g_shotKept = false;  // Start in the lookup: keep its screenshot even with no word saved
 
 struct ShotJob {
     char path[96];
@@ -687,11 +734,7 @@ static void WriteShot(void *) {
         f.Close();
     }
     free(buf);
-    for (Picture &p : j.pic) {
-        free(p.px);
-        p.px = nullptr;
-        p.valid = false;
-    }
+    for (Picture &p : j.pic) ReleasePicture(p);
     j.ms = (u32)(osGetTime() - t0);
 }
 
@@ -746,6 +789,7 @@ static void WriteScreenshotLater() {
     for (int i = 0; i < 2; i++) {  // the pictures move to the job
         j.pic[i] = Pic(i);
         Pic(i).px = nullptr;
+        Pic(i).owned = false;
         Pic(i).valid = false;
     }
     // its own thread with room on its stack (CTRPF's tasks have 4 KB), below the game's priority so
@@ -786,7 +830,10 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
         return false;
     }
     int n = CountSaved();
-    status = "Saved " + (g_kanjiForm ? kt::cardExpressionFor(e, r.matchedKey) : kt::writtenExpressionFor(e, r)) + Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s");
+    status = "Saved " + (g_kanjiForm ? kt::cardExpressionFor(e, r.matchedKey) : kt::writtenExpressionFor(e, r)) +
+             (shot.empty() && (g_readTop || g_readBottom)  // read from the game, but its picture couldn't be kept
+                  ? std::string(" (no screenshot: out of memory)")
+                  : Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s"));
     LogOcr(Utils::Format("saved a word in %lu ms", (unsigned long)(osGetTime() - t0)));
     return true;
 }
@@ -815,6 +862,15 @@ static int NextHide(int h) {
     if (g_hideMode == kHideSeeThrough) return h ? 0 : 1;
     if (g_hideMode == kHideHidden) return h ? 0 : 2;
     return (h + 1) % 3;
+}
+
+// X / Hide pressed: without the game's picture there is nothing to uncover, so it says so.
+static void ToggleHide(kt::LookupView &v) {
+    if (g_hide == 0 && !PicturesKept()) {
+        v.setStatus("Can't show the game: there was no memory to keep its picture", kWarn);
+        return;
+    }
+    g_hide = NextHide(g_hide);
 }
 
 static kt::LookupView::Panel PanelFor(int screen) {
@@ -893,7 +949,7 @@ static void UndoSave(kt::LookupView &v, const std::string line) {
             g_known.remove(f);
     v.unmarkSaved();
     v.refreshKnown();
-    if (!v.anySaved()) g_lookupShot = "";  // nothing saved from this lookup: no screenshot
+    if (!v.anySaved() && !g_shotKept) g_lookupShot = "";  // nothing saved or kept: no screenshot
     int n = 0;
     for (const std::string &l : lines) n += l[0] != '#';
     v.setStatus("Took back " + (forms.empty() ? std::string("the word") : forms[0]) +
@@ -907,9 +963,33 @@ static void SaveOrUndo(kt::LookupView &v) {
     else SaveSelected(v);
 }
 
+// Start: keeps this lookup's screenshot without saving a word (to look at the screen later), or
+// takes that back. A word saved from the lookup keeps the screenshot either way.
+static void KeepScreenshot(kt::LookupView &v) {
+    if (g_shotKept) {
+        g_shotKept = false;
+        if (v.anySaved()) {
+            v.setStatus("The screenshot stays: a word was saved with it", kGreyInk);
+        } else {
+            g_lookupShot = "";
+            v.setStatus("Screenshot won't be saved", kGreyInk);
+        }
+        return;
+    }
+    const std::string name = SaveScreenshot();
+    if (name.empty()) {
+        v.setStatus("No picture of the screen to save", kWarn);
+        return;
+    }
+    g_shotKept = true;
+    LogOcr("screenshot kept without a word: " + name);
+    v.setStatus("Screenshot will be saved: shots/" + name + " (Start: undo)", kGood);
+}
+
 // Runs the lookup screens until B / Close. Tap a character (text on the touchscreen); Circle Pad:
 // words and rows; D-pad up/down (or C-stick): scroll the entry; D-pad left/right or L/R: the other
-// matches; A save (again on a word just saved: undo), X hide, Y mark known.
+// matches; A save (again on a word just saved: undo), X hide, Y mark known, Start keep the
+// screenshot without saving a word.
 static u64 g_viewOpenedAt = 0;  // when the read finished, for the log
 static void RunLookupView(kt::LookupView &v) {
     g_hide = 0;
@@ -933,8 +1013,9 @@ static void RunLookupView(kt::LookupView &v) {
         u64 t0 = osGetTime();
         if ((down & Key::B) || SleepRequested()) break;
         if (down & Key::A) { SaveOrUndo(v); changed = true; }
-        if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
+        if (down & Key::X) { ToggleHide(v); changed = true; }
         if (down & Key::Y) { MarkKnown(v); changed = true; }
+        if (down & Key::Start) { KeepScreenshot(v); changed = true; }
         if (down & (Key::L | Key::DPadLeft)) moved |= v.page(-1);
         if (down & (Key::R | Key::DPadRight)) moved |= v.page(1);
         // moving: on the press, then repeating while held
@@ -968,7 +1049,7 @@ static void RunLookupView(kt::LookupView &v) {
                 moved |= v.tap((int)p.x, (int)p.y, b);
                 if (b == kt::LookupView::kClose) break;
                 if (b == kt::LookupView::kSave) { SaveOrUndo(v); changed = true; }
-                if (b == kt::LookupView::kHide) { g_hide = NextHide(g_hide); changed = true; }
+                if (b == kt::LookupView::kHide) { ToggleHide(v); changed = true; }
             }
         }
         touchWas = touch;
@@ -990,21 +1071,234 @@ static void RunLookupView(kt::LookupView &v) {
         Sleep(Milliseconds(10));
     }
     RestoreScreens();
-    LogOcr(Utils::Format("view: opened in %lu ms, %lu moves, draw avg %lu ms", (unsigned long)openMs,
-                         (unsigned long)moves, (unsigned long)(draws ? drawSum / draws : 0)));
+    static const char *kFormats[5] = {"RGBA8", "BGR8", "RGB565", "RGB5A1", "RGBA4"};
+    const int f0 = (int)ScreenOf(0).Format, f1 = (int)ScreenOf(1).Format;
+    LogOcr(Utils::Format("view: opened in %lu ms, %lu moves, draw avg %lu ms (screens %s / %s)", (unsigned long)openMs,
+                         (unsigned long)moves, (unsigned long)(draws ? drawSum / draws : 0),
+                         f0 >= 0 && f0 < 5 ? kFormats[f0] : "?", f1 >= 0 && f1 < 5 ? kFormats[f1] : "?"));
+}
+
+// ---------------------------------------------------------------------------
+// Reading areas: for a game whose text always shows in one place, a part of a screen that is read
+// instead of the whole screen (no text-box search: quicker, and nothing else on the screen gets
+// in). Per game and per screen, in /3ds/kotoba3ds/areas.txt: "<title ID> top|touch x y w h".
+// ---------------------------------------------------------------------------
+struct ReadArea {
+    bool set = false;
+    unsigned x = 0, y = 0, w = 0, h = 0;
+};
+static const char *kAreasPath = "/3ds/kotoba3ds/areas.txt";
+static ReadArea g_area[2];
+static std::string *g_areaTitlePtr = nullptr;  // the game they are for
+#define g_areaTitle Leaky(g_areaTitlePtr)
+static const unsigned kAreaMinW = 24, kAreaMinH = 16;
+
+static bool AreaFits(const ReadArea &a, int screen) {
+    return a.w >= kAreaMinW && a.h >= kAreaMinH && a.x + a.w <= ScreenW(screen) && a.y + a.h <= 240;
+}
+
+static void LoadAreas() {
+    const std::string tid = TitleIdHex();
+    if (g_areaTitle == tid && !tid.empty()) return;
+    g_areaTitle = tid;
+    g_area[0] = g_area[1] = ReadArea();
+    std::string all;
+    if (!ReadWholeFile(kAreasPath, all, 64 * 1024)) return;
+    size_t p = 0;
+    while (p < all.size()) {
+        size_t e = all.find('\n', p);
+        if (e == std::string::npos) e = all.size();
+        char id[40] = {0}, scr[8] = {0};
+        unsigned x, y, w, h;
+        if (sscanf(all.substr(p, e - p).c_str(), "%39s %7s %u %u %u %u", id, scr, &x, &y, &w, &h) == 6 && tid == id) {
+            const int i = !strcmp(scr, "touch") ? 1 : 0;
+            ReadArea a;
+            a.set = true;
+            a.x = x, a.y = y, a.w = w, a.h = h;
+            if (AreaFits(a, i)) g_area[i] = a;
+        }
+        p = e + 1;
+    }
+}
+
+static void SaveAreas() {
+    const std::string tid = TitleIdHex();
+    std::string all, out;
+    ReadWholeFile(kAreasPath, all, 64 * 1024);
+    size_t p = 0;
+    while (p < all.size()) {  // other games' lines stay
+        size_t e = all.find('\n', p);
+        if (e == std::string::npos) e = all.size();
+        const std::string line = all.substr(p, e - p);
+        if (!line.empty() && line.compare(0, tid.size() + 1, tid + " ") != 0) out += line + "\n";
+        p = e + 1;
+    }
+    for (int i = 0; i < 2; i++)
+        if (g_area[i].set)
+            out += Utils::Format("%s %s %u %u %u %u\n", tid.c_str(), i ? "touch" : "top", g_area[i].x, g_area[i].y,
+                                 g_area[i].w, g_area[i].h);
+    WriteWholeFile(kAreasPath, out);
+}
+
+static std::string AreaSummary() {
+    if (!g_area[0].set && !g_area[1].set) return "whole screen";
+    if (g_area[0].set && g_area[1].set) return "set (both screens)";
+    return g_area[0].set ? "set (top screen)" : "set (touchscreen)";
+}
+
+// The editor: the paused game's screen with the area on it. D-Pad moves it, L + D-Pad changes
+// its size (R held: in bigger steps); on the touchscreen it can also be drawn with the stylus.
+// X: the other screen. A: save, Y: whole screen again, B: back without saving.
+static void EditReadArea() {
+    ReadArea area[2] = {g_area[0], g_area[1]};
+    for (int i = 0; i < 2; i++)
+        if (!area[i].set) {  // a start: a dialogue box's usual place, the bottom third
+            area[i].x = 8;
+            area[i].y = 156;
+            area[i].w = ScreenW(i) - 16;
+            area[i].h = 76;
+        }
+    bool changed[2] = {false, false};
+    int scr = 0;
+    auto draw = [&]() {
+        const ReadArea &a = area[scr];
+        const Screen &s = ScreenOf(scr);
+        ScreenCanvas c(s);
+        if (!PaintScreen(scr, 0)) c.fill(0, 0, ScreenW(scr), 240, kPanel);
+        const int x = (int)a.x, y = (int)a.y, w = (int)a.w, h = (int)a.h, W = (int)ScreenW(scr);
+        c.shade(0, 0, W, y, 150);
+        c.shade(0, y + h, W, 240 - y - h, 150);
+        c.shade(0, y, x, h, 150);
+        c.shade(x + w, y, W - x - w, h, 150);
+        const kt::Rgb edge = (area[scr].set || changed[scr]) ? kGood : kWarn;
+        c.fill(x, y, w, 2, edge);
+        c.fill(x, y + h - 2, w, 2, edge);
+        c.fill(x, y, 2, h, edge);
+        c.fill(x + w - 2, y, 2, h, edge);
+        // the help on the other screen
+        ScreenCanvas o(ScreenOf(1 - scr));
+        const int ow = (int)ScreenW(1 - scr);
+        o.fill(0, 0, ow, 240, kPanel);
+        kt::TextRenderer &tr = Text();
+        tr.draw(o, 12, 10, scr == 0 ? "Reading area: top screen" : "Reading area: touchscreen", 18, kInk);
+        static const char *const kLines[] = {
+            "Only this part of the screen is read",
+            "(for this game). The rest is ignored.",
+            "",
+            "D-Pad: move     L + D-Pad: size",
+            "Hold R: bigger steps",
+            "X: the other screen",
+            "A: save   Y: whole screen   B: back",
+        };
+        int ly = 40;
+        for (const char *l : kLines) {
+            tr.draw(o, 12, ly, l, 15, kGreyInk);
+            ly += 22;
+        }
+        if (scr == 1) tr.draw(o, 12, ly + 4, "Or draw it with the stylus.", 15, kGreyInk);
+        tr.draw(o, 12, 214, Utils::Format("x %u  y %u  %u x %u%s", a.x, a.y, a.w, a.h,
+                                          (area[scr].set || changed[scr]) ? "" : "  (not set)"), 15, kInk);
+        Present();
+    };
+    draw();
+    u32 repeatKey = 0;
+    u64 repeatAt = 0;
+    bool touchWas = true;
+    unsigned tx0 = 0, ty0 = 0;
+    const u32 kDirs = Key::DPadUp | Key::DPadDown | Key::DPadLeft | Key::DPadRight;
+    while (true) {
+        Controller::Update();
+        const u32 down = Controller::GetKeysPressed(), held = Controller::GetKeysDown();
+        const u64 now = osGetTime();
+        if (SleepRequested() || (down & Key::B)) return;
+        if (down & Key::A) {
+            for (int i = 0; i < 2; i++)
+                if (changed[i]) {
+                    area[i].set = true;
+                    g_area[i] = area[i];
+                }
+            SaveAreas();
+            return;
+        }
+        if (down & Key::Y) {
+            g_area[scr] = ReadArea();
+            area[scr].set = false;
+            changed[scr] = false;
+            SaveAreas();
+            draw();
+            continue;
+        }
+        if (down & Key::X) {
+            scr = 1 - scr;
+            draw();
+            continue;
+        }
+        u32 mv = down & kDirs;
+        if (mv) {
+            repeatKey = mv;
+            repeatAt = now + 250;
+        } else if (repeatKey && (held & repeatKey) && now >= repeatAt) {
+            mv = held & repeatKey;
+            repeatAt = now + 40;
+        } else if (!(held & repeatKey)) {
+            repeatKey = 0;
+        }
+        bool moved = false;
+        if (mv) {
+            ReadArea &a = area[scr];
+            const int step = (held & Key::R) ? 8 : 2, W = (int)ScreenW(scr);
+            int x = (int)a.x, y = (int)a.y, w = (int)a.w, h = (int)a.h;
+            const int dx = (mv & Key::DPadLeft) ? -step : (mv & Key::DPadRight) ? step : 0;
+            const int dy = (mv & Key::DPadUp) ? -step : (mv & Key::DPadDown) ? step : 0;
+            if (held & Key::L) {
+                w = std::max((int)kAreaMinW, std::min(W - x, w + dx));
+                h = std::max((int)kAreaMinH, std::min(240 - y, h + dy));
+            } else {
+                x = std::max(0, std::min(W - w, x + dx));
+                y = std::max(0, std::min(240 - h, y + dy));
+            }
+            a.x = (unsigned)x, a.y = (unsigned)y, a.w = (unsigned)w, a.h = (unsigned)h;
+            changed[scr] = moved = true;
+        }
+        const bool touch = Touch::IsDown();
+        if (scr == 1 && touch) {  // drawn with the stylus: from where it touched to where it is
+            UIntVector p = Touch::GetPosition();
+            if (!touchWas) {
+                tx0 = std::min(p.x, 319u);
+                ty0 = std::min(p.y, 239u);
+            }
+            const unsigned tx = std::min(p.x, 319u), ty = std::min(p.y, 239u);
+            ReadArea &a = area[1];
+            const unsigned x0 = std::min(tx0, tx), x1 = std::max(tx0, tx), y0 = std::min(ty0, ty), y1 = std::max(ty0, ty);
+            if (x1 - x0 + 1 >= kAreaMinW && y1 - y0 + 1 >= kAreaMinH) {
+                a.x = x0, a.y = y0, a.w = x1 - x0 + 1, a.h = y1 - y0 + 1;
+                changed[1] = moved = true;
+            }
+        }
+        touchWas = touch;
+        if (moved) draw();
+        else Sleep(Milliseconds(16));
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Reading the screen on the 3DS (VOCR): no PC, no internet. Needs the model on the SD card.
 // ---------------------------------------------------------------------------
-static const char *const kModelNames[] = {"VOCR5_N_w8.vocr", "VOCR5_S_w8.vocr", "VOCR5_L_w8.vocr", "model.vocr"};
+static const char *const kModelNames[] = {"VOCR6.2_N_w8g2.vocr", "VOCR5_N_w8.vocr", "VOCR5_S_w8.vocr",
+                                          "VOCR5_L_w8.vocr", "model.vocr"};
+// The text spotter (vita-vn-ocr's textspot8): finds the screen's lines, in place of the text-box
+// search and the line finder. Without the file the screen is read as before.
+static const char *const kSpotterName = "textspot8_t64n8c16_w8.vtsp";
+static kt::TextSpotter *g_spotterPtr = nullptr;
+#define g_spotter Leaky(g_spotterPtr)
+static int g_spotterState = 0;  // 0 not tried, 1 loaded, -1 missing or failed (not tried again)
 static kt::LocalOcr *g_localOcrPtr = nullptr;
 #define g_localOcr Leaky(g_localOcrPtr)
 static std::string *g_modelNamePtr = nullptr;  // file the loaded model came from
 #define g_modelName Leaky(g_modelNamePtr)
 
 static std::string FindModel() {
-    for (const char *n : kModelNames)
+    for (const char *n : kModelNames)  // VOCR6 first; VOCR5 when VOCR6 isn't on the SD card
         if (File::Exists(std::string(kModelDir) + n) == 1) return n;
     return "";
 }
@@ -1061,10 +1355,38 @@ static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, 
     return g_core3 ? 3 : 2;
 }
 
+static bool LoadSpotter() {
+    if (g_spotterState) return g_spotterState > 0;
+    SdReader f;
+    std::string error;
+    if (!f.open(std::string(kModelDir) + kSpotterName)) {
+        error = "no file";
+    } else if (g_spotter.load(f, error)) {
+        g_spotterState = 1;
+        LogOcr(Utils::Format("spotter: %s loaded, heap free %lu KB", kSpotterName, (unsigned long)(HeapFree() / 1024)));
+        return true;
+    }
+    g_spotterState = -1;
+    LogOcr(Utils::Format("spotter: %s not used (%s): text boxes and the line finder instead", kSpotterName,
+                         error.c_str()));
+    return false;
+}
+
 static bool LoadModel(const std::string &name, std::string &error) {
-    g_localOcr.unload();
     SdReader mf;
     if (!mf.open(kModelDir + name)) { error = "could not open " + name; return false; }
+    // another model in the loaded one's memory: freed and taken again, 1.2 MB in one piece would
+    // soon not be found any more (the pictures of each read come and go above it)
+    if (g_localOcr.loaded()) {
+        std::string e;
+        if (g_localOcr.reloadInPlace(mf, e)) {
+            g_modelName = name;
+            return true;
+        }
+        LogOcr(Utils::Format("%s: not loaded in place (%s), heap free %lu KB", name.c_str(), e.c_str(),
+                             (unsigned long)(HeapFree() / 1024)));
+        g_localOcr.unload();
+    }
     if (!g_localOcr.load(mf, error)) {
         LogOcr(Utils::Format("%s: load failed (%s), heap free %lu KB", name.c_str(), error.c_str(),
                              (unsigned long)(HeapFree() / 1024)));
@@ -1076,11 +1398,16 @@ static bool LoadModel(const std::string &name, std::string &error) {
 
 // The OCR's input for screen i, straight from its framebuffer (call before anything is drawn on
 // it): the text boxes found by their colour, and the grey picture (malloc'd; nullptr on failure).
-static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes) {
+static u64 g_boxSearchMs[2] = {0, 0};  // the last ScreenGrey's text-box search, per screen
+
+static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxes = true) {
     const Screen &s = ScreenOf(i);
     const u32 W = ScreenW(i), bpp = s.BytesPerPixel;
     if (bpp < 2 || bpp > 4) return nullptr;
-    uint8_t *rgb = (uint8_t *)malloc((size_t)W * 240 * 3);
+    // the colour copy in the pictures' memory (the pictures are taken after it, from the screens
+    // themselves): no ~300 KB block to find each read, and only that much more while boxes are searched
+    const bool inPool = g_picPool && (size_t)W * 240 * 3 <= kPicPoolBytes;
+    uint8_t *rgb = inPool ? g_picPool : (uint8_t *)malloc((size_t)W * 240 * 3);
     if (!rgb) return nullptr;
     u8 *base = Column(s, 0);
     if (W > 1 && Column(s, 1) - base == (int)(240 * bpp)) {  // columns back to back: in one go
@@ -1091,15 +1418,58 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes) {
             for (u32 k = 0; k < 240; k++) kt::framebufferToRGB(col + k * bpp, 1, (int)s.Format, bpp, &rgb[((239 - k) * W + x) * 3]);
         }
     }
-    boxes = kt::findTextBoxes(rgb, W, 240);
+    const u64 tb = osGetTime();
+    boxes.clear();
+    if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240, 3, !g_fastMode);
+    g_boxSearchMs[i] = osGetTime() - tb;
     uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
-    free(rgb);
+    if (!inPool) free(rgb);
     return grey;
 }
 
-// Reads the screens of `mode` -> text blocks (the top screen's first; each screen's text boxes
-// top to bottom, or, read whole, its longest text first). Call with the game paused and nothing
-// drawn yet.
+// One screen read as the settings say: the reading area (if set), the text spotter, or the text
+// boxes (fast mode: flat ones only). grey/w/h: the whole screen.
+static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::TextBox> &boxes, bool spot,
+                          std::vector<std::string> &paras, std::string &err) {
+    const u64 tc0 = osGetTime();
+    if (g_area[s].set) {  // the game's reading area: that part alone, cut out of the screen
+        const ReadArea &a = g_area[s];
+        uint8_t *crop = (uint8_t *)malloc((size_t)a.w * a.h);
+        bool ok = false;
+        if (crop) {
+            for (unsigned y = 0; y < a.h; y++) memcpy(crop + (size_t)y * a.w, grey + (size_t)(a.y + y) * ScreenW(s) + a.x, a.w);
+            // the line finder on the area, fast mode or not: what it was made for, a region chosen
+            // around the text (as right as the spotter there on the console, ~70 ms quicker)
+            ok = kt::localReadScreen(g_localOcr, crop, a.w, a.h, std::vector<kt::TextBox>(), paras, err, LocalProgress);
+            free(crop);
+        } else {
+            err = "not enough memory for the picture";
+        }
+        LogOcr(Utils::Format("area reader (line finder): %s %ux%u at %u,%u: %lu ms", s == 0 ? "top" : "touchscreen",
+                             a.w, a.h, a.x, a.y, (unsigned long)(osGetTime() - tc0)));
+        return ok;
+    }
+    if (spot) {
+        kt::SpotReadStats sst;
+        sst.clock = OsTimeMs;
+        const bool ok = kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey, ScreenW(s), 240, paras, err, LocalProgress, &sst);
+        LogOcr(Utils::Format("spotter reader: %s %lu ms: spotter %lu ms (%u lines, %u furigana, %u vertical), "
+                             "read %u in %lu ms, kept %u, dictionary %u checks %lu ms",
+                             s == 0 ? "top" : "touchscreen", (unsigned long)(osGetTime() - tc0), (unsigned long)sst.spotMs,
+                             sst.boxes, sst.ruby, sst.vertical, sst.read, (unsigned long)sst.readMs, sst.kept, sst.dictChecks,
+                             (unsigned long)sst.dictMs));
+        return ok;
+    }
+    const bool ok = kt::localReadScreen(g_localOcr, grey, ScreenW(s), 240, boxes, paras, err, LocalProgress);
+    LogOcr(Utils::Format("%s reader: %s %lu ms + box search %lu ms (%u boxes%s)", g_fastMode ? "fast" : "box",
+                         s == 0 ? "top" : "touchscreen", (unsigned long)(osGetTime() - tc0), (unsigned long)g_boxSearchMs[s],
+                         (unsigned)boxes.size(), boxes.empty() ? ", read whole" : ""));
+    return ok;
+}
+
+// Reads the screens of `mode` -> text blocks (the top screen's first; with the text spotter in its
+// reading order, else each screen's text boxes top to bottom). Call with the game paused and
+// nothing drawn yet.
 static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string &error) {
     u64 t0 = osGetTime();
     std::string name = FindModel();
@@ -1115,14 +1485,21 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
+    ReservePictures();  // kept from the first read on, beside the model
+    const bool spot = !g_fastMode && LoadSpotter();
+    LoadAreas();
     u64 t1 = osGetTime();
     const u32 largestBefore = LargestFreeKB();  // for the log: room for the read's buffers?
+    const u64 tMem = osGetTime();
     // the screens' pictures for the OCR, before anything is drawn on them
     const bool screens[2] = {mode != kReadBottom, mode != kReadTop};
     uint8_t *grey[2] = {nullptr, nullptr};
     std::vector<kt::TextBox> boxes[2];
+    DropPictures();  // the last lookup's (written out by now): their memory is the colour copies' first
     for (int s = 0; s < 2; s++)
-        if (screens[s]) grey[s] = ScreenGrey(s, boxes[s]);
+        if (screens[s])  // the spotter and an area need no boxes
+            grey[s] = ScreenGrey(s, boxes[s], !g_area[s].set && !spot);
+    const u64 tBoxes = osGetTime();
     // then the game's screens as they are, for drawing under the lookup and the card's
     // screenshot (after the colour copies above are freed: the pictures take their place): the
     // top screen always (the entry goes over it), the touchscreen when it is read
@@ -1134,38 +1511,37 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     g_fixedChars = 0;
     bool any = false;
     std::string firstError;
+    std::vector<std::string> shown[2];
     for (int s = 0; s < 2; s++) {
         if (!screens[s]) continue;
         if (!grey[s]) {
             if (firstError.empty()) firstError = "not enough memory for the picture";
             continue;
         }
-        std::vector<std::string> paras;
         std::string err;
-        int used = -1;
-        if (kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, boxes[s], paras, err, LocalProgress, &used)) {
-            if (used < 0)  // the whole screen: the longest first (the dialogue, usually)
-                std::stable_sort(paras.begin(), paras.end(),
-                                 [](const std::string &a, const std::string &b) { return a.size() > b.size(); });
-            blocks.insert(blocks.end(), paras.begin(), paras.end());
+        if (ReadOneScreen(s, grey[s], boxes[s], spot, shown[s], err)) {
+            blocks.insert(blocks.end(), shown[s].begin(), shown[s].end());
             any = true;
         } else if (firstError.empty()) {
             firstError = err;
         }
-        free(grey[s]);
-        grey[s] = nullptr;
     }
     u64 t3 = osGetTime();
     if (!any) error = firstError.empty() ? "no text found" : firstError;
     std::string first = any ? blocks[0] : error;
     for (char &c : first) if (c == '\n') c = '/';
-    LogOcr(Utils::Format("%s: %s, model %lu ms, box %lu ms (%u+%u found), read %lu ms (%u threads, %d MHz, %u fixed), "
-                         "heap free %lu KB (largest %lu KB, before the read %lu KB), %u block%s, %s",
+    // in pieces: Utils::Format stops at 255 characters
+    LogOcr(Utils::Format("%s: %s, model %lu ms, box %lu ms (%u+%u found; memory check %lu, boxes %lu, pictures %lu), ",
                          name.c_str(), kModeNames[mode], (unsigned long)(t1 - t0), (unsigned long)(t2 - t1),
-                         (unsigned)boxes[0].size(), (unsigned)boxes[1].size(), (unsigned long)(t3 - t2),
-                         g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars, (unsigned long)(HeapFree() / 1024),
-                         (unsigned long)LargestFreeKB(), (unsigned long)largestBefore, (unsigned)blocks.size(),
-                         blocks.size() == 1 ? "" : "s", first.c_str()));
+                         (unsigned)boxes[0].size(), (unsigned)boxes[1].size(), (unsigned long)(tMem - t1),
+                         (unsigned long)(tBoxes - tMem), (unsigned long)(t2 - tBoxes)) +
+           Utils::Format("read %lu ms (%u threads, %d MHz, %u fixed), heap free %lu KB (largest %lu KB, before the "
+                         "read %lu KB), %u block%s, ",
+                         (unsigned long)(t3 - t2), g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
+                         (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
+                         (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
+           first);
+    for (int s = 0; s < 2; s++) free(grey[s]);
     return any;
 }
 
@@ -1221,6 +1597,7 @@ static void ReadAndLookUp(int mode) {
     g_readTop = mode != kReadBottom;
     g_readBottom = mode != kReadTop;
     g_lookupShot = "";
+    g_shotKept = false;
     std::vector<std::string> blocks;
     std::string error;
     if (!OpenDict()) {
@@ -1237,6 +1614,7 @@ static void ReadAndLookUp(int mode) {
     RestoreScreens();
     WriteScreenshotLater();  // the game goes on while it is written
     g_lookupShot = "";
+    g_shotKept = false;
     RestoreCpu();
     WaitForRelease();
     ResumeGame();
@@ -1689,8 +2067,15 @@ static void Settings() {
     kt::MenuView m(Text());
     m.setTitle("Kotoba3DS");
     m.setButtons({" Choose", " Close"});
-    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kLast, kSaved, kCards, kKnown, kPc, kHelp, kRows };
+    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kFast, kArea, kLast, kSaved, kCards,
+               kKnown, kPc, kHelp, kRows };
     FinishScreenshot();  // "Make Anki cards" may send it
+    LoadAreas();
+    // the paused game, as it is, for the reading-area editor (before anything is drawn on it)
+    ReservePictures();
+    TakePicture(0, 2);
+    TakePicture(1, 2);
+    struct DropAtEnd { ~DropAtEnd() { DropPictures(); } } dropAtEnd;
     while (true) {
         LoadKnown();
         const int saved = CountSaved();
@@ -1723,6 +2108,18 @@ static void Settings() {
             "even when the game wrote it in kana (ちょっと -> 一寸). As in the game: in kanji only when "
             "the game wrote it in kanji, else in kana (たべた -> たべる).\n\n"
             "A,  or : change.";
+        items[kFast].label = "Fast mode";
+        items[kFast].value = g_fastMode ? "on" : "off";
+        items[kFast].help =
+            "On: looks only for text boxes of one flat colour (most games' dialogue boxes) and reads "
+            "their lines: quicker, but text out in the scene, menus and shaded bubbles may be missed or "
+            "read in part. Off: finds every line on the screen with the text spotter.\n\nA,  or : change.";
+        items[kArea].label = "Reading area";
+        items[kArea].value = AreaSummary();
+        items[kArea].help =
+            "For a game whose text always shows in one place: only that part of the screen is read "
+            "(quicker, and nothing else on the screen gets in). Set for this game only, for each "
+            "screen.\n\nA: set it on the paused game.";
         items[kLast].label = "Last lookup";
         items[kLast].dim = g_lastBlocks.empty();
         items[kLast].help = "Opens the text of your last lookup again.";
@@ -1758,6 +2155,13 @@ static void Settings() {
         } else if (row == kSpelling) {
             g_kanjiForm = !g_kanjiForm;
             SaveSettings();
+        } else if (row == kFast) {
+            g_fastMode = !g_fastMode;
+            SaveSettings();
+        } else if (dir) {
+            continue;
+        } else if (row == kArea) {
+            EditReadArea();
         } else if (dir) {
             continue;
         } else if (row == kLast) {
@@ -1848,22 +2252,121 @@ static void LogBootMemory() {
 // Giving the game back the memory the plugin takes
 //
 // On a New 3DS, Luma maps the plugin's memory (5 MiB) into the game and it counts against the
-// game's 64 MB budget (its "commit" limit). Nintendo's SDK sizes a game's heap at start as
-//     heap = min(APPMEMALLOC, 64 MB) - memory already committed - device memory
-// so the heap comes out 5 MiB short; a game that needs all of it (大逆転裁判2) fails an
-// allocation and crashes. The console has the memory (the app region is 124 MB), so before the
-// game's first instruction: raise the game's commit limit by the plugin's size, and make the SDK's
-// formula leave the plugin's share out of "already committed". Done only when the numbers say it
-// is safe, and the formula only when its instructions are found exactly once.
+// game's 64 MB budget (its "commit" limit). A game that asks for fixed amounts (逆転裁判123: a
+// 512 KB heap and 56.5 MB of device memory) goes over that limit; one that sizes its heap from
+// what's left (大逆転裁判2: min(APPMEMALLOC, 64 MB) - memory in use - device memory) comes out
+// 5 MiB short. Either way the game fails an allocation at start. The console has the memory (the
+// app region is 124 MB), so before the game's first instruction:
+//   1. the game's commit limit is raised by the plugin's share (fixed amounts now fit), and
+//   2. every system call the game could use to ask how much memory it uses, or what its limit is,
+//      is patched to leave the plugin's share out of the answer (mem_hooks.s, core/mem_share.cpp).
+// The game then sees a normal 64 MB console whichever way its start-up code was written. Step 2
+// only follows step 1, and either all the calls found are patched or none: the game must never be
+// told it has memory it can't get. Only answers measured at boot to include the share are changed.
 // ---------------------------------------------------------------------------
 static s64 g_commitLimitBefore = -1;  // to put back when the game exits
 
-static bool ArmImmediate(u32 v, u32 &enc) {  // ARM data-processing immediate (8 bits rotated)
-    for (u32 rot = 0; rot < 16; rot++) {
-        u32 r = (v << (2 * rot)) | (rot ? v >> (32 - 2 * rot) : 0);  // rotate left by 2*rot
-        if (r < 256) { enc = (rot << 8) | r; return true; }
+static kt::memshare::Plan g_memPlan;
+static kt::memshare::Counts g_memCounts;
+
+extern "C" {
+void KotobaHookGetSystemInfo(void);
+void KotobaHookGetProcessInfo(void);
+void KotobaHookLimitValues(void);
+void KotobaHookCurrentValues(void);
+
+// called by the stand-ins in mem_hooks.s, on the game's threads, right after the real call
+void KotobaMemHookAdjust(u32 svc, u32 *regs) {
+    if (svc == kt::memshare::kLimitValues || svc == kt::memshare::kCurrentValues)
+        kt::memshare::adjustLimits(g_memPlan, g_memCounts, svc, (s32)regs[0], (s64 *)(uintptr_t)regs[4],
+                                   (const u32 *)(uintptr_t)regs[6], (s32)regs[7]);
+    else
+        kt::memshare::adjustRegisters(g_memPlan, g_memCounts, svc, regs);
+}
+}
+
+// svcGetProcessInfo's type is a u32 in some libctru versions and an enum in others
+template <typename T>
+static Result AskProcessInfo(Result (*fn)(s64 *, Handle, T), s64 *out, u32 type) {
+    return fn(out, CUR_PROCESS_HANDLE, (T)type);
+}
+
+// Step 2: patch the memory questions. Returns what happened, for the log.
+static std::string HookMemoryQuestions(u32 plugin, s64 committed) {
+    using namespace kt::memshare;
+    // which answers include the plugin's share, asked now with the plugin's own (unpatched) calls
+    Plan plan;
+    plan.plugin = plugin;
+    plan.limits = true;  // committed includes it (checked by the caller) and the limit was raised by it
+    for (int type = 0; type < kProcessInfoTypes; type++) {
+        s64 v = -1;
+        if (R_SUCCEEDED(AskProcessInfo(svcGetProcessInfo, &v, (u32)type)))
+            plan.processInfo[type] = countsPlugin(v, committed, plugin);
     }
-    return false;
+    s64 appUsed = -1;
+    if (R_SUCCEEDED(svcGetSystemInfo(&appUsed, 0, 1))) plan.appUsed = countsPlugin(appUsed, committed, plugin);
+
+    // find the calls in the game's code
+    struct Kind { u32 svc; void (*standIn)(void); const char *name; };
+    static const Kind kinds[] = {
+        {kGetSystemInfo, KotobaHookGetSystemInfo, "system info"},
+        {kGetProcessInfo, KotobaHookGetProcessInfo, "process info"},
+        {kLimitValues, KotobaHookLimitValues, "limit"},
+        {kCurrentValues, KotobaHookCurrentValues, "in use"},
+    };
+    constexpr int kMaxSites = 16;
+    u32 siteAt[kMaxSites];
+    void (*siteFn[kMaxSites])(void);
+    int sites = 0, perKind[4] = {0, 0, 0, 0};
+    const u32 *text = (const u32 *)0x00100000;
+    const u32 words = Process::GetTextSize() / 4;
+    for (u32 i = 0; i < words; i++) {  // one pass for all four (svc #n: 0xEF0000nn)
+        const u32 word = text[i];
+        if ((word & 0xFFFFFFC0) != 0xEF000000) continue;  // svc 0x00..0x3F
+        int k = 0;
+        while (k < 4 && kinds[k].svc != (word & 0xFF)) k++;
+        if (k == 4) continue;
+        // a call left as it is would give the game a second, different answer
+        if (!isPatchableCall(text, words, i, kinds[k].svc))
+            return Utils::Format("not patched: a %s call can't be patched", kinds[k].name);
+        if (sites == kMaxSites) return "not patched: more calls than expected";
+        siteAt[sites] = 0x00100000 + i * 4;
+        siteFn[sites] = kinds[k].standIn;
+        sites++;
+        perKind[k]++;
+    }
+    std::string found;
+    for (int k = 0; k < 4; k++) found += Utils::Format("%s%s %d", k ? ", " : "", kinds[k].name, perKind[k]);
+    if (sites == 0) return "the game asks none of these";
+
+    // the trampolines, in plugin memory the game can run (never freed: the game uses them until it exits)
+    const u32 bytes = (sites * kTrampolineWords * 4 + 0xFFF) & ~0xFFFu;
+    u32 *tramp = (u32 *)memalign(0x1000, bytes);
+    if (!tramp) return "not patched: no memory for the trampolines";
+    if (!Process::ProtectMemory((u32)tramp, bytes)) return "not patched: trampolines can't be made runnable";
+    for (int s = 0; s < sites; s++) {
+        u32 *t = tramp + s * kTrampolineWords;
+        buildTrampoline(t, (u32)t, (u32)siteFn[s], *(const u32 *)(siteAt[s] + 4), siteAt[s] + 8);
+    }
+    svcFlushProcessDataCache(Process::GetHandle(), (u32)tramp, bytes);
+
+    // all or nothing: patch every site; if one fails, put back the ones done
+    g_memPlan = plan;
+    u32 original[kMaxSites][2];
+    for (int s = 0; s < sites; s++) {
+        u32 patch[2];
+        buildSitePatch(patch, (u32)(tramp + s * kTrampolineWords));
+        original[s][0] = *(const u32 *)siteAt[s];
+        original[s][1] = *(const u32 *)(siteAt[s] + 4);
+        if (!Process::Patch(siteAt[s], patch, 8)) {
+            for (int t = 0; t < s; t++) Process::Patch(siteAt[t], original[t], 8);
+            svcInvalidateEntireInstructionCache();
+            g_memPlan = Plan();
+            return Utils::Format("not patched: could not write the call at %08lX", (unsigned long)siteAt[s]);
+        }
+    }
+    svcInvalidateEntireInstructionCache();
+    return "patched " + found;
 }
 
 static void GiveGameItsMemory() {
@@ -1881,48 +2384,35 @@ static void GiveGameItsMemory() {
     svcGetResourceLimitCurrentValues(&committed, rl, &t, 1);
     const u32 codeSize = Process::GetTextSize() + Process::GetRoDataSize() + Process::GetRwDataSize();
     std::string why;
-    // only for a game told it has at most 64 MB (the SDK's cap, so the formula's cap does nothing),
-    // whose commit already holds the plugin's block, with room left in the app region
+    // only for a game told it has at most 64 MB (the SDK's cap), whose commit already holds the
+    // plugin's block, with room left in the app region
     const s64 want = (s64)appMemAlloc + plugin;
     if (appMemAlloc == 0 || appMemAlloc > 0x4000000) why = "APPMEMALLOC above 64 MB";
     else if (limit < (s64)appMemAlloc) why = "unusual commit limit";
     else if (committed < (s64)(codeSize + plugin)) why = "the plugin isn't counted in the game's memory";
     else if (want > appRegion) why = "no room in the app region";
-    u32 subImm = 0;
-    if (why.empty() && !ArmImmediate(plugin, subImm)) why = "plugin size not encodable";
-    // the SDK's  cmp rN, #0x4000000 / movhi rN, #0x4000000 / sub r0, rN, r0
-    u32 at = 0, found = 0;
-    if (why.empty()) {
-        const u32 *text = (const u32 *)0x00100000;
-        const u32 words = Process::GetTextSize() / 4;
-        for (u32 i = 0; i + 2 < words; i++) {
-            u32 w0 = text[i];
-            if ((w0 & 0xFFF0FFFF) != 0xE3500301) continue;
-            u32 n = (w0 >> 16) & 0xF;
-            if (text[i + 1] == (0x83A00301 | (n << 12)) && text[i + 2] == (0xE0400000 | (n << 16))) {
-                at = 0x00100000 + i * 4;
-                found++;
-            }
-        }
-        if (found != 1) why = Utils::Format("SDK heap sizing found %lu times", (unsigned long)found);
-    }
+    // 1. The commit limit: at least APPMEMALLOC + the plugin's share. Taking the share off both
+    //    the limit and the memory in use (step 2) leaves the game's free memory exactly as it is.
+    std::string raised;
     if (why.empty() && limit < want) {
         // the high word is what the kernel writes to APPMEMALLOC: keep it as it is
         s64 value = want | ((s64)appMemAlloc << 32);
         Result r = svcSetResourceLimitValues(rl, &t, &value, 1);
         if (R_FAILED(r)) why = Utils::Format("could not raise the limit (%08lX)", (unsigned long)r);
-        else g_commitLimitBefore = limit;
+        else {
+            g_commitLimitBefore = limit;
+            raised = Utils::Format("commit limit %ld -> %ld KB", (long)(limit / 1024), (long)(want / 1024));
+        }
     }
     svcCloseHandle(rl);
-    if (why.empty()) {
-        Process::Patch(at, 0xE2400000 | subImm);  // sub r0, r0, #plugin  (committed - plugin)
-        Process::Patch(at + 4, 0xE1A00000);       // nop (the 64 MB cap can't apply: checked above)
-        LogOcr(Utils::Format("boot: gave the game back %lu KB (commit limit %ld -> %ld KB, heap sizing at %08lX)",
-                             (unsigned long)(plugin / 1024), (long)(limit / 1024), (long)(want / 1024),
-                             (unsigned long)at));
-    } else {
+    if (!why.empty()) {
         LogOcr("boot: memory left as it is: " + why);
+        return;
     }
+    LogOcr(Utils::Format("boot: gave the game back %lu KB (%s)", (unsigned long)(plugin / 1024),
+                         raised.empty() ? "commit limit already high enough" : raised.c_str()));
+    // 2. The questions about memory: only once the limit really is at least APPMEMALLOC + the share
+    LogOcr("boot: memory answers: " + HookMemoryQuestions(plugin, committed));
 }
 
 void OnProcessExit(void) {
@@ -1945,7 +2435,7 @@ void PatchProcess(FwkSettings &settings) {
 
 
 int main(void) {
-    PluginMenu *menu = new PluginMenu("Kotoba3DS", 3, 0, 0,
+    PluginMenu *menu = new PluginMenu("Kotoba3DS", 1, 1, 0,  // the version: as in Kotoba3DS.plgInfo
                                       "In-game Japanese dictionary that reads the screen and saves words for Anki.");
     menu->SynchronizeWithFrame(true);
     menu->OnOpening = OnMenuOpening;  // Select: the plugin's own menu, not CTRPF's list

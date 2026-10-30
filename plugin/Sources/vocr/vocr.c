@@ -21,17 +21,19 @@
 
 /* Phase markers for the per-layer cycle profile (vita/a9_layers.py): built with
  * -DVOCR_PROF=name, vocr_run() calls name(id) as each phase starts: id = the op's index for its
- * step (the head's for run_head), VOCR_PROF_SRC for the input columns, VOCR_PROF_RUN for the
- * rest. Without VOCR_PROF they compile to nothing, so the console build has none. */
+ * step (the head's for run_head; the attention op's for its projections), VOCR_PROF_SRC for the input columns,
+ * VOCR_PROF_GATE for the head gate's per-tile step, VOCR_PROF_ATTN for the attention's scores, softmax and
+ * weighted sums, VOCR_PROF_RUN for the rest. Without VOCR_PROF they compile to nothing, so
+ * the console build has none. */
 #ifdef VOCR_PROF
 void VOCR_PROF(unsigned id);
 #define VOCR_MARK(id) VOCR_PROF(id)
 #else
 #define VOCR_MARK(id) ((void)0)
 #endif
-enum { VOCR_PROF_RUN = 100, VOCR_PROF_SRC = 101 };
+enum { VOCR_PROF_RUN = 100, VOCR_PROF_SRC = 101, VOCR_PROF_GATE = 102, VOCR_PROF_ATTN = 103 };
 
-enum { T_CONV = 1, T_DW = 2, T_PW = 3, T_HEAD = 4 };
+enum { T_CONV = 1, T_DW = 2, T_PW = 3, T_HEAD = 4, T_ATTN = 5 };
 /* VOCR_PREFETCH(p): a cache hint for the line at p (PLD on ARM), which never changes a result:
  * the int8 weights stream through the L1 once per tile (a layer's matrix is larger than the
  * L1, or evicted by the layers between), so the matrix kernel asks for them two passes ahead. */
@@ -48,7 +50,7 @@ enum { T_CONV = 1, T_DW = 2, T_PW = 3, T_HEAD = 4 };
 #define VOCR_NOINLINE
 #endif
 enum { F_RELU = 1, F_RES = 2, F_BIAS = 4, F_INT8 = 8, F_COLLAPSE = 16 };
-enum { DST_RING = 1, DST_TRANS = 2, DST_ACC = 3 };
+enum { DST_RING = 1, DST_TRANS = 2, DST_ACC = 3, DST_LINE = 4 };
 #define HEADER_BYTES 64u
 #define OP_BYTES 64u
 #define MIN_WIDTH 8u
@@ -107,6 +109,12 @@ static int is_magic(const unsigned char *b)
 {
     return b[0] == 'V' && b[1] == 'O' && b[2] == 'C' && b[3] == 'R';
 }
+/* the head gate section (vocr.h, train/headgate.py): 64-byte header, then its arrays */
+#define GATE_HEADER_BYTES 64u
+static int is_gate_magic(const unsigned char *b)
+{
+    return b[0] == 'V' && b[1] == 'O' && b[2] == 'C' && b[3] == 'G';
+}
 static unsigned umin(unsigned a, unsigned b) { return a < b ? a : b; }
 
 static uint32_t crc32_ieee(const unsigned char *p, size_t n)
@@ -120,15 +128,99 @@ static uint32_t crc32_ieee(const unsigned char *p, size_t n)
     return ~c;
 }
 
+#define TWO_HEADER_BYTES 128u
+static uint32_t find_trailer(const unsigned char *b, size_t bytes, uint32_t total, const char *magic);
+
 int vocr_check_crc(const void *blob, size_t bytes)
 {
     const unsigned char *b = (const unsigned char *)blob;
-    uint32_t total;
+    uint32_t total, t2;
+    size_t g_off;
     if (!b || bytes < HEADER_BYTES || !is_magic(b)) return VOCR_E_FORMAT;
     total = rd32(b + 8);
     if (total < HEADER_BYTES || total > bytes) return VOCR_E_FORMAT;
-    return crc32_ieee(b + HEADER_BYTES, total - HEADER_BYTES) == rd32(b + 40) ? VOCR_OK
-                                                                               : VOCR_E_FORMAT;
+    if (crc32_ieee(b + HEADER_BYTES, total - HEADER_BYTES) != rd32(b + 40)) return VOCR_E_FORMAT;
+    g_off = al16(total); /* a gate section after the blob: its own CRC-32 too */
+    if (g_off <= bytes && bytes - g_off >= 4 && is_gate_magic(b + g_off)) {
+        const unsigned char *g = b + g_off;
+        uint32_t n;
+        if (bytes - g_off < GATE_HEADER_BYTES) return VOCR_E_FORMAT;
+        n = rd32(g + 8);
+        if (n < GATE_HEADER_BYTES || n > bytes - g_off ||
+            crc32_ieee(g + GATE_HEADER_BYTES, n - GATE_HEADER_BYTES) != rd32(g + 52))
+            return VOCR_E_FORMAT;
+    }
+    t2 = find_trailer(b, bytes, total, "VOC2");
+    if (t2) {
+        const uint32_t n = rd32(b + t2 + 8);
+        if (n < TWO_HEADER_BYTES || n > bytes - t2 || crc32_ieee(b + t2 + 16, n - 16) != rd32(b + t2 + 12))
+            return VOCR_E_FORMAT;
+    }
+    return VOCR_OK;
+}
+
+/* Offset of the trailer with this 4-byte magic after the blob, or 0. Trailers sit one after another from
+ * al16(total), each starting with its magic and, at +8, its u32 size (a multiple of 16); a trailer of another
+ * kind is skipped by its size. */
+static uint32_t find_trailer(const unsigned char *b, size_t bytes, uint32_t total, const char *magic)
+{
+    size_t off = al16(total);
+    while (off + 16u <= bytes) {
+        const uint32_t n = rd32(b + off + 8);
+        if (!memcmp(b + off, magic, 4)) return (uint32_t)off;
+        if (n < 16u || (n & 15u) || n > bytes - off) break;
+        off += n;
+    }
+    return 0;
+}
+
+/* [off, off + n) inside a trailer of `size` bytes, off 16-byte aligned (and the pointer then too) */
+static int in_trailer(uint32_t size, uint32_t off, size_t n)
+{
+    return off >= TWO_HEADER_BYTES && !(off & 15u) && off <= size && n <= size - off;
+}
+
+/* The 'VOC2' trailer: the two-level head (vocr.h vocr_2level, train/head2level.py write_trailer).
+ *   0 "VOC2"  4 u16 version (1)  6 u16 header bytes (128)  8 u32 trailer bytes  12 u32 CRC-32 of [16, end)
+ *  16 u32 base blob bytes  20 u32 base blob CRC  24 u16 l1_blocks  26 u16 hidden  28 u16 rare_k (0)  30 u16 0
+ *  32 f32 t  36 f32 e_b2  40.. u32 offsets from the trailer's start: e_q e_scale e_bias e_wl1 e_wb0 e_w2
+ *  (40-60), zeros to 128. Level 2 is the head's own rows: rare_k and the offsets at 64-84 are the trial's
+ *  48-wide rare block (docs/head2level.md, rejected), which this runtime does not read, so they must be 0. */
+static int parse_two(vocr_model *m, const unsigned char *b, size_t bytes, uint32_t total)
+{
+    vocr_2level *tw = &m->two;
+    const vocr_op *hd = &m->op[m->n_ops - 1];
+    const uint32_t t2 = find_trailer(b, bytes, total, "VOC2");
+    const unsigned char *p;
+    uint32_t size, o[6];
+    unsigned i, K = hd->k, NB = hd->cout_pad / 8u;
+    if (!t2) return VOCR_OK;
+    p = b + t2;
+    size = rd32(p + 8);
+    if (rd16(p + 4) != 1 || rd16(p + 6) != TWO_HEADER_BYTES || size < TWO_HEADER_BYTES || (size & 15u) ||
+        size > bytes - t2 || rd32(p + 16) != total || rd32(p + 20) != rd32(b + 40) || rd16(p + 30))
+        return VOCR_E_FORMAT;
+    for (i = 64; i < TWO_HEADER_BYTES; i++) /* the rare block's offsets (64-84) and the reserved bytes */
+        if (p[i]) return VOCR_E_FORMAT;
+    tw->l1_blocks = rd16(p + 24);
+    tw->hidden = rd16(p + 26);
+    memcpy(&tw->t, p + 32, 4);
+    memcpy(&tw->e_b2, p + 36, 4);
+    for (i = 0; i < 6; i++) o[i] = rd32(p + 40 + 4 * i);
+    if (!m->int8 || rd16(p + 28) || tw->l1_blocks < 1 || tw->l1_blocks >= NB || tw->hidden < 8 ||
+        tw->hidden > 64 || (tw->hidden & 7u) || !(tw->t == tw->t) || !(tw->e_b2 == tw->e_b2))
+        return VOCR_E_FORMAT;
+    if (!in_trailer(size, o[0], (size_t)tw->hidden * K))
+        return VOCR_E_FORMAT;
+    for (i = 1; i < 6; i++)
+        if (!in_trailer(size, o[i], 4u * tw->hidden)) return VOCR_E_FORMAT;
+    tw->e_q = (const int8_t *)(const void *)(p + o[0]);
+    tw->e_scale = (const float *)(const void *)(p + o[1]);
+    tw->e_bias = (const float *)(const void *)(p + o[2]);
+    tw->e_wl1 = (const float *)(const void *)(p + o[3]);
+    tw->e_wb0 = (const float *)(const void *)(p + o[4]);
+    tw->e_w2 = (const float *)(const void *)(p + o[5]);
+    return VOCR_OK;
 }
 
 /* [off, off + n) lies inside the blob and off is 16-byte aligned */
@@ -159,13 +251,18 @@ static int parse_op(vocr_model *m, unsigned i, const unsigned char *r, unsigned 
     op->h_out = (uint16_t)rd16(r + 14);
     op->k = (uint16_t)rd16(r + 32);
     op->cout_pad = (uint16_t)rd16(r + 34);
-    for (j = 36; j < OP_BYTES; j++)
+    for (j = op->type == T_ATTN ? 56u : 36u; j < OP_BYTES; j++) /* ATTN: its O and heads at 36-55 */
         if (r[j]) return VOCR_E_FORMAT;
-    if (op->type < T_CONV || op->type > T_HEAD || (op->flags & ~31u)) return VOCR_E_FORMAT;
+    if (op->type < T_CONV || op->type > T_ATTN || (op->flags & ~31u)) return VOCR_E_FORMAT;
     if ((op->type == T_HEAD) != (int)last) return VOCR_E_FORMAT;
+    /* width strides up to 3: a stride-12 model (train/model.py stage_strides) downsamples once by 3 */
     if (op->kh < 1 || op->kh > 7 || op->kw < 1 || op->kw > 7 || op->sh < 1 || op->sh > 2 ||
-        op->sw < 1 || op->sw > 2 || op->ph >= op->kh || op->pw >= op->kw)
+        op->sw < 1 || op->sw > 3 || op->ph >= op->kh || op->pw >= op->kw)
         return VOCR_E_FORMAT;
+    /* every input column must fall in some window (kw >= sw): plan()'s column ring carries
+     * lag * sw + pw - (the previous op's lag) columns from step to step, which is at least kw - sw,
+     * so a kernel narrower than its stride could make it negative and the ring overflow */
+    if (op->kw < op->sw) return VOCR_E_FORMAT;
     if (op->h_in != *rows || op->h_in + 2u * op->ph < op->kh ||
         op->h_out != (op->h_in + 2u * op->ph - op->kh) / op->sh + 1u)
         return VOCR_E_FORMAT;
@@ -183,6 +280,27 @@ static int parse_op(vocr_model *m, unsigned i, const unsigned char *r, unsigned 
             op->k != op->kh * op->kw || op->cout_pad != op->cout ||
             w_bytes != 4u * op->k * op->cout)
             return VOCR_E_FORMAT;
+    } else if (op->type == T_ATTN) {
+        /* train/export.py "ATTN": right before the head, one row, cin = cout = d (x8), its record's matrix QKV
+         * ([3 dim / 8][d][8], bias always), dim / heads a multiple of 8, O [d / 8][dim][8] at 40-55 */
+        const unsigned heads = rd16(r + 36), dim = rd16(r + 38), wsz = op->flags & F_INT8 ? 1u : 4u;
+        const uint32_t ow = rd32(r + 40), owb = rd32(r + 44), ob = rd32(r + 48), os = rd32(r + 52);
+        if (i == 0 || i + 2 != m->n_ops || m->attn.dim || op->kh != 1 || op->kw != 1 || op->sh != 1 ||
+            op->sw != 1 || op->ph || op->pw || op->h_in != 1 || op->cin != op->cout || (op->cout & 7u) ||
+            op->k != op->cin || (op->flags & ~(unsigned)(F_BIAS | F_INT8)) || !(op->flags & F_BIAS) || !heads ||
+            dim < 8u || dim > 1024u || dim % heads || ((dim / heads) & 7u) || op->cout_pad != 3u * dim ||
+            w_bytes != wsz * op->cout_pad * op->k || owb != wsz * op->cout * dim || !in_blob(total, ow, owb) ||
+            !in_blob(total, ob, 4u * op->cout) || ((op->flags & F_INT8) ? !in_blob(total, os, 4u * op->cout) : os != 0))
+            return VOCR_E_FORMAT;
+        m->attn.heads = heads;
+        m->attn.dim = dim;
+        m->attn.o_bias = (const float *)(const void *)(b + ob);
+        if (op->flags & F_INT8) {
+            m->attn.o_q = (const int8_t *)(const void *)(b + ow);
+            m->attn.o_scale = (const float *)(const void *)(b + os);
+        } else {
+            m->attn.o_w = (const float *)(const void *)(b + ow);
+        }
     } else {
         unsigned collapse = (op->flags & F_COLLAPSE) != 0;
         if (op->sh != 1 || op->sw != 1 || op->ph || op->pw || op->kw != 1 ||
@@ -213,6 +331,55 @@ static int parse_op(vocr_model *m, unsigned i, const unsigned char *r, unsigned 
     }
     *rows = op->h_out;
     *chans = op->cout;
+    return VOCR_OK;
+}
+
+/* The head gate section at g (avail bytes from it to the end of the buffer), after a parsed version-1
+ * blob (m complete). Layout (little-endian, train/headgate.py gate_section):
+ *    0 char[4] "VOCG"     4 u16 version (1)     6 u16 header bytes (64)    8 u32 section bytes (x16)
+ *   12 u32 flags (0)     16 u16 k (the head's K) 18 u16 hidden (x8, <= 64)
+ *   20 u32 the blob's bytes (header field 8)    24 u32 the blob's CRC-32 (header field 40)
+ *   28 f32 t (threshold)  32 f32 b2 (layer 2 bias)
+ *   36 u32 w1 offset: int8 [hidden/8][k][8]      40 u32 s1 offset: f32 [hidden] (layer 1 scales)
+ *   44 u32 b1 offset: f32 [hidden]               48 u32 w2 offset: f32 [hidden]
+ *   52 u32 CRC-32 of the section's bytes [64, section bytes)    56..63 zero
+ * Offsets are from the section's start, 16-byte aligned, inside the section. */
+static int parse_gate(vocr_model *m, const unsigned char *g, size_t avail)
+{
+    vocr_gate *gt = &m->gate;
+    const vocr_op *head = &m->op[m->n_ops - 1];
+    uint32_t n, w1, s1, b1, w2;
+    unsigned k, hid, j;
+    float t, b2;
+    if (avail < GATE_HEADER_BYTES || rd16(g + 4) != VOCR_GATE_VERSION || rd16(g + 6) != GATE_HEADER_BYTES)
+        return VOCR_E_FORMAT;
+    n = rd32(g + 8);
+    if (n < GATE_HEADER_BYTES || (n & 15u) || n > avail || rd32(g + 12)) return VOCR_E_FORMAT;
+    for (j = 56; j < GATE_HEADER_BYTES; j++)
+        if (g[j]) return VOCR_E_FORMAT;
+    k = rd16(g + 16);
+    hid = rd16(g + 18);
+    if (k != head->k || !hid || hid > VOCR_GATE_MAX_HIDDEN || (hid & 7u)) return VOCR_E_FORMAT;
+    if (rd32(g + 20) != m->bytes || rd32(g + 24) != rd32(m->blob + 40)) return VOCR_E_FORMAT;
+    memcpy(&t, g + 28, sizeof t);
+    memcpy(&b2, g + 32, sizeof b2);
+    if (t != t || b2 != b2) return VOCR_E_FORMAT; /* NaN */
+    w1 = rd32(g + 36);
+    s1 = rd32(g + 40);
+    b1 = rd32(g + 44);
+    w2 = rd32(g + 48);
+    if (!in_blob(n, w1, hid * k) || !in_blob(n, s1, 4u * hid) || !in_blob(n, b1, 4u * hid) ||
+        !in_blob(n, w2, 4u * hid))
+        return VOCR_E_FORMAT;
+    gt->q = (const int8_t *)(const void *)(g + w1);
+    gt->scale = (const float *)(const void *)(g + s1);
+    gt->bias = (const float *)(const void *)(g + b1);
+    gt->w2 = (const float *)(const void *)(g + w2);
+    gt->b2 = b2;
+    gt->t = t;
+    gt->k = k;
+    gt->hidden = hid;
+    gt->bytes = n;
     return VOCR_OK;
 }
 
@@ -271,7 +438,29 @@ int vocr_load(vocr_model *m, const void *blob, size_t bytes)
         return VOCR_E_FORMAT;
     for (i = 0; i < m->n_classes; i++)
         if (m->vocab_off[i] > m->vocab_off[i + 1]) return VOCR_E_FORMAT;
-    return VOCR_OK;
+    {
+        const size_t g_off = al16(total);
+        if (g_off <= bytes && bytes - g_off >= 4 && is_gate_magic(b + g_off)) {
+            rc = parse_gate(m, b + g_off, bytes - g_off);
+            if (rc) {
+                memset(&m->gate, 0, sizeof m->gate);
+                return rc;
+            }
+        }
+    }
+    rc = parse_two(m, b, bytes, total);
+    if (rc) memset(&m->two, 0, sizeof m->two);
+    return rc;
+}
+
+int vocr_has_gate(const vocr_model *m)
+{
+    return m && m->blob && m->gate.hidden ? 1 : 0;
+}
+
+int vocr_has_two_level(const vocr_model *m)
+{
+    return m && m->blob && m->two.l1_blocks ? 1 : 0;
 }
 
 const char *vocr_class_text(const vocr_model *m, unsigned c, unsigned *len)
@@ -323,17 +512,23 @@ static int resolve_mode(const vocr_model *m, int mode)
 static size_t op_scratch(const vocr_ctx *c, const vocr_op *op, unsigned n_tile)
 {
     size_t pos;
-    if (op->type < T_PW) return 0;
+    if (op->type < T_PW || op->type == T_ATTN) return 0; /* the attention's own scratch: plan(), after the tiles */
     pos = op->type == T_HEAD ? c->acc_frames
                              : (size_t)n_tile * (op->flags & F_COLLAPSE ? 1u : op->h_in);
-    if (c->mode == VOCR_MODE_W8F) return al16((size_t)op->k * 8u * sizeof(float));
+    if (c->mode == VOCR_MODE_W8F) {
+        /* the two-level head's escape reads the head input in int16 in every mode (run_head2), then a
+         * block's dequantised weights */
+        if (op->type == T_HEAD && c->two_level)
+            return al16(pos * op->k * 2u) + al16(pos * sizeof(float)) + al16((size_t)op->k * 8u * sizeof(float));
+        return al16((size_t)op->k * 8u * sizeof(float));
+    }
     if (c->mode == VOCR_MODE_W8I) return al16(pos * op->k * 2u) + al16(pos * sizeof(float));
     return 0;
 }
 
 static int plan(vocr_ctx *c, const vocr_model *m, const vocr_opts *o)
 {
-    static const vocr_opts defaults = {0, 0, 0, VOCR_MODE_AUTO};
+    static const vocr_opts defaults = {0, 0, 0, VOCR_MODE_AUTO, VOCR_HEAD_GATE_OFF, 0};
     unsigned L, S, i, f, t_max, F, hb, s = 1, s_out[VOCR_MAX_OPS];
     size_t off, base, R = 0, tin[VOCR_MAX_OPS], tout[VOCR_MAX_OPS], scr[VOCR_MAX_OPS];
     int prev = 0, mode, in_top = 0;
@@ -344,12 +539,22 @@ static int plan(vocr_ctx *c, const vocr_model *m, const vocr_opts *o)
     S = m->stride;
     mode = resolve_mode(m, o->mode);
     if (mode < 0) return mode;
+    if (o->head_gate > VOCR_HEAD_GATE_SCORE) return VOCR_E_ARG;
+    /* the gate runs in every mode, the two-level head in W8I and W8F (it needs an int8 blob: parse_two) */
+    if (o->head_gate && !m->gate.hidden) return VOCR_E_MODE;
+    if (o->two_level && (mode == VOCR_MODE_F32 || !m->two.l1_blocks)) return VOCR_E_MODE;
+    c->two_level = o->two_level ? 1u : 0u;
+    c->attn = m->attn.dim ? m->n_ops - 2u : 0u;
     c->model = m;
     c->mode = mode;
+    c->gate = o->head_gate;
     c->max_width = o->max_width && o->max_width < m->max_width ? o->max_width : m->max_width;
     c->max_width = (c->max_width + S - 1) / S * S;
     t_max = c->max_width / S;
-    F = umin(o->tile_frames ? o->tile_frames : 4u, t_max);
+    /* default tile: 4 frames, or for a stride over 8 the whole frames nearest 32 input columns (3 at
+     * stride 12, 2 at 16), so a coarser-stride model's zeroed options keep about a 32-column tile's
+     * arena instead of growing with the stride */
+    F = umin(o->tile_frames ? o->tile_frames : S <= 8u ? 4u : S >= 64u ? 1u : (32u + S / 2u) / S, t_max);
     hb = umin(o->head_frames ? o->head_frames : 16u, t_max);
     c->tile = F;
     c->head = hb;
@@ -370,9 +575,10 @@ static int plan(vocr_ctx *c, const vocr_model *m, const vocr_opts *o)
         prev = p->lag;
         p->in_col = (uint32_t)op->h_in * op->cin;
         p->out_col = (uint32_t)op->h_out * op->cout;
-        p->dst = i + 1 == L ? 0
+        p->dst = i + 1 == L || op->type == T_ATTN ? 0 /* the attention runs after the tiles */
                  : m->op[i + 1].type == T_PW   ? DST_TRANS
                  : m->op[i + 1].type == T_HEAD ? DST_ACC
+                 : m->op[i + 1].type == T_ATTN ? DST_LINE
                                                : DST_RING;
     }
     if ((F * S) % s_out[L - 1]) return VOCR_E_FORMAT;
@@ -388,9 +594,12 @@ static int plan(vocr_ctx *c, const vocr_model *m, const vocr_opts *o)
         const vocr_op *op = &m->op[i];
         vocr_plan_op *p = &c->op[i];
         unsigned n_prev;
+        int halo;
         if (op->type != T_CONV && op->type != T_DW) continue;
         n_prev = i == 0 ? c->n_src : i <= f ? c->op[i - 1].n_step : c->op[i - 1].n_tile;
-        p->halo = (uint32_t)(p->lag * (int)op->sw + (int)op->pw - (i ? c->op[i - 1].lag : 0));
+        halo = p->lag * (int)op->sw + (int)op->pw - (i ? c->op[i - 1].lag : 0);
+        if (halo < 0) return VOCR_E_FORMAT; /* kw >= sw (parse_op) keeps it >= kw - sw >= 0 */
+        p->halo = (uint32_t)halo;
         p->cap = n_prev + p->halo;
         p->in_off = (uint32_t)off;
         off += al16((size_t)p->cap * p->in_col * sizeof(float));
@@ -403,6 +612,21 @@ static int plan(vocr_ctx *c, const vocr_model *m, const vocr_opts *o)
     off += al16((size_t)c->acc_frames * sizeof(float));
     c->besti_off = (uint32_t)off;
     off += al16((size_t)c->acc_frames * sizeof(uint32_t));
+    if (c->gate == VOCR_HEAD_GATE_ON) { /* the line index of each accumulated frame */
+        c->fidx_off = (uint32_t)off;
+        off += al16((size_t)c->acc_frames * sizeof(uint16_t));
+    }
+    if (c->two_level) { /* level 1's non-blank maxima and blank logits, the escape's hidden units, the fired frames */
+        const size_t A = c->acc_frames;
+        c->nbv_off = (uint32_t)off;
+        off += al16(A * sizeof(float));
+        c->b0_off = (uint32_t)off;
+        off += al16(A * sizeof(float));
+        c->hid_off = (uint32_t)off;
+        off += al16(A * m->two.hidden * sizeof(float));
+        c->fmap_off = (uint32_t)off;
+        off += al16(A * sizeof(uint32_t));
+    }
     base = off;
     for (i = 0; i < L; i++) {
         const vocr_op *op = &m->op[i];
@@ -412,6 +636,15 @@ static int plan(vocr_ctx *c, const vocr_model *m, const vocr_opts *o)
         scr[i] = op_scratch(c, op, c->op[i].n_tile);
         sum = tin[i] + tout[i] + scr[i];
         if (sum > R) R = sum;
+    }
+    /* the gate runs between a tile's last layer and the head, in the head's scratch (at base): a tile's
+     * new frames as int16 with their scales, and their hidden units; in W8F also the head's first block,
+     * dequantised, for a skipped frame's blank logit */
+    if (c->gate) {
+        size_t g = al16((size_t)F * m->op[L - 1].k * 2u) + al16((size_t)F * sizeof(float)) +
+                   al16((size_t)F * m->gate.hidden * sizeof(float));
+        if (mode == VOCR_MODE_W8F) g += al16((size_t)m->op[L - 1].k * 8u * sizeof(float));
+        if (g > R) R = g;
     }
     /* transients alternate between the bottom and the top of the region, scratch
      * sits above the bottom one */
@@ -428,6 +661,36 @@ static int plan(vocr_ctx *c, const vocr_model *m, const vocr_opts *o)
         in_top = out_top;
     }
     off = base + R;
+    if (off > 0xFFFFFFF0u) return VOCR_E_ARG; /* before any offset below is cast to 32 bits */
+    /* the attention op (docs/vocr6-attn.md "Arena"): its working set (K and V of every frame, a head batch of queries'
+     * Q, scores and outputs, the projections' scratch) overlays the rings, the head's accumulator and state and the
+     * transients, all idle between the tiles and the head; the line of z, every frame's bottleneck output, which
+     * lives through all three, comes after both. train/export.py plan_arena mirrors it. */
+    if (c->attn) {
+        const size_t d = m->op[c->attn].cin, da = m->attn.dim, P = hb, kmax = d > da ? d : da;
+        const size_t tp = ((size_t)t_max + 7u) & ~(size_t)7u;
+        const size_t line = al16((size_t)t_max * d * sizeof(float));
+        size_t w = c->ring_off, lo;
+        c->att_tp = (uint32_t)tp;
+        c->kp_off = (uint32_t)w;
+        w += al16(tp * da * sizeof(float));
+        c->vp_off = (uint32_t)w;
+        w += al16(tp * da * sizeof(float));
+        c->qc_off = (uint32_t)w;
+        w += al16(P * da * sizeof(float));
+        c->ac_off = (uint32_t)w;
+        w += al16(P * da * sizeof(float));
+        c->sc_off = (uint32_t)w;
+        w += al16(P * tp * sizeof(float));
+        c->as_off = (uint32_t)w;
+        if (mode == VOCR_MODE_W8F) w += al16(kmax * 8u * sizeof(float));
+        else if (mode == VOCR_MODE_W8I) w += al16(P * kmax * 2u) + al16(P * sizeof(float));
+        if (w > 0xFFFFFFF0u) return VOCR_E_ARG;
+        lo = off > w ? off : w;
+        if (line > 0xFFFFFFF0u - lo) return VOCR_E_ARG; /* no wrap of a 32-bit size_t either */
+        c->line_off = (uint32_t)lo;
+        off = lo + line;
+    }
     if (off > 0xFFFFFFF0u) return VOCR_E_ARG;
     c->arena_bytes = off;
     return VOCR_OK;
@@ -1838,14 +2101,18 @@ typedef struct {
     unsigned topk;           /* ex->topk, or 0 */
     unsigned conf_n;         /* characters whose confidence is in conf_min / conf_sum */
     float conf_min, conf_sum;
+    const uint16_t *fidx;    /* the run skips frames (head_gate ON, no logits): the accumulated frames' line
+                                indices, else NULL */
+    unsigned gated, headed;  /* frames the gate skipped; frames the head ran on */
+    unsigned escaped;        /* frames the two-level escape fired on */
 } out_t;
 
 static float *at(const vocr_ctx *c, uint32_t off) { return (float *)(void *)(c->arena + off); }
 
 /* exp(x) for x <= 0 in float arithmetic only (no libm): 2^(x / ln 2), the integer part from the float
  * exponent bits, 2^f for f in [0, 1) from its degree-6 Taylor polynomial (relative error < 2e-5).
- * x is clamped at -30, so every value stays a normal float. Only the confidence uses it: nothing that
- * decides a character does. lm/vlm.py's exp_neg is the same arithmetic. */
+ * x is clamped at -30, so every value stays a normal float. The confidence and the attention op's softmax use it
+ * (softmax_row). train/headgate.py's exp_neg and runtime/tests/vocr_ref.py's exp_neg_exact are the same arithmetic. */
 static float exp_neg(float x)
 {
     union { float f; uint32_t u; } p2;
@@ -2016,7 +2283,8 @@ static void lanes_argmax(const vocr_lane_i32 *lk, const vocr_lane_u32 *li, unsig
  *    while the classes are inserted in order, and the argmax is never below it (it is [0]), so a
  *    block with none above it is one the per-class loop would leave as it is.
  * A last block of fewer than 8 classes goes through the per-class loop after the full ones. The
- * builds without NEON compile to main's exact machine code. */
+ * head gate (o->fidx) changes only which frames the batch holds: frame f of the batch is the line's frame
+ * o->fidx[f] (else o->frame + f), and a frame the gate skipped between two of them reads as a blank. */
 static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
 {
     const vocr_model *m = c->model;
@@ -2036,7 +2304,10 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
     float *wf = (float *)(void *)scr;
     vocr_extra *ex = o->ex;
     const unsigned TK = o->topk;
+    const uint16_t *fx = o->fidx;
     unsigned f, nb, f0, q, j;
+/* the line's frame of the batch's frame I */
+#define VOCR_FRAME(I) (fx ? (unsigned)fx[I] : o->frame + (I))
 #ifdef VOCR_NEON
     /* frames per mm_* call: 4, or VOCR_HEAD_CHUNK on the NEON W8I paths (one call per block); the
      * blocks below n_lanes (no top-K) or n_tk (top-K) take those paths */
@@ -2044,6 +2315,7 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
     float tmp[VOCR_HEAD_CHUNK * 8];
     vocr_lane_i32 *lk = (vocr_lane_i32 *)(void *)x;              /* nf x 8 lane maxima (keys) ... */
     vocr_lane_u32 *li = (vocr_lane_u32 *)(void *)(x + (size_t)nf * 8u); /* ... and blocks: 16 nf <= K nf */
+    vocr_lane_u32 *ro = (vocr_lane_u32 *)(void *)x; /* top-K: each frame's row in the caller's buffers */
 #endif
     for (f = 0; f < nf; f++) {
         bestv[f] = -INFINITY;
@@ -2051,8 +2323,8 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
     }
     if (TK)
         for (f = 0; f < nf; f++) {
-            float *tv = ex->topk_logit + (size_t)(o->frame + f) * TK;
-            uint16_t *tc = ex->topk_class + (size_t)(o->frame + f) * TK;
+            float *tv = ex->topk_logit + (size_t)VOCR_FRAME(f) * TK;
+            uint16_t *tc = ex->topk_class + (size_t)VOCR_FRAME(f) * TK;
             for (j = 0; j < TK; j++) {
                 tv[j] = -INFINITY;
                 tc[j] = 0;
@@ -2065,6 +2337,7 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
         step = VOCR_HEAD_CHUNK;
         if (TK) {
             n_tk = N / 8u;
+            for (f = 0; f < nf; f++) ro[f] = (uint32_t)VOCR_FRAME(f) * TK; /* once per batch, not per block */
         } else {
             n_lanes = N / 8u;
             for (f = 0; f < nf * 8u; f++) {
@@ -2109,7 +2382,7 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
                 }
                 if (ex && ex->logits)
                     for (q = 0; q < pn; q++) {
-                        const unsigned frame = o->frame + f0 + q;
+                        const unsigned frame = VOCR_FRAME(f0 + q);
                         if (frame < ex->cap_frames)
                             memcpy(ex->logits + (size_t)frame * N + nb * 8, tmp + q * 8, 8 * sizeof(float));
                     }
@@ -2117,16 +2390,16 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
             }
             if (nb < n_tk) {
                 for (q = 0; q < pn; q++) {
-                    const unsigned frame = o->frame + f0 + q;
-                    float *tv = ex->topk_logit + (size_t)frame * TK;
-                    uint16_t *tc = ex->topk_class + (size_t)frame * TK;
+                    float *tv = ex->topk_logit + ro[f0 + q];
+                    uint16_t *tc = ex->topk_class + ro[f0 + q];
                     const int32x4_t kt = fkey(vld1q_dup_f32(tv + TK - 1));
                     const uint32x4_t gt = vorrq_u32(vcgtq_s32(fkey(vld1q_f32(tmp + q * 8)), kt),
                                                     vcgtq_s32(fkey(vld1q_f32(tmp + q * 8 + 4)), kt));
                     const uint32x2_t g2 = vorr_u32(vget_low_u32(gt), vget_high_u32(gt));
-                    if (ex->logits && frame < ex->cap_frames)
-                        memcpy(ex->logits + (size_t)frame * N + nb * 8, tmp + q * 8, 8 * sizeof(float));
-                    if (!nb && ex->blank_logit) ex->blank_logit[frame] = tmp[q * 8];
+                    if (ex->logits && VOCR_FRAME(f0 + q) < ex->cap_frames)
+                        memcpy(ex->logits + (size_t)VOCR_FRAME(f0 + q) * N + nb * 8, tmp + q * 8,
+                               8 * sizeof(float));
+                    if (!nb && ex->blank_logit) ex->blank_logit[VOCR_FRAME(f0 + q)] = tmp[q * 8];
                     if (!vget_lane_u32(vpmax_u32(g2, g2), 0)) continue;
                     for (j = 0; j < 8; j++) { /* the per-class loop below, for this frame */
                         const float v = tmp[q * 8 + j];
@@ -2151,7 +2424,7 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
 #endif
             if (TK) {
                 for (q = 0; q < pn; q++) {
-                    const unsigned frame = o->frame + f0 + q;
+                    const unsigned frame = VOCR_FRAME(f0 + q);
                     float *tv = ex->topk_logit + (size_t)frame * TK;
                     uint16_t *tc = ex->topk_class + (size_t)frame * TK;
                     if (!ex->logits && nb * 8 + 8 <= N && !head_above(tmp + q * 8, tv[TK - 1])) {
@@ -2182,7 +2455,7 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
                 }
             } else {
                 for (q = 0; q < pn; q++) {
-                    const unsigned frame = o->frame + f0 + q;
+                    const unsigned frame = VOCR_FRAME(f0 + q);
                     if (!(ex && ex->logits) && nb * 8 + 8 <= N && !head_above(tmp + q * 8, bestv[f0 + q])) continue;
                     for (j = 0; j < 8 && nb * 8 + j < N; j++) {
                         const float v = tmp[q * 8 + j];
@@ -2201,6 +2474,10 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
     if (n_lanes && n_lanes == op->cout_pad / 8u) lanes_argmax(lk, li, nf, bestv, besti);
 #endif
     for (f = 0; f < nf; f++, o->frame++) {
+        if (fx && fx[f] != o->frame) { /* frames the gate skipped since the last one: blanks */
+            o->frame = fx[f];
+            o->last = 0;
+        }
         if (ex && ex->best && o->frame < ex->cap_frames) ex->best[o->frame] = (uint16_t)besti[f];
         if (TK && besti[f] && besti[f] != o->last) {
             const float p = topk_conf(ex->topk_logit + (size_t)o->frame * TK, TK);
@@ -2210,8 +2487,395 @@ static void run_head(const vocr_ctx *c, unsigned nf, out_t *o)
         }
         ctc_push(m, o, besti[f]);
     }
+    o->headed += nf;
 }
+#undef VOCR_FRAME
 #undef VOCR_HEAD_STEP
+
+/* The head gate's step, after a tile's last layer appended frames [s0, s1) to the accumulator, the line's
+ * frames a0, a0 + 1, ...: their head input to ex->head_in, and with the gate planned, their scores (to
+ * ex->gate_score). When the run skips (o->fidx), a frame scoring above t leaves the accumulator and reads
+ * as the blank: best 0, its blank logit as the head computes class 0 (its first block on the same input:
+ * mm_i16 on the int16 input in W8I, mm_f32 on the float input with the block's float weights in W8F and
+ * F32; computed only when the caller keeps the top-K, the one place it is read outside W8I), its top-K
+ * [blank logit, -inf, ...] with classes 0. The gate itself computes the same in every mode: layer 1 on the
+ * head input quantised to int16, exactly as a W8I pointwise layer. The frames that stay move down in
+ * order, their line indices in fidx. Returns the accumulator's new fill. The scratch is the head's (free
+ * between a tile's layers and the head), sized for a tile of frames in plan(). */
+static unsigned gate_tile(const vocr_ctx *c, out_t *o, unsigned s0, unsigned s1, unsigned a0)
+{
+    const vocr_model *m = c->model;
+    const vocr_op *head = &m->op[m->n_ops - 1];
+    const vocr_gate *g = &m->gate;
+    const unsigned K = head->k, H = g->hidden, n = s1 - s0, TK = o->topk;
+    vocr_extra *ex = o->ex;
+    float *acc = at(c, c->acc_off);
+    unsigned char *scr = c->arena + c->op[m->n_ops - 1].scr_off;
+    int16_t *qx = (int16_t *)(void *)scr;
+    float *sx = (float *)(void *)(scr + al16((size_t)c->tile * K * 2u));
+    float *hid = (float *)(void *)(scr + al16((size_t)c->tile * K * 2u) + al16((size_t)c->tile * sizeof(float)));
+    /* W8F: the head's first block, dequantised once per tile on the first skipped frame that needs it */
+    float *wf0 = (float *)(void *)(scr + al16((size_t)c->tile * K * 2u) + al16((size_t)c->tile * sizeof(float)) +
+                                   al16((size_t)c->tile * H * sizeof(float)));
+    const float *w0 = c->mode == VOCR_MODE_F32 ? head->w : NULL;
+    uint16_t *fidx = (uint16_t *)(void *)(c->arena + c->fidx_off);
+    unsigned i, j, nb, w = s0;
+    if (ex && ex->head_in)
+        for (i = 0; i < n; i++)
+            if (a0 + i < ex->cap_frames)
+                memcpy(ex->head_in + (size_t)(a0 + i) * K, acc + (size_t)(s0 + i) * K, K * sizeof(float));
+    if (!c->gate || !n) return s1;
+    quant16(acc + (size_t)s0 * K, K, K, n, qx, sx, 0);
+    for (nb = 0; nb < H / 8u; nb++)
+        mm_i16(g->q + (size_t)nb * K * 8u, g->scale + nb * 8u, g->bias + nb * 8u, qx, sx, K, n, hid + nb * 8u, H,
+               NULL, 0, 1);
+    for (i = 0; i < n; i++) {
+        const unsigned a = a0 + i;
+        const float *h = hid + (size_t)i * H;
+        float s = g->b2;
+        for (j = 0; j < H; j++) s = s + g->w2[j] * h[j];
+        if (ex && ex->gate_score && a < ex->cap_frames) ex->gate_score[a] = s;
+        if (!o->fidx) continue;
+        if (s > g->t) {
+            float b8[8];
+            if (c->mode == VOCR_MODE_W8I) {
+                VOCR_MM_I16(m, head->q, head->scale, head->bias, qx + (size_t)i * K, sx + i, K, 1, b8, 8, NULL, 0, 0);
+            } else if (TK) {
+                if (!w0) {
+                    dequant8(head->q, head->scale, K, wf0);
+                    w0 = wf0;
+                }
+                mm_f32(w0, head->bias, acc + (size_t)(s0 + i) * K, K, K, 1, b8, 8, NULL, 0, 0);
+            }
+            if (ex && ex->best && a < ex->cap_frames) ex->best[a] = 0;
+            if (TK) { /* the caller's buffers hold every frame of the line (checked in vocr_run) */
+                float *tv = ex->topk_logit + (size_t)a * TK;
+                uint16_t *tc = ex->topk_class + (size_t)a * TK;
+                tv[0] = b8[0];
+                tc[0] = 0;
+                for (j = 1; j < TK; j++) {
+                    tv[j] = -INFINITY;
+                    tc[j] = 0;
+                }
+                if (ex->blank_logit) ex->blank_logit[a] = b8[0];
+            }
+            o->gated++;
+        } else {
+            if (w != s0 + i) memcpy(acc + (size_t)w * K, acc + (size_t)(s0 + i) * K, K * sizeof(float));
+            fidx[w++] = (uint16_t)a;
+        }
+    }
+    return o->fidx ? w : s1;
+}
+
+/* ---------------------------------------------------------------- the two-level head (VOC2 trailer)
+ *
+ * W8I and W8F (vocr_opts.two_level; an int8 blob). Level 1, the head's blocks [0, l1_blocks), runs on every frame:
+ * the blank and the most frequent classes. The escape (a small MLP on the head's input quantised to int16 as W8I
+ * does, in either mode, level 1's largest non-blank logit and its blank logit) then says which frames also need
+ * level 2, the head's other blocks. Those frames' inputs (quantised in W8I, float in W8F) are packed to the front
+ * and level 2 runs on them as one batch. Each block's logits are the mode's head arithmetic (mm_i16 in W8I,
+ * dequant8 + mm_f32 in W8F, as run_head). A frame's state (first
+ * maximum, top-K, the blank's logit) is updated block by block in class order, so a fired frame gets today's
+ * argmax and top-K bit for bit and the others
+ * the same over the level-1 classes. A block whose 8 logits are none above the frame's threshold (below which no
+ * logit can change its state: the non-blank maximum in level 1, the first maximum in level 2, and the top-K's
+ * last value) is skipped without the per-class loop, as run_head's NEON top-K path does. */
+#ifdef VOCR_NEON
+#define H2_STEP VOCR_HEAD_CHUNK
+#else
+#define H2_STEP 4u
+#endif
+
+/* any of the 8 values above thr (a NaN never is) */
+static int block_above(const float *v8, float thr)
+{
+#ifdef VOCR_NEON
+    const int32x4_t kt = fkey(vdupq_n_f32(thr));
+    const uint32x4_t gt = vorrq_u32(vcgtq_s32(fkey(vld1q_f32(v8)), kt), vcgtq_s32(fkey(vld1q_f32(v8 + 4)), kt));
+    const uint32x2_t g2 = vorr_u32(vget_low_u32(gt), vget_high_u32(gt));
+    return vget_lane_u32(vpmax_u32(g2, g2), 0) != 0;
+#else
+    unsigned j;
+    for (j = 0; j < 8; j++)
+        if (v8[j] > thr) return 1;
+    return 0;
+#endif
+}
+
+/* One block's 8 logits v (classes cls0 + j < N) into a frame's state: its first maximum (bestv, besti), in
+ * level 1 its largest non-blank logit (nbv; NULL in level 2) and the top-K (tv, tc; TK = 0: none). */
+static void h2_update(const float *v, unsigned cls0, unsigned N, float *bestv, uint32_t *besti, float *nbv,
+                      float *tv, uint16_t *tc, unsigned TK)
+{
+    unsigned j;
+    float thr = nbv ? *nbv : *bestv;
+    if (TK && tv[TK - 1] < thr) thr = tv[TK - 1];
+    if (!block_above(v, thr)) return;
+    for (j = 0; j < 8 && cls0 + j < N; j++) {
+        const float x = v[j];
+        if (x > *bestv) {
+            *bestv = x;
+            *besti = cls0 + j;
+        }
+        if (nbv && cls0 + j && x > *nbv) *nbv = x;
+        if (TK && x > tv[TK - 1]) {
+            unsigned p = TK - 1;
+            while (p && x > tv[p - 1]) {
+                tv[p] = tv[p - 1];
+                tc[p] = tc[p - 1];
+                p--;
+            }
+            tv[p] = x;
+            tc[p] = (uint16_t)(cls0 + j);
+        }
+    }
+}
+
+static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
+{
+    const vocr_model *m = c->model;
+    const vocr_2level *tw = &m->two;
+    const unsigned L = m->n_ops, N = m->n_classes;
+    const vocr_op *op = &m->op[L - 1];
+    const unsigned K = op->k, B1 = tw->l1_blocks, NB = op->cout_pad / 8u, H = tw->hidden;
+    /* W8F: level 1 and level 2 are W8F's head rows (dequant8 + mm_f32 on the float input, as run_head), the
+     * escape the same as in W8I (layer 1 on the int16 input); the fired frames' float inputs are packed to
+     * the front of the accumulator, which nothing reads after the head */
+    const int fl = c->mode == VOCR_MODE_W8F;
+    float *x = at(c, c->acc_off);
+    float *bestv = at(c, c->bestv_off), *nbv = at(c, c->nbv_off), *b0v = at(c, c->b0_off);
+    float *hid = at(c, c->hid_off);
+    uint32_t *besti = (uint32_t *)(void *)(c->arena + c->besti_off);
+    uint32_t *fm = (uint32_t *)(void *)(c->arena + c->fmap_off);
+    unsigned char *scr = c->arena + c->op[L - 1].scr_off;
+    int16_t *qx = (int16_t *)(void *)scr;
+    float *sx = (float *)(void *)(scr + al16((size_t)nf * K * 2u));
+    float *wf = (float *)(void *)(scr + al16((size_t)c->acc_frames * K * 2u) + al16((size_t)c->acc_frames * sizeof(float)));
+    vocr_extra *ex = o->ex;
+    const unsigned TK = o->topk;
+    const uint16_t *fx = o->fidx;
+    unsigned f, nb, f0, q, j, nfire = 0;
+    float tmp[H2_STEP * 8];
+/* the line's frame of the batch's frame I (the head gate removes the frames it skips from the batch) */
+#define H2_FRAME(I) (fx ? (unsigned)fx[I] : o->frame + (I))
+    for (f = 0; f < nf; f++) {
+        bestv[f] = -INFINITY;
+        besti[f] = 0;
+        nbv[f] = -INFINITY;
+    }
+    if (TK)
+        for (f = 0; f < nf; f++) {
+            float *tv = ex->topk_logit + (size_t)H2_FRAME(f) * TK;
+            uint16_t *tc = ex->topk_class + (size_t)H2_FRAME(f) * TK;
+            for (j = 0; j < TK; j++) {
+                tv[j] = -INFINITY;
+                tc[j] = 0;
+            }
+        }
+    quant16(x, K, K, nf, qx, sx, 0);
+    /* level 1: every frame */
+    for (nb = 0; nb < B1; nb++) {
+        const float *b = op->bias ? op->bias + nb * 8 : NULL;
+        if (fl) dequant8(op->q + (size_t)nb * K * 8, op->scale + nb * 8, K, wf);
+        for (f0 = 0; f0 < nf; f0 += H2_STEP) {
+            const unsigned pn = umin(H2_STEP, nf - f0);
+            if (fl)
+                mm_f32(wf, b, x + (size_t)f0 * K, K, K, pn, tmp, 8, NULL, 0, 0);
+            else
+                VOCR_MM_I16(c->model, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn, tmp, 8,
+                       NULL, 0, 0);
+            for (q = 0; q < pn; q++) {
+                const unsigned fr = f0 + q, frame = H2_FRAME(fr);
+                float *tv = TK ? ex->topk_logit + (size_t)frame * TK : NULL;
+                uint16_t *tc = TK ? ex->topk_class + (size_t)frame * TK : NULL;
+                if (!nb) {
+                    b0v[fr] = tmp[q * 8];
+                    if (TK && ex->blank_logit) ex->blank_logit[frame] = tmp[q * 8];
+                }
+                h2_update(tmp + q * 8, nb * 8, N, bestv + fr, besti + fr, nbv + fr, tv, tc, TK);
+            }
+        }
+    }
+    /* the escape: layer 1 through the head's integer kernel, then its two level-1 inputs, ReLU and layer 2 */
+    for (nb = 0; nb < H / 8u; nb++)
+        mm_i16(tw->e_q + (size_t)nb * K * 8, tw->e_scale + nb * 8, tw->e_bias + nb * 8, qx, sx, K, nf, hid + nb * 8,
+               H, NULL, 0, 0);
+    for (f = 0; f < nf; f++) {
+        const float *h = hid + (size_t)f * H;
+        float s = tw->e_b2;
+        for (j = 0; j < H; j++) {
+            float a = h[j];
+            a = a + tw->e_wl1[j] * nbv[f];
+            a = a + tw->e_wb0[j] * b0v[f];
+            s = s + tw->e_w2[j] * relu_f(a);
+        }
+        if (ex && ex->esc_score && H2_FRAME(f) < ex->cap_frames) ex->esc_score[H2_FRAME(f)] = s;
+        if (s > tw->t) fm[nfire++] = f;
+    }
+    o->escaped += nfire;
+    /* level 2: the fired frames, packed to the front of the quantised input (forwards: fm[j] >= j), or in W8F
+     * of the float input */
+    if (nfire) {
+        for (j = 0; j < nfire; j++)
+            if (fm[j] != j) {
+                if (fl) {
+                    memcpy(x + (size_t)j * K, x + (size_t)fm[j] * K, K * sizeof(float));
+                } else {
+                    memcpy(qx + (size_t)j * K, qx + (size_t)fm[j] * K, K * sizeof(int16_t));
+                    sx[j] = sx[fm[j]];
+                }
+            }
+        for (nb = B1; nb < NB; nb++) {
+            const float *b = op->bias ? op->bias + nb * 8 : NULL;
+            if (fl) dequant8(op->q + (size_t)nb * K * 8, op->scale + nb * 8, K, wf);
+            for (f0 = 0; f0 < nfire; f0 += H2_STEP) {
+                const unsigned pn = umin(H2_STEP, nfire - f0);
+                if (fl)
+                    mm_f32(wf, b, x + (size_t)f0 * K, K, K, pn, tmp, 8, NULL, 0, 0);
+                else
+                    VOCR_MM_I16(c->model, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn,
+                           tmp, 8, NULL, 0, 0);
+                for (q = 0; q < pn; q++) {
+                    const unsigned fr = fm[f0 + q], frame = H2_FRAME(fr);
+                    h2_update(tmp + q * 8, nb * 8, N, bestv + fr, besti + fr, NULL,
+                              TK ? ex->topk_logit + (size_t)frame * TK : NULL,
+                              TK ? ex->topk_class + (size_t)frame * TK : NULL, TK);
+                }
+            }
+        }
+    }
+    for (f = 0; f < nf; f++, o->frame++) {
+        if (fx && fx[f] != o->frame) { /* frames the gate skipped since the last one: blanks */
+            o->frame = fx[f];
+            o->last = 0;
+        }
+        if (ex && ex->best && o->frame < ex->cap_frames) ex->best[o->frame] = (uint16_t)besti[f];
+        if (TK && besti[f] && besti[f] != o->last) {
+            const float p = topk_conf(ex->topk_logit + (size_t)o->frame * TK, TK);
+            if (!o->conf_n || p < o->conf_min) o->conf_min = p;
+            o->conf_sum += p;
+            o->conf_n++;
+        }
+        ctc_push(m, o, besti[f]);
+    }
+    o->headed += nf;
+#undef H2_FRAME
+}
+#undef H2_STEP
+
+/* ---------------------------------------------------------------- the attention op (docs/vocr6-attn.md)
+ *
+ * After the tiles, the line buffer holds z, every frame's bottleneck output (d floats). attn_line turns it into
+ * z' = z + O(concat_h softmax(Q_h K_h^T) V_h) in place, in chunks of P frames (the head batch):
+ *  1. K and V of every frame, from the QKV matrix's K and V rows in the blob's mode. K is stored per head as blocks of
+ *     8 keys, [Tp / 8][dh][8], so that a block's 8 scores are one mm_f32 block (the keys are its 8 "outputs"); V as
+ *     blocks of 8 channels, [dim / 8][Tp][8], the "weights" of the weighted sums.
+ *  2. per chunk of queries: Q (the matrix's Q rows, 1 / sqrt(dh) folded in), then per head the scores of the line's
+ *     T keys (mm_f32: 0 + Q[0] K[0] + Q[1] K[1] + ...), softmax_row, and the weighted sums of V over the T keys in
+ *     order (mm_f32); then O and the residual (z' = O(A) + z) in the blob's mode, over the chunk's own z, which no
+ *     later chunk reads (their K and V are in 1).
+ * The scores, the softmax and the weighted sums are float32 in every mode; only the projections follow it. Each value
+ * is computed in a fixed order whatever P, the tile or the build (scalar, NEON, VFPU), so the logits are the same
+ * for every tile and batch size; runtime/tests/vocr_ref.py attn_exact is the bit-exact twin. */
+
+/* softmax over a row's first T values, in place: the first maximum, e = exp_neg(s - max) (in [e^-30, 1]),
+ * sum = 0 + e_0 + e_1 + ..., then e * (1 / sum). */
+static void softmax_row(float *s, unsigned T)
+{
+    float mx = s[0], sum = 0.0f, inv;
+    unsigned k;
+    for (k = 1; k < T; k++)
+        if (s[k] > mx) mx = s[k];
+    for (k = 0; k < T; k++) {
+        s[k] = exp_neg(s[k] - mx);
+        sum = sum + s[k];
+    }
+    inv = 1.0f / sum;
+    for (k = 0; k < T; k++) s[k] = s[k] * inv;
+}
+
+/* block nb (8 outputs) of a matrix ([rows / 8][K][8]: w float, or q int8 with scales; bias [rows]) on P positions of
+ * x (row stride xs) into y (row stride ys), + res, in the context's mode: as run_pw does a pointwise layer's, with x
+ * already quantised to qx / sx (W8I) and wf one dequantised block (W8F) */
+static void mat_block(const vocr_ctx *c, const float *w, const int8_t *q, const float *scale, const float *bias,
+                      unsigned nb, unsigned K, const float *x, size_t xs, const int16_t *qx, const float *sx,
+                      unsigned P, float *y, size_t ys, const float *res, size_t rs, float *wf)
+{
+    const size_t wo = (size_t)nb * K * 8u;
+    if (c->mode == VOCR_MODE_F32) {
+        mm_f32(w + wo, bias + nb * 8u, x, xs, K, P, y, ys, res, rs, 0);
+    } else if (c->mode == VOCR_MODE_W8F) {
+        dequant8(q + wo, scale + nb * 8u, K, wf);
+        mm_f32(wf, bias + nb * 8u, x, xs, K, P, y, ys, res, rs, 0);
+    } else {
+        mm_i16(q + wo, scale + nb * 8u, bias + nb * 8u, qx, sx, K, P, y, ys, res, rs, 0);
+    }
+}
+
+static int cancelled(vocr_extra *ex) { return ex && ex->cancel && ex->cancel(ex->user); }
+
+static int attn_line(const vocr_ctx *c, unsigned T, vocr_extra *ex)
+{
+    const vocr_model *m = c->model;
+    const vocr_op *op = &m->op[c->attn];
+    const vocr_attn *a = &m->attn;
+    const unsigned d = op->cin, da = a->dim, nh = a->heads, dh = da / nh, NB = da / 8u, P = c->head;
+    const unsigned tp = c->att_tp, kmax = d > da ? d : da, kblocks = (T + 7u) / 8u;
+    float *z = at(c, c->line_off), *kp = at(c, c->kp_off), *vp = at(c, c->vp_off);
+    float *qc = at(c, c->qc_off), *ac = at(c, c->ac_off), *sc = at(c, c->sc_off);
+    unsigned char *scr = c->arena + c->as_off;
+    int16_t *qx = (int16_t *)(void *)scr;
+    float *sx = (float *)(void *)(scr + al16((size_t)P * kmax * 2u));
+    float *wf = (float *)(void *)scr;
+    unsigned t0, n, h, cb, p, j;
+    /* the last key block's lanes past the line's end: zero keys (their scores are computed, never read) */
+    if (T & 7u)
+        for (h = 0; h < nh; h++)
+            for (j = 0; j < dh; j++)
+                for (p = T & 7u; p < 8u; p++) kp[(((size_t)h * (tp / 8u) + T / 8u) * dh + j) * 8u + p] = 0.0f;
+    for (t0 = 0; t0 < T; t0 += P) { /* 1. K and V of every frame */
+        const float *zc = z + (size_t)t0 * d;
+        n = umin(P, T - t0);
+        if (cancelled(ex)) return VOCR_E_CANCELLED;
+        if (c->mode == VOCR_MODE_W8I) quant16(zc, d, d, n, qx, sx, 0);
+        for (cb = 0; cb < NB; cb++) {
+            const unsigned h0 = cb * 8u / dh, j0 = cb * 8u - h0 * dh;
+            mat_block(c, op->w, op->q, op->scale, op->bias, NB + cb, d, zc, d, qx, sx, n, qc, 8, NULL, 0, wf);
+            for (p = 0; p < n; p++) { /* K channels j0 .. j0 + 7 of head h0, key t0 + p */
+                const unsigned t = t0 + p;
+                float *dst = kp + (((size_t)h0 * (tp / 8u) + t / 8u) * dh + j0) * 8u + t % 8u;
+                for (j = 0; j < 8u; j++) dst[(size_t)j * 8u] = qc[p * 8u + j];
+            }
+            mat_block(c, op->w, op->q, op->scale, op->bias, 2u * NB + cb, d, zc, d, qx, sx, n,
+                      vp + ((size_t)cb * tp + t0) * 8u, 8, NULL, 0, wf);
+        }
+    }
+    for (t0 = 0; t0 < T; t0 += P) { /* 2. the queries, chunk by chunk */
+        float *zc = z + (size_t)t0 * d;
+        n = umin(P, T - t0);
+        if (cancelled(ex)) return VOCR_E_CANCELLED;
+        if (c->mode == VOCR_MODE_W8I) quant16(zc, d, d, n, qx, sx, 0);
+        for (cb = 0; cb < NB; cb++)
+            mat_block(c, op->w, op->q, op->scale, op->bias, cb, d, zc, d, qx, sx, n, qc + cb * 8u, da, NULL, 0, wf);
+        VOCR_MARK(VOCR_PROF_ATTN);
+        for (h = 0; h < nh; h++) {
+            const float *kh = kp + (size_t)h * (tp / 8u) * dh * 8u;
+            unsigned kb;
+            for (kb = 0; kb < kblocks; kb++)
+                mm_f32(kh + (size_t)kb * dh * 8u, NULL, qc + h * dh, da, dh, n, sc + kb * 8u, tp, NULL, 0, 0);
+            for (p = 0; p < n; p++) softmax_row(sc + (size_t)p * tp, T);
+            for (cb = h * dh / 8u; cb < (h + 1u) * dh / 8u; cb++)
+                mm_f32(vp + (size_t)cb * tp * 8u, NULL, sc, tp, T, n, ac + cb * 8u, da, NULL, 0, 0);
+        }
+        VOCR_MARK(c->attn);
+        if (c->mode == VOCR_MODE_W8I) quant16(ac, da, da, n, qx, sx, 0);
+        for (cb = 0; cb < d / 8u; cb++)
+            mat_block(c, a->o_w, a->o_q, a->o_scale, a->o_bias, cb, da, ac, da, qx, sx, n, zc + cb * 8u, d,
+                      zc + cb * 8u, d, wf);
+    }
+    return VOCR_OK;
+}
 
 /* Keep the last `halo` columns of a ring as its first ones. The ranges can overlap
  * (fewer new columns than halo), so copy forwards: the destination is below the source. */
@@ -2241,8 +2905,8 @@ static void step_op(const vocr_ctx *c, unsigned i, long j0, unsigned n, unsigned
     if (j0 < 0) t0 = (unsigned)(-j0) < n ? (unsigned)(-j0) : n;
     if (j0 + (long)n > (long)wout) t1 = (long)wout > j0 ? (unsigned)((long)wout - j0) : 0u;
     if (t1 < t0) t1 = t0;
-    if (p->dst == DST_ACC) {
-        out = at(c, c->acc_off) + (size_t)*acc_fill * oc;
+    if (p->dst == DST_ACC || p->dst == DST_LINE) { /* the head's accumulator, or the attention's line of z */
+        out = at(c, p->dst == DST_ACC ? c->acc_off : c->line_off) + (size_t)*acc_fill * oc;
         dst = NULL;
         *acc_fill += t1 - t0;
     } else {
@@ -2280,14 +2944,16 @@ int vocr_run(vocr_ctx *c, const vocr_image *img, char *text, size_t text_cap, vo
     const vocr_model *m;
     line_t ln;
     out_t o;
-    unsigned L, S, f, i, u, T, wout[VOCR_MAX_OPS], acc_fill = 0, n_front;
+    unsigned L, S, f, i, u, T, wout[VOCR_MAX_OPS], acc_fill = 0, n_front, produced = 0;
     long k, ntiles;
-    int rc;
+    int rc, hook, two;
     if (!c || !c->arena || !c->model || !text || !text_cap) return VOCR_E_ARG;
     text[0] = 0;
     rc = check_image(img);
     if (rc) return rc;
     m = c->model;
+    /* the two-level head, unless the caller wants every logit of every frame or a full read (ungated) */
+    two = c->two_level && !(ex && (ex->logits || ex->ungated));
     L = m->n_ops;
     S = m->stride;
     f = c->front;
@@ -2302,6 +2968,8 @@ int vocr_run(vocr_ctx *c, const vocr_image *img, char *text, size_t text_cap, vo
         ex->width = ln.nw;
         ex->frames = T;
         ex->chars = 0;
+        ex->gated = 0;
+        ex->escaped = 0;
         if (ex->topk) {
             if (ex->topk > VOCR_TOPK_MAX || ex->topk > m->n_classes || !ex->topk_logit ||
                 !ex->topk_class || ex->cap_frames < T)
@@ -2310,12 +2978,20 @@ int vocr_run(vocr_ctx *c, const vocr_image *img, char *text, size_t text_cap, vo
             ex->conf_min = ex->conf_mean = 1.0f;
         }
     }
+    /* the head gate: skip frames unless the run asks for every logit or for no skipping; its step runs per
+     * tile when the gate is planned or the head's input is asked for */
+    if (c->gate == VOCR_HEAD_GATE_ON && !(ex && (ex->logits || ex->ungated)))
+        o.fidx = (const uint16_t *)(const void *)(c->arena + c->fidx_off);
+    hook = c->gate || (ex && ex->head_in);
     for (i = 0, u = ln.padded; i < L; i++) wout[i] = u /= m->op[i].sw;
     VOCR_MARK(VOCR_PROF_RUN);
     memset(c->arena + c->ring_off, 0, c->ring_end - c->ring_off);
     n_front = c->op[f].n_tile;
     ntiles = ((long)T + c->op[L - 1].lag + (long)c->tile - 1) / (long)c->tile;
     for (k = 0; k < ntiles; k++) {
+        /* the frames this tile appends, from its first op on: a head right after the front's last op (no
+         * frame-row layer between them) has the front append them (audit-head-gate F1) */
+        const unsigned s0 = acc_fill, a0 = produced;
         if (ex && ex->cancel && ex->cancel(ex->user)) {
             text[0] = 0;
             return VOCR_E_CANCELLED;
@@ -2333,31 +3009,87 @@ int vocr_run(vocr_ctx *c, const vocr_image *img, char *text, size_t text_cap, vo
                         i == f ? u : 0u, &acc_fill);
             }
         }
-        for (i = f + 1; i + 1 < L; i++) {
+        for (i = f + 1; i + 1 + (c->attn ? 1u : 0u) < L; i++) {
             VOCR_MARK(i);
-            step_op(c, i, k * (long)c->op[i].n_tile - c->op[i].lag, c->op[i].n_tile, wout[i], 0u,
-                    &acc_fill);
+            step_op(c, i, k * (long)c->op[i].n_tile - c->op[i].lag, c->op[i].n_tile, wout[i], 0u, &acc_fill);
+        }
+        if (c->attn) { /* the frames went to the line of z (acc_fill counts them); the attention and the head
+                        * run once the line is complete */
+            VOCR_MARK(VOCR_PROF_RUN);
+            continue;
+        }
+        produced += acc_fill - s0;
+        if (hook && acc_fill > s0) {
+            VOCR_MARK(VOCR_PROF_GATE);
+            acc_fill = gate_tile(c, &o, s0, acc_fill, a0);
         }
         if (acc_fill >= c->head) {
             VOCR_MARK(L - 1);
-            run_head(c, acc_fill, &o);
+            if (two) run_head2(c, acc_fill, &o);
+            else run_head(c, acc_fill, &o);
             acc_fill = 0;
+        }
+        VOCR_MARK(VOCR_PROF_RUN);
+    }
+    if (c->attn) { /* the attention over the line (z -> z' in place), then the head over z' as the tiles feed it */
+        const unsigned K = m->op[L - 1].k;
+        const float *zl = at(c, c->line_off);
+        float *acc = at(c, c->acc_off);
+        unsigned t0;
+        if (acc_fill != T) {
+            text[0] = 0;
+            return VOCR_E_FORMAT; /* cannot happen for a validated blob */
+        }
+        VOCR_MARK(c->attn);
+        rc = attn_line(c, T, ex);
+        if (rc) {
+            text[0] = 0;
+            return rc;
+        }
+        acc_fill = 0;
+        for (t0 = 0; t0 < T; t0 += c->tile) {
+            const unsigned n = umin(c->tile, T - t0), s0 = acc_fill, a0 = produced;
+            VOCR_MARK(VOCR_PROF_RUN);
+            if (cancelled(ex)) {
+                text[0] = 0;
+                return VOCR_E_CANCELLED;
+            }
+            memcpy(acc + (size_t)acc_fill * K, zl + (size_t)t0 * K, (size_t)n * K * sizeof(float));
+            acc_fill += n;
+            produced += n;
+            if (hook) {
+                VOCR_MARK(VOCR_PROF_GATE);
+                acc_fill = gate_tile(c, &o, s0, acc_fill, a0);
+            }
+            if (acc_fill >= c->head) {
+                VOCR_MARK(L - 1);
+                if (two) run_head2(c, acc_fill, &o);
+                else run_head(c, acc_fill, &o);
+                acc_fill = 0;
+            }
         }
         VOCR_MARK(VOCR_PROF_RUN);
     }
     if (acc_fill) {
         VOCR_MARK(L - 1);
-        run_head(c, acc_fill, &o);
+        if (two) run_head2(c, acc_fill, &o);
+        else run_head(c, acc_fill, &o);
         VOCR_MARK(VOCR_PROF_RUN);
+    }
+    if (o.fidx && o.frame < produced) { /* the line ends in frames the gate skipped */
+        o.frame = produced;
+        o.last = 0;
     }
     if (ex) {
         ex->chars = o.chars;
+        ex->gated = o.gated;
+        ex->escaped = o.escaped;
         if (o.conf_n) {
             ex->conf_min = o.conf_min;
             ex->conf_mean = o.conf_sum / (float)o.conf_n;
         }
     }
-    if (o.frame != T) {
+    if (o.frame != T || produced != T || o.headed + o.gated != T) {
         text[0] = 0;
         return VOCR_E_FORMAT; /* cannot happen for a validated blob */
     }
@@ -2383,6 +3115,7 @@ int vocr_pack_simd32(vocr_model *m)
         const vocr_op *op = &m->op[i];
         const unsigned K = op->k;
         if (!op->q) continue;
+        if (m->attn.dim && i + 2u == m->n_ops) continue; /* the attention op: read by mat_block's mm_i16 */
         for (nb = 0; nb < op->cout_pad / 8u; nb++) {
             int8_t *w = (int8_t *)(void *)(uintptr_t)(op->q + (size_t)nb * K * 8);
             for (k = 0; k + 2 <= K; k += 2) {

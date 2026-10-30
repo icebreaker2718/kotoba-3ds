@@ -35,6 +35,13 @@ std::string bmpFromRGB(const uint8_t *rgb, unsigned w, unsigned h);
 // column bottom to top), packed as R, G, B (picBytes 3) or RGB565 (picBytes 2, when both
 // screens are kept). n pixels of one column at a time.
 void framebufferColumnToPicture(const uint8_t *fb, unsigned n, int format, unsigned bpp, unsigned picBytes, uint8_t *pic);
+
+// A glyph's alphas blended into one column of a 16-bit framebuffer (RGB565, RGB5A1, RGBA4): n
+// pixels from px, each `step` bytes from the last (negative: upwards), the alphas `alphaStep`
+// apart. The same pixels as decoding, mixing by alpha / 255 and encoding each one; the format
+// is chosen once.
+void blendColumn16(uint8_t *px, int step, const uint8_t *alpha, int alphaStep, unsigned n, int format, uint8_t r,
+                   uint8_t g, uint8_t b);
 // Back to the framebuffer: tone 0 as it was, 1 dimmed to ~19% (behind the lookup), 2 to 50%
 // (see-through); pixels from shadeFrom on (the screen's top rows) also darkened, c * keep >> 8.
 void pictureColumnToFramebuffer(const uint8_t *pic, unsigned n, unsigned picBytes, int tone, unsigned shadeFrom,
