@@ -1,13 +1,12 @@
 # Changelog
 
-What changed in each release of Kotoba3DS, newest first. Download the latest from the
+## 1.1.0
+
+Thanks you for using kotoba3ds! This is the changelog for the newest release, you can download it from the
 [Releases page](https://github.com/icebreaker2718/kotoba-3ds/releases/latest); the version shows
 in Luma's plugin loader. Updating from an earlier version? See [UPDATING.md](UPDATING.md).
 
-## 1.1.0
-
-This release needs the new OCR models: unzip the new `Kotoba3DS-ocr-model.zip` to the root of
-your SD card (see [UPDATING.md](UPDATING.md)).
+This release makes use of the new OCR models from bee-san's vita-ocr project. Many thanks!! check out the [Rubi for Vita](https://github.com/bee-san/Rubi_for_vita) project if you haven't already!
 
 ### A newer, faster OCR model (VOCR6)
 
