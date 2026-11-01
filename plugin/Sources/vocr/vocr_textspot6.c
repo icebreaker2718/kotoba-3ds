@@ -1171,6 +1171,7 @@ typedef struct {
     unsigned ncand, ctrunc;
     unsigned char *grp;         /* the blocks' scratch (Group): the arena's base, or (a VTMS network) the stack's */
     /* a VTMS network */
+    const vocr_textspot6_par *par;   /* Kotoba3DS: a team for the 3x3 layers' rows, or NULL */
     unsigned char *stack;       /* the slots' stack */
     uint32_t *slot_off;         /* each slot's offset from it */
     int8_t *f8;                 /* map 0's slot */
@@ -2112,24 +2113,34 @@ static void delivered(Net *t, unsigned next, unsigned i)
     }
 }
 
-/* Output row next_out of the 3x3 layer l, through the 1x1 layers after it, BLK pixels at a time. */
-static void produce(Net *t, unsigned l)
-{
-    const vocr_textspot_layer *L = &t->m->layers[l];
-    Run *r = &t->run[l];
-    unsigned s = L->stride, d = L->dil, nx = r->next, i = r->next_out, ky, j0;
+/* One output row's work, shared by its blocks (Kotoba3DS: a block is a team's item) */
+typedef struct {
+    const Net *t;
+    const vocr_textspot_layer *L;
+    const Run *r;
+    unsigned l, s, d, nx;
     const int8_t *rows[3];
     int valid[3];
-    const Chan *ch = t->chan + r->chan;
-    int32_t lo = L->relu ? 0 : -128;
-    int8_t *dst = dest_row(t, nx), *blk = t->tmp;
-    size_t ds = dest_stride(t, nx), bs = (size_t)BLK * t->maxch;
-    for (ky = 0; ky < 3u; ky++) {             /* input row i s + (ky - 1) d; the centre one always exists */
-        unsigned y = i * s + ky * d;
-        valid[ky] = y >= d && y - d < r->h_in;
-        rows[ky] = ring_row(t, l, valid[ky] ? y - d : i * s);
-    }
-    for (j0 = 0; j0 < r->w_out; j0 += BLK) {
+    const Chan *ch;
+    int32_t lo;
+    int8_t *dst;
+    size_t ds, bs;
+} RowJob;
+
+/* Block j0 of the row into its columns of dst, blk: BLK x maxch x 3 bytes of scratch */
+static void row_block(const RowJob *jb, unsigned j0, int8_t *blk)
+{
+    const Net *t = jb->t;
+    const vocr_textspot_layer *L = jb->L;
+    const Run *r = jb->r;
+    const unsigned l = jb->l, s = jb->s, d = jb->d, nx = jb->nx;
+    const int8_t *const *rows = jb->rows;
+    const int *valid = jb->valid;
+    const Chan *ch = jb->ch;
+    const int32_t lo = jb->lo;
+    int8_t *dst = jb->dst;
+    const size_t ds = jb->ds, bs = jb->bs;
+    {
         unsigned n = min_u(BLK, r->w_out - j0);
         int8_t *o = nx == l + 1u ? dst + j0 : blk;
 #if TS_SIMD32
@@ -2146,8 +2157,48 @@ static void produce(Net *t, unsigned l)
                         nx == l + 1u ? ds : BLK, nx == l + 1u ? n : BLK);
         if (nx != l + 1u) chain(t, l + 1u, nx, blk, blk + bs, blk + 2u * bs, dst + j0, ds, n);
     }
+}
+
+static void row_item(void *ctx, unsigned i, unsigned worker)
+{
+    const RowJob *jb = (const RowJob *)ctx;
+    const vocr_textspot6_par *par = jb->t->par;
+    int8_t *blk = worker && par && worker < par->workers && par->tmp[worker] ? (int8_t *)par->tmp[worker] : jb->t->tmp;
+    row_block(jb, i * BLK, blk);
+}
+
+/* Output row next_out of the 3x3 layer l, through the 1x1 layers after it, BLK pixels at a time (with a team,
+ * its blocks shared out). */
+static void produce(Net *t, unsigned l)
+{
+    const vocr_textspot_layer *L = &t->m->layers[l];
+    Run *r = &t->run[l];
+    unsigned i = r->next_out, ky, j0, nb;
+    RowJob jb;
+    jb.t = t;
+    jb.L = L;
+    jb.r = r;
+    jb.l = l;
+    jb.s = L->stride;
+    jb.d = L->dil;
+    jb.nx = r->next;
+    jb.ch = t->chan + r->chan;
+    jb.lo = L->relu ? 0 : -128;
+    jb.dst = dest_row(t, jb.nx);
+    jb.ds = dest_stride(t, jb.nx);
+    jb.bs = (size_t)BLK * t->maxch;
+    for (ky = 0; ky < 3u; ky++) {             /* input row i s + (ky - 1) d; the centre one always exists */
+        unsigned y = i * jb.s + ky * jb.d;
+        jb.valid[ky] = y >= jb.d && y - jb.d < r->h_in;
+        jb.rows[ky] = ring_row(t, l, jb.valid[ky] ? y - jb.d : i * jb.s);
+    }
+    nb = (r->w_out + BLK - 1u) / BLK;
+    if (t->par && t->par->workers > 1u && t->par->for_each && nb > 1u && t->maxch <= 64u)
+        t->par->for_each(t->par->team, nb, row_item, &jb);
+    else
+        for (j0 = 0; j0 < r->w_out; j0 += BLK) row_block(&jb, j0, t->tmp);
     r->next_out++;
-    delivered(t, nx, i);
+    delivered(t, jb.nx, i);
 }
 
 static int producible(const Net *t, unsigned l)
@@ -3317,13 +3368,15 @@ static void clear(VocrTextspot6Set *out)
 }
 
 static int spot(const vocr_textspot6 *m, const Src *s, unsigned fw, unsigned fh, unsigned bpp, unsigned flags,
-                void *arena, size_t arena_bytes, VocrTextspot6Set *out, vocr_textspot_map_row hook, void *user)
+                void *arena, size_t arena_bytes, VocrTextspot6Set *out, vocr_textspot_map_row hook, void *user,
+                const vocr_textspot6_par *par)
 {
     Plan p;
     Net t;
     unsigned y, k, force = forced(flags);
     int rc;
     clear(out);
+    t.par = NULL;
     if (!loaded(m) || !side_ok(fw, fh) || (bpp != VOCR_LINES_GREY && bpp != VOCR_LINES_RGBA) || !arena ||
         (flags & ~VOCR_TEXTSPOT6_FLAGS) || force == 3u)
         return VOCR_LINES_E_ARG;
@@ -3350,6 +3403,7 @@ static int spot(const vocr_textspot6 *m, const Src *s, unsigned fw, unsigned fh,
         t.height = p.f == 2u ? (fh + 1u) / 2u : fh;
         t.hook = hook;
         t.user = user;
+        t.par = par;
         setup(&t, &p);
         for (y = 0; y < fh; y++) {
             rc = feed(&t, s, y, bpp);
@@ -3389,7 +3443,22 @@ int vocr_textspot6_find(const vocr_textspot6 *m, const VocrLinesImage *im, unsig
     }
     s.im = im;
     s.rows = NULL;
-    return spot(m, &s, im->width, im->height, im->bpp, flags, arena, arena_bytes, out, NULL, NULL);
+    return spot(m, &s, im->width, im->height, im->bpp, flags, arena, arena_bytes, out, NULL, NULL, NULL);
+}
+
+int vocr_textspot6_find_par(const vocr_textspot6 *m, const VocrLinesImage *im, unsigned flags, void *arena,
+                            size_t arena_bytes, VocrTextspot6Set *out, const vocr_textspot6_par *par)
+{
+    Src s;
+    if (!out) return VOCR_LINES_E_ARG;
+    if (!image_ok(im)) {
+        clear(out);
+        return VOCR_LINES_E_ARG;
+    }
+    s.im = im;
+    s.rows = NULL;
+    if (par && (par->workers < 2u || par->workers > VOCR_TEXTSPOT6_PAR_MAX || !par->for_each)) par = NULL;
+    return spot(m, &s, im->width, im->height, im->bpp, flags, arena, arena_bytes, out, NULL, NULL, par);
 }
 
 int vocr_textspot6_find_rows(const vocr_textspot6 *m, const VocrLinesRows *src, unsigned flags, void *arena,
@@ -3403,7 +3472,7 @@ int vocr_textspot6_find_rows(const vocr_textspot6 *m, const VocrLinesRows *src, 
     }
     s.im = NULL;
     s.rows = src;
-    return spot(m, &s, src->width, src->height, src->bpp, flags, arena, arena_bytes, out, NULL, NULL);
+    return spot(m, &s, src->width, src->height, src->bpp, flags, arena, arena_bytes, out, NULL, NULL, NULL);
 }
 
 int vocr_textspot6_maps(const vocr_textspot6 *m, const VocrLinesImage *im, unsigned flags, void *arena,
@@ -3415,5 +3484,5 @@ int vocr_textspot6_maps(const vocr_textspot6 *m, const VocrLinesImage *im, unsig
     s.im = im;
     s.rows = NULL;
     return spot(m, &s, im->width, im->height, im->bpp, flags | VOCR_TEXTSPOT_NO_DARK, arena, arena_bytes, &out, row,
-                user);
+                user, NULL);
 }

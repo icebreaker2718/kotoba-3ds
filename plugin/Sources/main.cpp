@@ -1538,6 +1538,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     ReservePictures();  // kept from the first read on, beside the model
     const bool spot = !g_fastMode && LoadSpotter();
+    if (spot) g_spotter.setParallel(OcrWorkers(), RunOnCores);  // its rows on every core (the same boxes)
     LoadAreas();
     u64 t1 = osGetTime();
     const u32 largestBefore = LargestFreeKB();  // for the log: room for the read's buffers?

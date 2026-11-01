@@ -198,6 +198,22 @@ size_t vocr_textspot6_arena_bytes_flags(const vocr_textspot6 *m, unsigned max_wi
  * VOCR_LINES_OK, VOCR_LINES_E_ARG (NULL pointer, unloaded model, bad format, stride or flags (both SCALE flags), a
  * zero side or one over VOCR_TEXTSPOT_MAX_SIDE) or VOCR_LINES_E_ARENA; on an error out->count, block_count,
  * truncated and presence are 0 and pick -1. The arena is scratch only. */
+/* Kotoba3DS: the 3x3 layers' rows shared out over several threads. for_each(team, n, item, ctx) must run
+ * item(ctx, i, worker) once for every i < n (each on any of the team's threads, worker = that thread's index <
+ * workers) and return when all have finished. Each output row's BLK-pixel blocks are independent (they read the
+ * layer's input rows and write their own columns), so the result is the same as one thread's. tmp[w] (w >= 1):
+ * worker w's scratch, VOCR_TEXTSPOT6_PAR_TMP bytes (worker 0 uses the arena's). */
+#define VOCR_TEXTSPOT6_PAR_MAX 4u
+#define VOCR_TEXTSPOT6_PAR_TMP (3u * 8u * 64u)
+typedef struct {
+    void (*for_each)(void *team, unsigned n, void (*item)(void *ctx, unsigned i, unsigned worker), void *ctx);
+    void *team;
+    unsigned workers;
+    signed char *tmp[VOCR_TEXTSPOT6_PAR_MAX];
+} vocr_textspot6_par;
+/* vocr_textspot6_find with its trunk's rows computed by a team (par NULL or one worker: as vocr_textspot6_find) */
+int vocr_textspot6_find_par(const vocr_textspot6 *m, const VocrLinesImage *im, unsigned flags, void *arena,
+                            size_t arena_bytes, VocrTextspot6Set *out, const vocr_textspot6_par *par);
 int vocr_textspot6_find(const vocr_textspot6 *m, const VocrLinesImage *im, unsigned flags, void *arena,
                         size_t arena_bytes, VocrTextspot6Set *out);
 
