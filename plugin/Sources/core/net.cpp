@@ -22,19 +22,36 @@ namespace kt {
 
 #ifdef __3DS__
 static u32 *g_socBuf = nullptr;  // allocated by netStart, freed by netStop (never at exit)
+static u32 g_socSize = 0;
 static bool g_socUp = false;
-static const u32 kSocBufSize = 0x80000;
+// Largest first. After a long session the plugin's heap is in pieces: ~1 MB free but no single
+// 512 KB page-aligned block, which made every "Make Anki cards" fail until the game restarted.
+// One connection at a time needs far less than 512 KB, so smaller blocks are tried before giving up.
+static const u32 kSocBufSizes[] = {0x80000, 0x40000, 0x20000};
 static int closeSock(int s) { return closesocket(s); }
 #else
 static int closeSock(int s) { return close(s); }
 #endif
 
+uint32_t netBufferSize() {
+#ifdef __3DS__
+    return g_socUp ? g_socSize : 0;
+#else
+    return 0;
+#endif
+}
+
 bool netStart(std::string &error) {
 #ifdef __3DS__
     if (g_socUp) return true;
-    if (!g_socBuf) g_socBuf = (u32 *)memalign(0x1000, kSocBufSize);
-    if (!g_socBuf) { error = "not enough memory for networking"; return false; }
-    Result r = socInit(g_socBuf, kSocBufSize);
+    if (!g_socBuf)
+        for (u32 size : kSocBufSizes)
+            if ((g_socBuf = (u32 *)memalign(0x1000, size))) { g_socSize = size; break; }
+    if (!g_socBuf) {
+        error = "not enough memory for networking.\nRestart the game to free it; your saved words are kept.";
+        return false;
+    }
+    Result r = socInit(g_socBuf, g_socSize);
     if (R_FAILED(r)) {
         char buf[200];
         if ((u32)r == 0xE0A01BF5)  // kernel: invalid address -> plugin memory isn't PRIVATE
@@ -46,6 +63,7 @@ bool netStart(std::string &error) {
         error = buf;
         free(g_socBuf);
         g_socBuf = nullptr;
+        g_socSize = 0;
         return false;
     }
     g_socUp = true;
@@ -60,9 +78,10 @@ void netStop() {
     if (g_socUp) {
         socExit();
         g_socUp = false;
-        // give the 512 KB back: CTRPF's screenshots need room in the plugin's memory
+        // give the block back: CTRPF's screenshots need room in the plugin's memory
         free(g_socBuf);
         g_socBuf = nullptr;
+        g_socSize = 0;
     }
 #endif
 }

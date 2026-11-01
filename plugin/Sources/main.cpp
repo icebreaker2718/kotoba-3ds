@@ -64,7 +64,6 @@ static const char *const kModeNames[kModes] = {"Read the top screen", "Read the 
 static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
 static bool g_kanjiForm = true;  // saved words in their kanji form (or as the game wrote them)
 static bool g_fastMode = false;  // fast mode: flat-colour text boxes only, no text spotter
-static int g_ocrModel = 0;       // 0 VOCR6 (or VOCR5 if VOCR6 isn't on the SD card), 1 VOCR5
 static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
 enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
 static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
@@ -107,10 +106,10 @@ static bool WriteWholeFile(const std::string &path, const std::string &data) {
 
 static void SaveSettings() {
     WriteWholeFile(kSettingsPath, Utils::Format("key_top=%lu\nkey_bottom=%lu\nkey_both=%lu\ntext_on_top=%d\nhide=%d\n"
-                                                "kanji_form=%d\nfast=%d\nocr_model=%d\nserver=",
+                                                "kanji_form=%d\nfast=%d\nserver=",
                                                 (unsigned long)g_combo[0], (unsigned long)g_combo[1],
                                                 (unsigned long)g_combo[2], g_textOnTop ? 1 : 0, g_hideMode,
-                                                g_kanjiForm ? 1 : 0, g_fastMode ? 1 : 0, g_ocrModel) +
+                                                g_kanjiForm ? 1 : 0, g_fastMode ? 1 : 0) +
                                       g_server + "\n");
 }
 
@@ -151,8 +150,6 @@ static void LoadSettings() {
     if (!v.empty()) g_kanjiForm = v != "0";
     v = SettingValue(s, "fast");
     if (!v.empty()) g_fastMode = v == "1";
-    v = SettingValue(s, "ocr_model");
-    if (!v.empty()) g_ocrModel = v == "1" ? 1 : 0;
     g_server = SettingValue(s, "server");
 }
 
@@ -234,9 +231,6 @@ static u32 HeapFree() {
 
 // The biggest block malloc can give now (KB): the free memory may be in pieces.
 static uint64_t OsTimeMs() { return osGetTime(); }  // for the reader's timings
-
-// Alpha: also time the current reader and the whole screen on each read, for the log.
-#define KT_READER_BENCH 1
 
 static u32 LargestFreeKB() {
     u32 lo = 0, hi = HeapFree() / 1024;  // never ask for more than there is
@@ -323,34 +317,71 @@ static void ShowBusy(const std::string &line1, const std::string &line2 = "") {
 // ---------------------------------------------------------------------------
 struct Picture {
     bool valid = false;
+    bool owned = false;  // px malloc'd for it (the pool was missing or too small): freed with it
     u32 w = 0, bytes = 3;
-    u8 *px = nullptr;  // malloc'd: short of memory, there is just no picture (no abort)
+    u8 *px = nullptr;  // in g_picPool, or malloc'd; short of memory, there is just no picture (no abort)
 };
 static Picture *g_picPtr[2] = {nullptr, nullptr};
 static Picture &Pic(int i) { return Leaky(g_picPtr[i]); }
 
+// The pictures' memory: one block, taken once while the plugin's memory is still in one piece and
+// kept for the session. Taking ~300 KB and freeing it again on every read stopped working after a
+// long session (no block for it, so no game behind the lookup, nothing for X to show and no
+// screenshot), though as much was free. Room for both screens at 2 bytes a pixel, which is more
+// than the top screen alone at 3; a read's colour copy (ScreenGrey) goes in it first. In use until
+// the screenshot thread is done (FinishScreenshot): only ReadScreens and Settings use it, both after.
+static const size_t kPicPoolBytes = (size_t)(400 + 320) * 240 * 2;  // 345,600 >= 400 * 240 * 3
+static u8 *g_picPool = nullptr;
+
+static void ReservePictures() {
+    static bool tried = false;
+    if (g_picPool || tried) return;
+    tried = true;
+    g_picPool = (u8 *)malloc(kPicPoolBytes);
+    if (!g_picPool)
+        LogOcr(Utils::Format("pictures: no %u KB block to keep for them (heap free %lu KB): taken each read instead",
+                             (unsigned)(kPicPoolBytes / 1024), (unsigned long)(HeapFree() / 1024)));
+}
+
+static void ReleasePicture(Picture &p) {
+    if (p.owned) free(p.px);
+    p.px = nullptr;
+    p.owned = false;
+    p.valid = false;
+}
+
 static void TakePicture(int i, u32 bytes) {  // call while the game is paused and nothing is drawn on it
     Picture &p = Pic(i);
     const Screen &s = ScreenOf(i);
-    p.valid = false;
-    free(p.px);
-    p.px = nullptr;
-    if (s.BytesPerPixel < 2 || s.BytesPerPixel > 4) return;
+    ReleasePicture(p);
+    if (s.BytesPerPixel < 2 || s.BytesPerPixel > 4) {
+        LogOcr(Utils::Format("picture: %s not kept (%u bytes a pixel)", i == 0 ? "top screen" : "touchscreen",
+                             (unsigned)s.BytesPerPixel));
+        return;
+    }
     p.w = ScreenW(i);
     p.bytes = bytes;
-    p.px = (u8 *)malloc((size_t)p.w * 240 * bytes);
-    if (!p.px) return;
+    const size_t at = i == 0 ? 0 : (size_t)400 * 240 * bytes;  // the touchscreen's after the top screen's
+    if (g_picPool && at + (size_t)p.w * 240 * bytes <= kPicPoolBytes) p.px = g_picPool + at;
+    if (!p.px) {  // no pool: a block of its own, or at 2 bytes a pixel if 3 don't fit
+        p.px = (u8 *)malloc((size_t)p.w * 240 * bytes);
+        if (!p.px && bytes == 3) p.px = (u8 *)malloc((size_t)p.w * 240 * (p.bytes = 2));
+        p.owned = p.px != nullptr;
+    }
+    if (!p.px) {
+        LogOcr(Utils::Format("picture: %s not kept: no %u KB block (heap free %lu KB, largest %lu KB)",
+                             i == 0 ? "top screen" : "touchscreen", (unsigned)(p.w * 240 * bytes / 1024),
+                             (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB()));
+        return;
+    }
     for (u32 x = 0; x < p.w; x++)
-        kt::framebufferColumnToPicture(Column(s, x), 240, (int)s.Format, s.BytesPerPixel, bytes, &p.px[(size_t)x * 240 * bytes]);
+        kt::framebufferColumnToPicture(Column(s, x), 240, (int)s.Format, s.BytesPerPixel, p.bytes,
+                                       &p.px[(size_t)x * 240 * p.bytes]);
     p.valid = true;
 }
 
 static void DropPictures() {
-    for (int i = 0; i < 2; i++) {
-        Pic(i).valid = false;
-        free(Pic(i).px);
-        Pic(i).px = nullptr;
-    }
+    for (int i = 0; i < 2; i++) ReleasePicture(Pic(i));
 }
 
 // The kept picture onto screen i's draw buffer: tone 0 as it was, 1 dimmed (behind the lookup),
@@ -510,6 +541,8 @@ static int Ask(const std::string &title, const std::string &question, const std:
 // Saving words
 // ---------------------------------------------------------------------------
 static bool g_readTop = true, g_readBottom = false;  // what the open lookup read
+// The screens that were read all have their picture (else nothing to show behind the lookup).
+static bool PicturesKept() { return (!g_readTop || Pic(0).valid) && (!g_readBottom || Pic(1).valid); }
 
 static void SplitTabs(const std::string &line, std::vector<std::string> &cols) {
     cols.clear();
@@ -658,7 +691,6 @@ static void MarkKnown(kt::LookupView &v) {
 static std::string *g_lookupShotPtr = nullptr;
 #define g_lookupShot Leaky(g_lookupShotPtr)
 static bool g_shotKept = false;  // Start in the lookup: keep its screenshot even with no word saved
-static bool g_benchDiffer = false;  // benchmark build: the readers disagreed on this read
 
 struct ShotJob {
     char path[96];
@@ -702,11 +734,7 @@ static void WriteShot(void *) {
         f.Close();
     }
     free(buf);
-    for (Picture &p : j.pic) {
-        free(p.px);
-        p.px = nullptr;
-        p.valid = false;
-    }
+    for (Picture &p : j.pic) ReleasePicture(p);
     j.ms = (u32)(osGetTime() - t0);
 }
 
@@ -761,6 +789,7 @@ static void WriteScreenshotLater() {
     for (int i = 0; i < 2; i++) {  // the pictures move to the job
         j.pic[i] = Pic(i);
         Pic(i).px = nullptr;
+        Pic(i).owned = false;
         Pic(i).valid = false;
     }
     // its own thread with room on its stack (CTRPF's tasks have 4 KB), below the game's priority so
@@ -801,7 +830,10 @@ static bool SaveWord(const kt::Entry &e, const kt::Result &r, const std::string 
         return false;
     }
     int n = CountSaved();
-    status = "Saved " + (g_kanjiForm ? kt::cardExpressionFor(e, r.matchedKey) : kt::writtenExpressionFor(e, r)) + Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s");
+    status = "Saved " + (g_kanjiForm ? kt::cardExpressionFor(e, r.matchedKey) : kt::writtenExpressionFor(e, r)) +
+             (shot.empty() && (g_readTop || g_readBottom)  // read from the game, but its picture couldn't be kept
+                  ? std::string(" (no screenshot: out of memory)")
+                  : Utils::Format(" (%d word%s saved)", n, n == 1 ? "" : "s"));
     LogOcr(Utils::Format("saved a word in %lu ms", (unsigned long)(osGetTime() - t0)));
     return true;
 }
@@ -830,6 +862,15 @@ static int NextHide(int h) {
     if (g_hideMode == kHideSeeThrough) return h ? 0 : 1;
     if (g_hideMode == kHideHidden) return h ? 0 : 2;
     return (h + 1) % 3;
+}
+
+// X / Hide pressed: without the game's picture there is nothing to uncover, so it says so.
+static void ToggleHide(kt::LookupView &v) {
+    if (g_hide == 0 && !PicturesKept()) {
+        v.setStatus("Can't show the game: there was no memory to keep its picture", kWarn);
+        return;
+    }
+    g_hide = NextHide(g_hide);
 }
 
 static kt::LookupView::Panel PanelFor(int screen) {
@@ -972,7 +1013,7 @@ static void RunLookupView(kt::LookupView &v) {
         u64 t0 = osGetTime();
         if ((down & Key::B) || SleepRequested()) break;
         if (down & Key::A) { SaveOrUndo(v); changed = true; }
-        if (down & Key::X) { g_hide = NextHide(g_hide); changed = true; }
+        if (down & Key::X) { ToggleHide(v); changed = true; }
         if (down & Key::Y) { MarkKnown(v); changed = true; }
         if (down & Key::Start) { KeepScreenshot(v); changed = true; }
         if (down & (Key::L | Key::DPadLeft)) moved |= v.page(-1);
@@ -1008,7 +1049,7 @@ static void RunLookupView(kt::LookupView &v) {
                 moved |= v.tap((int)p.x, (int)p.y, b);
                 if (b == kt::LookupView::kClose) break;
                 if (b == kt::LookupView::kSave) { SaveOrUndo(v); changed = true; }
-                if (b == kt::LookupView::kHide) { g_hide = NextHide(g_hide); changed = true; }
+                if (b == kt::LookupView::kHide) { ToggleHide(v); changed = true; }
             }
         }
         touchWas = touch;
@@ -1257,9 +1298,7 @@ static std::string *g_modelNamePtr = nullptr;  // file the loaded model came fro
 #define g_modelName Leaky(g_modelNamePtr)
 
 static std::string FindModel() {
-    for (const char *n : kModelNames)  // VOCR5 first when it was chosen in the settings
-        if ((g_ocrModel != 1 || !strncmp(n, "VOCR5", 5)) && File::Exists(std::string(kModelDir) + n) == 1) return n;
-    for (const char *n : kModelNames)
+    for (const char *n : kModelNames)  // VOCR6 first; VOCR5 when VOCR6 isn't on the SD card
         if (File::Exists(std::string(kModelDir) + n) == 1) return n;
     return "";
 }
@@ -1361,17 +1400,14 @@ static bool LoadModel(const std::string &name, std::string &error) {
 // it): the text boxes found by their colour, and the grey picture (malloc'd; nullptr on failure).
 static u64 g_boxSearchMs[2] = {0, 0};  // the last ScreenGrey's text-box search, per screen
 
-// The benchmark build's text boxes: both searches on the same picture, timed.
-struct BenchBoxes {
-    std::vector<kt::TextBox> shaded, flat;  // with growing into a gradient (the test build), without (fast mode)
-    u64 shadedMs = 0, flatMs = 0;
-};
-
-static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxes = true, BenchBoxes *bench = nullptr) {
+static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxes = true) {
     const Screen &s = ScreenOf(i);
     const u32 W = ScreenW(i), bpp = s.BytesPerPixel;
     if (bpp < 2 || bpp > 4) return nullptr;
-    uint8_t *rgb = (uint8_t *)malloc((size_t)W * 240 * 3);
+    // the colour copy in the pictures' memory (the pictures are taken after it, from the screens
+    // themselves): no ~300 KB block to find each read, and only that much more while boxes are searched
+    const bool inPool = g_picPool && (size_t)W * 240 * 3 <= kPicPoolBytes;
+    uint8_t *rgb = inPool ? g_picPool : (uint8_t *)malloc((size_t)W * 240 * 3);
     if (!rgb) return nullptr;
     u8 *base = Column(s, 0);
     if (W > 1 && Column(s, 1) - base == (int)(240 * bpp)) {  // columns back to back: in one go
@@ -1386,26 +1422,9 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxe
     boxes.clear();
     if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240, 3, !g_fastMode);
     g_boxSearchMs[i] = osGetTime() - tb;
-    if (bench) {
-        u64 t = osGetTime();
-        bench->shaded = kt::findTextBoxes(rgb, W, 240, 3, true);
-        bench->shadedMs = osGetTime() - t;
-        t = osGetTime();
-        bench->flat = kt::findTextBoxes(rgb, W, 240, 3, false);
-        bench->flatMs = osGetTime() - t;
-    }
     uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
-    free(rgb);
+    if (!inPool) free(rgb);
     return grey;
-}
-
-static std::string FlatText(const std::vector<std::string> &v) {  // one line for the log
-    std::string o;
-    for (const std::string &x : v) {
-        if (!o.empty()) o += " / ";
-        for (char c : x) o += c == '\n' ? '|' : c;
-    }
-    return o;
 }
 
 // One screen read as the settings say: the reading area (if set), the text spotter, or the text
@@ -1419,16 +1438,15 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
         bool ok = false;
         if (crop) {
             for (unsigned y = 0; y < a.h; y++) memcpy(crop + (size_t)y * a.w, grey + (size_t)(a.y + y) * ScreenW(s) + a.x, a.w);
-            if (spot)  // the spotter on the area (its best decode: a region read alone)
-                ok = kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, crop, a.w, a.h, paras, err, LocalProgress);
-            else       // the line finder on the area (what it was made for: a region chosen around the text)
-                ok = kt::localReadScreen(g_localOcr, crop, a.w, a.h, std::vector<kt::TextBox>(), paras, err, LocalProgress);
+            // the line finder on the area, fast mode or not: what it was made for, a region chosen
+            // around the text (as right as the spotter there on the console, ~70 ms quicker)
+            ok = kt::localReadScreen(g_localOcr, crop, a.w, a.h, std::vector<kt::TextBox>(), paras, err, LocalProgress);
             free(crop);
         } else {
             err = "not enough memory for the picture";
         }
-        LogOcr(Utils::Format("area reader (%s): %s %ux%u at %u,%u: %lu ms", spot ? "spotter" : "line finder",
-                             s == 0 ? "top" : "touchscreen", a.w, a.h, a.x, a.y, (unsigned long)(osGetTime() - tc0)));
+        LogOcr(Utils::Format("area reader (line finder): %s %ux%u at %u,%u: %lu ms", s == 0 ? "top" : "touchscreen",
+                             a.w, a.h, a.x, a.y, (unsigned long)(osGetTime() - tc0)));
         return ok;
     }
     if (spot) {
@@ -1449,83 +1467,6 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
     return ok;
 }
 
-#if KT_READER_BENCH
-// The benchmark build: every reader on the screens just read, with each OCR model on the SD card
-// (one in memory at a time: the other is loaded for it, then the one in use again). One log line
-// per reader: "bench: <screen> <model> <reader> <ms> | <text>"; a reader that disagrees with the
-// text shown keeps the screenshot.
-static void BenchAllReaders(const bool screens[2], uint8_t *const grey[2], const BenchBoxes bb[2],
-                            const std::vector<std::string> shown[2], const std::string &inUse) {
-    static unsigned runs = 0;
-    const unsigned rot = runs++;
-    const bool haveSpot = LoadSpotter();
-    std::vector<std::string> models;
-    models.push_back(inUse);
-    for (const char *n : {"VOCR6.2_N_w8g2.vocr", "VOCR5_N_w8.vocr"})
-        if (inUse != n && File::Exists(std::string(kModelDir) + n) == 1) models.push_back(n);
-    const char *const kNames[] = {"test build (shaded boxes)", "fast mode (flat boxes)", "spotter", "area + line finder",
-                                  "area + spotter"};
-    const unsigned kReaders = 5;
-    for (size_t mi = 0; mi < models.size(); mi++) {
-        if (g_modelName != models[mi]) {
-            std::string e;
-            const u64 tl = osGetTime();
-            if (!LoadModel(models[mi], e)) {
-                LogOcr("bench: could not load " + models[mi] + " (" + e + ")");
-                continue;
-            }
-            LogOcr(Utils::Format("bench: %s loaded in %lu ms", models[mi].c_str(), (unsigned long)(osGetTime() - tl)));
-        }
-        const std::string mshort = models[mi].substr(0, models[mi].find('_'));
-        for (int s = 0; s < 2; s++) {
-            if (!screens[s] || !grey[s]) continue;
-            const char *sn = s == 0 ? "top" : "touchscreen";
-            if (s == 0 || mi == 0)
-                LogOcr(Utils::Format("bench: %s box search: shaded %lu ms (%u boxes), flat %lu ms (%u boxes)", sn,
-                                     (unsigned long)bb[s].shadedMs, (unsigned)bb[s].shaded.size(),
-                                     (unsigned long)bb[s].flatMs, (unsigned)bb[s].flat.size()));
-            for (unsigned k = 0; k < kReaders; k++) {
-                const unsigned r = (k + rot) % kReaders;  // the readers take turns going first (a cold cache)
-                if ((r == 2 || r == 4) && !haveSpot) continue;
-                if (r >= 3 && !g_area[s].set) continue;
-                std::vector<std::string> out;
-                std::string e;
-                ShowBusy("Benchmark...", Utils::Format("%s: %s", mshort.c_str(), kNames[r]));
-                const u64 t = osGetTime();
-                if (r == 0) {
-                    kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, bb[s].shaded, out, e);
-                } else if (r == 1) {
-                    kt::localReadScreen(g_localOcr, grey[s], ScreenW(s), 240, bb[s].flat, out, e);
-                } else if (r == 2) {
-                    kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey[s], ScreenW(s), 240, out, e);
-                } else {
-                    const ReadArea &a = g_area[s];
-                    uint8_t *crop = (uint8_t *)malloc((size_t)a.w * a.h);
-                    if (!crop) continue;
-                    for (unsigned y = 0; y < a.h; y++)
-                        memcpy(crop + (size_t)y * a.w, grey[s] + (size_t)(a.y + y) * ScreenW(s) + a.x, a.w);
-                    if (r == 3) kt::localReadScreen(g_localOcr, crop, a.w, a.h, std::vector<kt::TextBox>(), out, e);
-                    else kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, crop, a.w, a.h, out, e);
-                    free(crop);
-                }
-                u64 ms = osGetTime() - t;
-                if (r == 0) ms += bb[s].shadedMs;  // with the reader's own box search
-                if (r == 1) ms += bb[s].flatMs;
-                const bool same = out == shown[s];
-                if (!same) g_benchDiffer = true;
-                LogOcr(Utils::Format("bench: %s %s %s %lu ms%s | ", sn, mshort.c_str(), kNames[r], (unsigned long)ms,
-                                     same ? ", same as shown" : "") +
-                       FlatText(out));
-            }
-        }
-    }
-    if (g_modelName != inUse) {  // the model in use again, for the next read
-        std::string e;
-        if (!LoadModel(inUse, e)) LogOcr("bench: could not load " + inUse + " again (" + e + ")");
-    }
-}
-#endif
-
 // Reads the screens of `mode` -> text blocks (the top screen's first; with the text spotter in its
 // reading order, else each screen's text boxes top to bottom). Call with the game paused and
 // nothing drawn yet.
@@ -1544,6 +1485,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
+    ReservePictures();  // kept from the first read on, beside the model
     const bool spot = !g_fastMode && LoadSpotter();
     LoadAreas();
     u64 t1 = osGetTime();
@@ -1553,10 +1495,10 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     const bool screens[2] = {mode != kReadBottom, mode != kReadTop};
     uint8_t *grey[2] = {nullptr, nullptr};
     std::vector<kt::TextBox> boxes[2];
-    BenchBoxes bb[2];
+    DropPictures();  // the last lookup's (written out by now): their memory is the colour copies' first
     for (int s = 0; s < 2; s++)
         if (screens[s])  // the spotter and an area need no boxes
-            grey[s] = ScreenGrey(s, boxes[s], !g_area[s].set && !spot, KT_READER_BENCH ? &bb[s] : nullptr);
+            grey[s] = ScreenGrey(s, boxes[s], !g_area[s].set && !spot);
     const u64 tBoxes = osGetTime();
     // then the game's screens as they are, for drawing under the lookup and the card's
     // screenshot (after the colour copies above are freed: the pictures take their place): the
@@ -1599,13 +1541,6 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                          (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
                          (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
            first);
-#if KT_READER_BENCH
-    {
-        const u64 tb = osGetTime();
-        BenchAllReaders(screens, grey, bb, shown, name);
-        LogOcr(Utils::Format("bench: all readers %lu ms", (unsigned long)(osGetTime() - tb)));
-    }
-#endif
     for (int s = 0; s < 2; s++) free(grey[s]);
     return any;
 }
@@ -1663,7 +1598,6 @@ static void ReadAndLookUp(int mode) {
     g_readBottom = mode != kReadTop;
     g_lookupShot = "";
     g_shotKept = false;
-    g_benchDiffer = false;
     std::vector<std::string> blocks;
     std::string error;
     if (!OpenDict()) {
@@ -1676,12 +1610,6 @@ static void ReadAndLookUp(int mode) {
     } else {
         g_viewOpenedAt = osGetTime();
         OpenLookup(blocks, g_readBottom && g_textOnTop);
-#if KT_READER_BENCH
-        if (g_benchDiffer && g_lookupShot.empty()) {  // the readers disagreed: keep the screen to replay
-            const std::string shot = SaveScreenshot();
-            if (!shot.empty()) LogOcr("bench: readers disagreed, screenshot kept: " + shot);
-        }
-#endif
     }
     RestoreScreens();
     WriteScreenshotLater();  // the game goes on while it is written
@@ -1695,6 +1623,21 @@ static void ReadAndLookUp(int mode) {
 // ---------------------------------------------------------------------------
 // Anki cards: saved words to tools/ocr_server.py on the PC, all at once from the menu
 // ---------------------------------------------------------------------------
+// kt::netStart, with what the heap looked like in the log: "not enough memory for networking"
+// after a long session came from a heap with room left but none of it in one piece.
+static bool NetStart(std::string &error) {
+    u32 freeKB = HeapFree() / 1024, largestKB = LargestFreeKB();
+    bool ok = kt::netStart(error);
+    if (ok)
+        LogOcr(Utils::Format("net: started with a %lu KB block (heap free %lu KB, largest %lu KB)",
+                             (unsigned long)(kt::netBufferSize() / 1024), (unsigned long)freeKB,
+                             (unsigned long)largestKB));
+    else
+        LogOcr(Utils::Format("net: not started (heap free %lu KB, largest %lu KB): %s", (unsigned long)freeKB,
+                             (unsigned long)largestKB, error.c_str()));
+    return ok;
+}
+
 // Saved address first, then automatic search. Call between netStart()/netStop().
 static bool ResolveServer(std::string &host, int &port, std::string &error) {
     std::string pingErr;
@@ -1775,7 +1718,11 @@ static void MakeCards() {
     DrawMenu(m);
     std::string err, host;
     int port = kPcPort;
-    if (!kt::netStart(err) || !ResolveServer(host, port, err)) {
+    if (!NetStart(err)) {  // nothing to do with the PC: say so, not "start ocr_server.py"
+        Notice("Make Anki cards", "Couldn't start networking: " + err, kCardsHelp);
+        return;
+    }
+    if (!ResolveServer(host, port, err)) {
         kt::netStop();
         Notice("Make Anki cards",
                "Couldn't reach your PC:\n" + err +
@@ -1878,7 +1825,7 @@ static void KnownWordsMenu() {
         g_knownLoaded = false;
         std::string err, host, reply;
         int port = kPcPort;
-        bool ok = kt::netStart(err) && ResolveServer(host, port, err);
+        bool ok = NetStart(err) && ResolveServer(host, port, err);
         if (ok) {
             m.setMessage("Getting the words of your Anki cards from " + g_server + "...\n\n(A big collection takes a moment.)");
             DrawMenu(m);
@@ -2045,7 +1992,7 @@ static void ChoosePc() {
             DrawMenu(m);
             std::string host;
             int port = kPcPort;
-            bool ok = kt::netStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
+            bool ok = NetStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
             kt::netStop();
             if (ok) {
                 g_server = host + Utils::Format(":%d", port);
@@ -2065,7 +2012,7 @@ static void ChoosePc() {
                 } else {
                     g_server = host + Utils::Format(":%d", port);
                     SaveSettings();
-                    bool ok = kt::netStart(err) && kt::netPing(host, port, 2000, err);
+                    bool ok = NetStart(err) && kt::netPing(host, port, 2000, err);
                     kt::netStop();
                     Notice("PC", ok ? "Connected to " + g_server : "Saved " + g_server + ", but it didn't answer:\n" + err);
                 }
@@ -2139,11 +2086,12 @@ static void Settings() {
     kt::MenuView m(Text());
     m.setTitle("Kotoba3DS");
     m.setButtons({" Choose", " Close"});
-    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kFast, kArea, kModel, kLast, kSaved, kCards,
+    enum Row { kKeyTop, kKeyBottom, kKeyBoth, kTextWhere, kHide, kSpelling, kFast, kArea, kLast, kSaved, kCards,
                kKnown, kPc, kHelp, kRows };
     FinishScreenshot();  // "Make Anki cards" may send it
     LoadAreas();
     // the paused game, as it is, for the reading-area editor (before anything is drawn on it)
+    ReservePictures();
     TakePicture(0, 2);
     TakePicture(1, 2);
     struct DropAtEnd { ~DropAtEnd() { DropPictures(); } } dropAtEnd;
@@ -2191,12 +2139,6 @@ static void Settings() {
             "For a game whose text always shows in one place: only that part of the screen is read "
             "(quicker, and nothing else on the screen gets in). Set for this game only, for each "
             "screen.\n\nA: set it on the paused game.";
-        items[kModel].label = "OCR model";
-        items[kModel].value = g_ocrModel == 1 ? "VOCR5" : "VOCR6";
-        items[kModel].help =
-            "The recognizer that reads the text: VOCR6 (newer, quicker) or VOCR5 (the one before). It uses "
-            "the other when the chosen one isn't in SD:/3ds/kotoba3ds/ocr/. Loaded at the next read.\n\n"
-            "A,  or : change.";
         items[kLast].label = "Last lookup";
         items[kLast].dim = g_lastBlocks.empty();
         items[kLast].help = "Opens the text of your last lookup again.";
@@ -2234,9 +2176,6 @@ static void Settings() {
             SaveSettings();
         } else if (row == kFast) {
             g_fastMode = !g_fastMode;
-            SaveSettings();
-        } else if (row == kModel) {
-            g_ocrModel = 1 - g_ocrModel;
             SaveSettings();
         } else if (dir) {
             continue;
@@ -2515,7 +2454,7 @@ void PatchProcess(FwkSettings &settings) {
 
 
 int main(void) {
-    PluginMenu *menu = new PluginMenu("Kotoba3DS", 3, 0, 0,
+    PluginMenu *menu = new PluginMenu("Kotoba3DS", 1, 1, 0,  // the version: as in Kotoba3DS.plgInfo
                                       "In-game Japanese dictionary that reads the screen and saves words for Anki.");
     menu->SynchronizeWithFrame(true);
     menu->OnOpening = OnMenuOpening;  // Select: the plugin's own menu, not CTRPF's list

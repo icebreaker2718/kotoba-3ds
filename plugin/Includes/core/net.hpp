@@ -27,8 +27,12 @@ private:
 
 // Starts/stops the socket service (no-ops off the 3DS). Call netStop() when done, so nothing
 // network-related is left open while the game runs or exits.
+// The socket service needs one page-aligned block from the plugin's heap; after a long session
+// the heap is in pieces, so smaller blocks are tried when the full size isn't there.
 bool netStart(std::string &error);
 void netStop();
+// Size of the block the running socket service got (0 when stopped or off the 3DS), for the log.
+uint32_t netBufferSize();
 
 // TCP connection to an IP address or host name (DNS), with a timeout. Returns the socket
 // (blocking) or -1 with `error` set.

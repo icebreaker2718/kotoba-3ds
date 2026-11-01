@@ -10,9 +10,11 @@ works on the code.
 - **New work goes to the `test` branch.** Nothing new reaches `main` until the owner has
   confirmed it on real hardware and says to merge. Docs-only changes (README, this file) may go
   straight to `main`; then merge `main` into `test`.
-- **Experiments the owner wants kept away from the test branch's users go to `alpha`.** No
-  release for it: CI's run artifact goes straight onto the owner's SD card. It moves to `test`
-  only when the owner says so.
+- **Experiments the owner wants kept away from the test branch's users go to `alpha`.** It moves
+  to `test` only when the owner says so. CI publishes each alpha build as the `alpha-dev`
+  pre-release, titled "DEVELOPMENT ONLY - do not use" (the owner's OK, 2026-10-28): run artifacts
+  can't be downloaded from this environment (their storage host is blocked), release assets can.
+  Fetch it through the REST API (as below, tag `alpha-dev`) and put it on the owner's SD card.
 - **When unsure about a design decision, stop and ask** before building it.
 - **Anonymity:** no personal information (names, home paths, emails) in commits or files.
 - **Commits** are authored `Claude <noreply@anthropic.com>` and end with the attribution lines the
@@ -25,9 +27,19 @@ works on the code.
 ## Branches, CI and releases
 
 - `.github/workflows/build.yml`: jobs `plugin` (devkitPro + CTRPF), `dictionary` (builds
-  `dict.bin`, ~7 min), `release` (on `main`: the **latest** release with `Kotoba3DS.3gx`,
-  `Kotoba3DS-2MiB-test.3gx`, `dict.bin`, `Kotoba3DS-ocr-model.zip`), `test-release` (on `test`:
-  the **test-build** prerelease with the plugin only).
+  `dict.bin`, ~7 min; also zips the OCR models: VOCR6 Normal + textspot8 from vita-vn-ocr v0.5.0, SHA-256
+  checked), `release` (on `main`: the **latest** release, titled with the version from
+  `plugin/Kotoba3DS.plgInfo`, with `Kotoba3DS.3gx`, `dict.bin`, `Kotoba3DS-ocr-model.zip`, `Kotoba3DS-SD.zip`; its
+  notes link CHANGELOG.md and UPDATING.md), `test-release` (on `test`: the **test-build** prerelease with the
+  plugin, `Kotoba3DS-ocr-model.zip` and `Kotoba3DS-SD.zip`; its notes are CHANGELOG.md's newest entry, links made
+  absolute), `alpha-release` (on `alpha`: `alpha-dev`).
+- `Kotoba3DS-SD.zip` (`.github/workflows/sd-zip.sh`): plugin as `luma/plugins/default.3gx`, `3ds/kotoba3ds/dict.bin`
+  (the same run's build) and the OCR zip's `3ds/kotoba3ds/ocr/`, for installing over Wi-Fi with 3dsDL (owner's
+  choice, 2026-10-30): Files → the zip → Extract → Here at `sdmc:/`. 3dsDL (checked in its source at 04f3c98): a zip
+  with several top-level folders offers Here / New Folder, makes missing folders, reads deflate, asks Overwrite /
+  Skip Them (Skip preselected) for existing files; its "Ask to Extract" after a download is off by default. The
+  QR codes in `docs/` (README, release notes) are fixed URLs: `releases/latest/download/…` and
+  `releases/download/test-build/…`; regenerate them only if the asset name or tags change.
 - The plugin is only built by CI (no devkitPro locally). Download assets through the REST API;
   GraphQL (`gh release download`, `gh run watch` output) can be blocked:
   `gh api repos/icebreaker2718/kotoba-3ds/releases/tags/test-build` → asset id →
@@ -37,7 +49,7 @@ works on the code.
 ## The owner's SD card and laptop (when linked)
 
 - SD card (drive `E:` on the laptop): plugin at `/luma/plugins/default.3gx`; data in
-  `/3ds/kotoba3ds/` (`dict.bin`, `ocr/VOCR5_N_w8.vocr`, `mined.tsv`, `shots/`, `known.txt`,
+  `/3ds/kotoba3ds/` (`dict.bin`, `ocr/` (`VOCR6.2_N_w8g2.vocr`, `textspot8_t64n8c16_w8.vtsp`, `VOCR5_N_w8.vocr`), `areas.txt`, `mined.tsv`, `shots/`, `known.txt`,
   `marked.txt`, `settings.txt`, `ocr_log.txt`); crash dumps in `/luma/dumps/arm11/`.
 - Writing to the card: stage the file under a **new, unique name** each time (reusing a staged
   path can write stale content) and check the size on the card afterwards.
@@ -81,11 +93,11 @@ works on the code.
   them, and diff the `PARAGRAPH`/`FAILED` lines. About 320 screens so far, mostly Mario & Luigi:
   Dream Team, plus Pokémon Sun/Moon and Ace Attorney.
 
-## Status (2026-10-27)
+## Status (2026-10-29)
 
-- `main` = the confirmed release (lid-close fix, no OCR needed on the PC, flag retry,
-  overlapping-box OCR fixes, saved-word spelling option, README feature list).
-- On `test`, waiting for the owner's hardware check (the SD card has this build):
+- `main` = **1.1.0**, released 2026-10-29 (merge of `test`, confirmed by the owner on hardware). `test` is
+  the same; new work starts there again. CHANGELOG.md / UPDATING.md are the user-facing record; what went
+  into 1.1.0, for whoever works on the code:
   1. Shaded text boxes (Pokémon Sun/Moon bubbles fade top to bottom; only the first row was
      read). Backtest: 4 other screens changed, all better.
   2. The general memory fix (confirmed by the owner on `alpha`, 2026-10-26): the commit limit is
@@ -108,22 +120,53 @@ works on the code.
      26 -> 22 ms (RGB565 screens). The read log line splits "box" into memory check / boxes /
      pictures (the box search is nearly all of it) and keeps its end; the view line names the
      screens' formats. The memory fix scans the game's code once.
-- On `alpha` (2026-10-27), benchmark build, not yet tried on a console: option 1, "text boxes as
-  a hint" (`readScreenScored` in core/local_ocr.cpp). Box lines are scored (recognizer confidence
-  per line, now in TextLine; dictionary coverage via chunkText) and junk dropped; when the boxes
-  give no confident text, the screen is searched in 60-px bands (step 30) with the line finder,
-  candidates ranked by `textLikeness` (logistic fit on 1,534 band lines), up to 8 recognized and
-  scored; a weak box line gives way to a band line in the same place. Replaces the whole-screen
-  fallback, whose line finder can't separate text from a busy scene. Backtest against 171
-  hand-labelled screens (labels in the session scratch space, not the repo): current reader P 0.991
-  R 0.986, 156 fully right; option 1 P 0.996 R 0.993, 160 fully right (RE Revelations' subtitles,
-  Mii Plaza labels, junk next to icons fixed); whole screen R 0.624. Held-out 483 screens: 36 differ,
-  reviewed by eye: better or neutral but for name/button labels it now reads (セーブ, メニュー). PC
-  time +7%. KT_READER_BENCH in main.cpp also times the current reader and the whole screen on
-  every read ("bench:" log lines): turn it off before this goes to `test`.
-- `release-1.1.0` (on GitHub, not merged): version 1.1.0, CHANGELOG.md, README additions, release
-  notes with the version; drafted on items 1-2 above. Rebase it onto `test` and add 3-4 to the
-  changelog before the owner reviews it again.
+  5. From `alpha` (merged 2026-10-28, owner's request): **VOCR6 and the text spotter**, **fast mode**, **reading
+     areas**; the benchmark reads (`KT_READER_BENCH`, `BenchAllReaders`) and the "OCR model" setting removed (VOCR6
+     when on the SD card, else VOCR5; an old `ocr_model=` line is ignored); the 2 MiB test copy no longer built.
+     - VOCR6 (vita-vn-ocr v0.5.0, runtime at 205f47e): `VOCR6.2_N_w8g2.vocr`, head gate + two-level head. The
+       spotter `textspot8_t64n8c16_w8.vtsp` (core/text_spot.cpp, `readScreenSpot` in core/local_ocr.cpp) finds
+       every line with its kind; furigana lines dropped, boxes widened by 35% of their height, lines kept by
+       `keepLine`. Without the .vtsp: shaded box search + box reader, as before. Our ARM11 kernels carried into
+       vocr.c; the spotter's 1x1 layers through `vocr__k2x8` (242 -> 151 M ARM instructions per top screen).
+     - Fast mode (`fast=`): `findTextBoxes(..., shaded=false)` + box reader / whole-screen fallback, no spotter.
+     - Reading area: per game and screen in `/3ds/kotoba3ds/areas.txt`; editor on the paused game (D-Pad move,
+       L + D-Pad size, R bigger steps, stylus, X other screen, A save, Y clear). Read with the line finder (fast mode
+       or not), no box search. It was the spotter with fast mode off until 2026-10-28: on 38 saved screens of the
+       three games with areas, the same text on 35 (5 of them layout or ？/? only), 1 character worse (… -> べ), 1
+       better, 1 tie; 25% less PC time, ~70 ms a read less on the console (158 vs 228 ms median).
+     - Furigana rule in `textParagraphs` (textlines.cpp): a kana line over a line with kanji is dropped as its
+       reading only if it has no katakana (「クリスとジェシカが」 over RE's next subtitle row was dropped). Box
+       reader backtest, 405 saved screens: 4 changed, all better (RE x2, Mii Plaza ゴーストが, a ゴースト tag).
+     - PC backtest (171 hand-labelled screens; labels partly seeded from VOCR5): test build P 0.991 R 0.985, 154
+       fully right; spotter + VOCR6 0.987 / 0.995 / 156, 0 missed; VOCR6 + old finder 0.981 / 0.984 / 151; fast
+       mode 0.991 / 0.959 (VOCR5), 0.989 / 0.958 (VOCR6). ARM instructions over 8 screens: test build 3.2 G,
+       spotter + VOCR6 3.3 G, fast mode 2.8 G (VOCR5) / 2.2 G (VOCR6).
+     - Console benchmark (alpha bb3e00a, 2026-10-28; 38 reads over 大逆転裁判2, Corpse Party, Mario & Luigi,
+       Mii Plaza, RE Revelations; graded against the screenshots): VOCR6 ~21% faster than VOCR5 in recognition
+       (~45 ms a read, faster on every box/area read), accuracy about equal (slightly better on hard text).
+       Exact dialogue, VOCR6: area + line finder 20/22 (158 ms median), area + spotter 20/22 (228 ms), spotter
+       29/36 (434 ms, but extra UI text on half the reads), box readers 28/36 (fast 260 ms / shaded 317 ms; same
+       boxes and text either way on these games; weak on RE subtitles). Model swaps in place held up; heap before
+       a read settles ~1,000 KB. Open question (owner's call): the default for games with no area.
+     - Option 1 (`readScreenScored`) is still in core/, unused.
+  6. Pictures kept in one block for the session (`g_picPool`, 337 KB, `ReservePictures` after the model at the first
+     read): the game's picture behind the lookup / for X / for the screenshot, and first each read's colour copy for
+     the box search. Before, ~280 KB was malloc'd per read; after a long session that malloc failed every time (owner,
+     Mario & Luigi 2026-10-28, also 2 reads in the bench session: `pictures 0` ms in the read line, ~900 KB free),
+     so no game behind the lookup, X did nothing, words saved without a screenshot. Now: a failed picture logs
+     "picture: ... not kept" (falls back to malloc, 16-bit if 24 doesn't fit), X says why it can't hide, a save says
+     "no screenshot: out of memory". Peak per read (fast mode, all 405 screens, beyond the model): 672 -> 728 KB.
+- On `test` after 1.1.0 (not yet on hardware): `Kotoba3DS-SD.zip` (above); and the networking memory fix. A user
+  got "not enough memory for networking" after a long session: `netStart` (core/net.cpp) memaligned one 512 KB
+  page-aligned block for socInit from the plugin heap, which after a long session has ~1 MB free but in pieces (as
+  with the pictures, item 6 below). Now tries 512 / 256 / 128 KB; main.cpp's `NetStart` logs the size used and the
+  heap's free and largest block (`net:` lines in ocr_log.txt); Make Anki cards tells a memory failure apart from
+  "couldn't reach your PC". Leak check, 2026-11-01: the reader (box and spotter + dict paths) under ASan/LSan on 8
+  real screens: no reports, so fragmentation, not a leak. Unverified: that socInit and a card upload work with 128
+  KB (check on the console); if not, the fallback sizes need raising.
+- Releases: a version bump (plgInfo + PluginMenu) and a CHANGELOG entry, plus UPDATING.md steps when users
+  must do more than replace the plugin; the owner reviews them before the merge to main. The old
+  `release-1.1.0` branch (drafted on items 1-2 only) is superseded and can be deleted.
 - Ideas the owner was offered but hasn't decided on: an easier dictionary builder or prebuilt
   dictionaries in releases; switching dictionaries on the console; a workflow diagram in the
   README.
