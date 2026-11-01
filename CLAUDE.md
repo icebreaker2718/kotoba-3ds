@@ -164,6 +164,29 @@ works on the code.
   "couldn't reach your PC". Leak check, 2026-11-01: the reader (box and spotter + dict paths) under ASan/LSan on 8
   real screens: no reports, so fragmentation, not a leak. Unverified: that socInit and a card upload work with 128
   KB (check on the console); if not, the fallback sizes need raising.
+- On `alpha` (2026-11-01, owner's request: "optimize as much as possible", nothing may read differently): a speed
+  pass, every change byte-identical on 94 saved screens x 4 modes (fast, shaded, spotter, whole screen) natively,
+  with VOCR_SIMD32_EMULATE on x86, and the ARM build under qemu-arm (3 workers and 1). Tooling: `tests/bench_cli.cpp`
+  (all modes, many screens, one process; KT_WORKERS, KT_READS); ARM instruction profiles from qemu-arm's
+  `-d in_asm,exec,nochain` log (no TCG plugins in Ubuntu's qemu; building qemu was refused) counted per address by
+  a small C program and mapped with nm/addr2line. Kept:
+  1. Box reader: all boxes' lines recognized in one parallel batch (`LocalOcr::readRegions`; `readBoxLines` decides
+     boxes in rounds: a box overlapping an earlier one waits for it). Before, one box after another: 43% of the
+     owner's fast-mode reads had 2+ boxes.
+  2. Box search: a filled pixel loses its colour bit (the start scan and the fill's row scans skip 4 at a time):
+     -23% instructions in findTextBoxes.
+  3. Table CRC-32 (`vocr__crc32_ieee`, shared with the spotter): the first read's model check 63 M -> 10 M.
+  4. Spotter: ARM routine `vocr__k3x8_s1/_s2` for the 3x3 layers with one input plane (8 sums in r4-r11);
+     requantization in 32-bit steps (`TS_RQ32`, every shipped channel: shift >= 33 and bias + sum in int32, USAT
+     for ReLU), 1x1 inputs packed with PKHBT/SXTB16. ~126 M -> ~107 M instructions per screen.
+  5. The two-level head runs both levels through `mm_i16_pairs` (quantised again in the plain layout for the escape).
+  6. main.cpp: the read's log lines held in a 2 KB static buffer and written after the lookup's first frame; no model
+     file check per read; the core-3 worker thread made once (LightEvent go/done) instead of per read.
+  Tried and dropped: an SXTB16/SMLABB 3x3 kernel in C (no fewer instructions than LDRSB+SMLABB), bigger VOCR tiles
+  (weights reused more, but tile 8 = +130 KB per worker arena), a cheaper ReLU (results depend on the VFP's
+  flush-to-zero). **Alpha-only diagnostic to remove before `test`:** the read line's "workers coreN L lines M ms"
+  (`LocalOcr::setWorkerClock`, `WorkerSummary`). Open question for the owner: all cores on each line (a team per
+  step_op / run_pw, ~96% of a line is parallel per column or position), worth it only if core 3 pulls its weight.
 - Releases: a version bump (plgInfo + PluginMenu) and a CHANGELOG entry, plus UPDATING.md steps when users
   must do more than replace the plugin; the owner reviews them before the merge to main. The old
   `release-1.1.0` branch (drafted on items 1-2 only) is superseded and can be deleted.
