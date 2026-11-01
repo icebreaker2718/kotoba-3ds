@@ -31,8 +31,12 @@ struct Buf {
 // Scanline flood fill from (sx, sy) over the pixels ok(x, y) accepts: mark(x0, x1, y) gets each
 // run of them (which ok must then refuse). The same pixels as a pixel-by-pixel fill, with a small
 // stack: one entry per run start, (y << 16 | x). False if the stack ran out.
-template <class Ok, class Mark>
-bool scanFill(unsigned sx, unsigned sy, unsigned W, unsigned H, uint32_t *stk, Ok ok, Mark mark) {
+// none4(x, y): true only if ok refuses all of x..x + 3 (a cheap test that may say false; x + 3 < W).
+struct NoSkip {
+    bool operator()(unsigned, unsigned) const { return false; }
+};
+template <class Ok, class Mark, class None4 = NoSkip>
+bool scanFill(unsigned sx, unsigned sy, unsigned W, unsigned H, uint32_t *stk, Ok ok, Mark mark, None4 none4 = None4()) {
     unsigned top = 0;
     stk[top++] = (sy << 16) | sx;
     while (top) {
@@ -48,6 +52,11 @@ bool scanFill(unsigned sx, unsigned sy, unsigned W, unsigned H, uint32_t *stk, O
             const unsigned ny = y + d;
             bool in = false;
             for (unsigned x = x0; x <= x1; x++) {
+                if (x + 3 <= x1 && none4(x, ny)) {  // four refused at once
+                    in = false;
+                    x += 3;
+                    continue;
+                }
                 const bool o = ok(x, ny);
                 if (o && !in) {
                     if (top == kSpanCap) return false;
@@ -159,12 +168,22 @@ std::vector<TextBox> findTextBoxes(const uint8_t *rgb, unsigned w, unsigned h, u
                 },
                 [&](unsigned x0, unsigned x1, unsigned y) {
                     uint16_t *row = label + y * w;
-                    for (unsigned x = x0; x <= x1; x++) row[x] = me;
+                    uint8_t *nr = near + y * w;
+                    // its colour bit goes too: this colour's start scan then skips the area 4 pixels at a
+                    // time instead of looking at each of its pixels again (labelled, they'd be refused
+                    // anyway; later colours use other bits)
+                    const uint8_t keep = (uint8_t)~bit;
+                    for (unsigned x = x0; x <= x1; x++) row[x] = me, nr[x] &= keep;
                     area += x1 - x0 + 1;
                     if (x0 < l) l = x0;
                     if (x1 > r) r = x1;
                     if (y < t) t = y;
                     if (y > b) b = y;
+                },
+                [&](unsigned x, unsigned y) {  // none of the four has the colour (filled ones lost it)
+                    uint32_t q;
+                    memcpy(&q, near + y * w + x, 4);
+                    return !(q & bit4);
                 });
             if (!filled) return std::vector<TextBox>();  // a screen this odd: no box, read it all
             // A shaded box (lighter at the top, bluer at the bottom: Pokémon's speech bubbles)
