@@ -117,16 +117,28 @@ static int is_gate_magic(const unsigned char *b)
 }
 static unsigned umin(unsigned a, unsigned b) { return a < b ? a : b; }
 
-static uint32_t crc32_ieee(const unsigned char *p, size_t n)
+/* Kotoba3DS: the same CRC-32 a byte at a time from a table (built on first use: 1 KB) instead of a bit at a
+ * time, ~7 instructions a byte where the bitwise loop took ~50 (the 1.2 MB model's check: ~60 M ARM
+ * instructions -> ~9 M). Also used by vocr_textspot6.c. */
+uint32_t vocr__crc32_ieee(const unsigned char *p, size_t n)
 {
+    static uint32_t tab[256];
+    static int ready = 0;
     uint32_t c = 0xFFFFFFFFu;
-    while (n--) {
+    if (!ready) {
+        unsigned i;
         int b;
-        c ^= *p++;
-        for (b = 0; b < 8; b++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+        for (i = 0; i < 256u; i++) {
+            uint32_t v = i;
+            for (b = 0; b < 8; b++) v = (v >> 1) ^ (0xEDB88320u & (0u - (v & 1u)));
+            tab[i] = v;
+        }
+        ready = 1;
     }
+    while (n--) c = (c >> 8) ^ tab[(c ^ *p++) & 0xFFu];
     return ~c;
 }
+#define crc32_ieee vocr__crc32_ieee
 
 #define TWO_HEADER_BYTES 128u
 static uint32_t find_trailer(const unsigned char *b, size_t bytes, uint32_t total, const char *magic);
@@ -2673,7 +2685,11 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
                 tc[j] = 0;
             }
         }
-    quant16(x, K, K, nf, qx, sx, 0);
+    /* Kotoba3DS: level 1 through the two-positions kernel (mm_i16_pairs: the same sums and float steps as
+     * VOCR_MM_I16), on the input quantised in its pair-interleaved layout (H2_STEP is even, so each step's frames
+     * start a pair); quantised again in the plain layout for the escape and level 2 (the same numbers) */
+    const int p1 = !fl && VOCR_PAIRS(c->model, K);
+    quant16(x, K, K, nf, qx, sx, p1);
     /* level 1: every frame */
     for (nb = 0; nb < B1; nb++) {
         const float *b = op->bias ? op->bias + nb * 8 : NULL;
@@ -2683,8 +2699,8 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
             if (fl)
                 mm_f32(wf, b, x + (size_t)f0 * K, K, K, pn, tmp, 8, NULL, 0, 0);
             else
-                VOCR_MM_I16(c->model, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn, tmp, 8,
-                       NULL, 0, 0);
+                VOCR_MM_I16P(c->model, p1, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn,
+                             tmp, 8, NULL, 0, 0);
             for (q = 0; q < pn; q++) {
                 const unsigned fr = f0 + q, frame = H2_FRAME(fr);
                 float *tv = TK ? ex->topk_logit + (size_t)frame * TK : NULL;
@@ -2697,6 +2713,7 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
             }
         }
     }
+    if (p1) quant16(x, K, K, nf, qx, sx, 0);
     /* the escape: layer 1 through the head's integer kernel, then its two level-1 inputs, ReLU and layer 2 */
     for (nb = 0; nb < H / 8u; nb++)
         mm_i16(tw->e_q + (size_t)nb * K * 8, tw->e_scale + nb * 8, tw->e_bias + nb * 8, qx, sx, K, nf, hid + nb * 8,
@@ -2717,15 +2734,20 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
     /* level 2: the fired frames, packed to the front of the quantised input (forwards: fm[j] >= j), or in W8F
      * of the float input */
     if (nfire) {
+        /* Kotoba3DS: with the two-positions kernel, the fired frames' float inputs go to the front (nothing reads
+         * the accumulator after the head) and are quantised there in its layout: a row's numbers depend on that
+         * row alone, so they are the ones moved below otherwise */
+        const int p2 = !fl && VOCR_PAIRS(c->model, K);
         for (j = 0; j < nfire; j++)
             if (fm[j] != j) {
-                if (fl) {
+                if (fl || p2) {
                     memcpy(x + (size_t)j * K, x + (size_t)fm[j] * K, K * sizeof(float));
                 } else {
                     memcpy(qx + (size_t)j * K, qx + (size_t)fm[j] * K, K * sizeof(int16_t));
                     sx[j] = sx[fm[j]];
                 }
             }
+        if (p2) quant16(x, K, K, nfire, qx, sx, 1);
         for (nb = B1; nb < NB; nb++) {
             const float *b = op->bias ? op->bias + nb * 8 : NULL;
             if (fl) dequant8(op->q + (size_t)nb * K * 8, op->scale + nb * 8, K, wf);
@@ -2734,8 +2756,8 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
                 if (fl)
                     mm_f32(wf, b, x + (size_t)f0 * K, K, K, pn, tmp, 8, NULL, 0, 0);
                 else
-                    VOCR_MM_I16(c->model, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn,
-                           tmp, 8, NULL, 0, 0);
+                    VOCR_MM_I16P(c->model, p2, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0,
+                                 K, pn, tmp, 8, NULL, 0, 0);
                 for (q = 0; q < pn; q++) {
                     const unsigned fr = fm[f0 + q], frame = H2_FRAME(fr);
                     h2_update(tmp + q * 8, nb * 8, N, bestv + fr, besti + fr, NULL,
