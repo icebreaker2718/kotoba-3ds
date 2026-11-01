@@ -59,6 +59,11 @@ public:
     typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
     void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
     unsigned lastWorkers() const { return lastWorkers_; }
+    // Per worker of the last recognition (alpha diagnostic): the CPU core it ran on (core(), when set), the lines it
+    // read and its busy milliseconds (clock(), when set). Index = the order the workers started in.
+    void setWorkerClock(uint64_t (*clock)(), int (*core)()) { clock_ = clock; core_ = core; }
+    struct WorkerStat { int core = -1; unsigned lines = 0; uint32_t ms = 0; };
+    const std::vector<WorkerStat> &lastWorkerStats() const { return wstats_; }
     // VOCR's batch sizes (0 = its defaults): frames per tile and frames per output-head batch.
     // Bigger batches use more memory; the text is the same. Takes effect at the next load().
     void setOptions(unsigned tileFrames, unsigned headFrames) { tileFrames_ = tileFrames; headFrames_ = headFrames; }
@@ -78,6 +83,13 @@ public:
               void (*progress)(unsigned i, unsigned n) = nullptr, unsigned rx = 0, unsigned ry = 0,
               unsigned rw = 0, unsigned rh = 0);
 
+    // Several regions read as read() reads each, with every region's lines recognized in one batch (in
+    // parallel across the regions, where read() one by one leaves the other workers idle): lines[i] and
+    // ok[i] are what read() would give for regions[i] (the same text). False only without a model.
+    struct Region { unsigned x = 0, y = 0, w = 0, h = 0; };
+    bool readRegions(const uint8_t *grey, unsigned w, unsigned h, const std::vector<Region> &regions,
+                     std::vector<std::vector<TextLine>> &lines, std::vector<char> &ok,
+                     void (*progress)(unsigned i, unsigned n) = nullptr);
     // A text line's box on the screen, as the line finder gives it.
     struct LineBox {
         unsigned x = 0, y = 0, w = 0, h = 0;
@@ -93,6 +105,8 @@ public:
                    std::vector<TextLine> &lines, std::string &error, void (*progress)(unsigned i, unsigned n) = nullptr);
 
 private:
+    bool regionLines(const uint8_t *grey, unsigned w, unsigned h, unsigned rx, unsigned ry, unsigned rw, unsigned rh,
+                     void *todo, std::string &error);  // todo: std::vector<VocrLine>
     bool recognize(const uint8_t *grey, unsigned w, unsigned h, const void *lines, unsigned n, std::vector<TextLine> &out,
                    std::string &error, void (*progress)(unsigned i, unsigned n));
     unsigned char *blob_ = nullptr;   // 16-byte aligned
@@ -110,6 +124,9 @@ private:
     unsigned workers_ = 1, lastWorkers_ = 1;
     Runner runner_ = nullptr;
     unsigned tileFrames_ = 0, headFrames_ = 0;
+    uint64_t (*clock_)() = nullptr;
+    int (*core_)() = nullptr;
+    std::vector<WorkerStat> wstats_;
     LineFixer fixer_ = nullptr;
     void *fixerUser_ = nullptr;
     std::vector<TopK> topk_;
