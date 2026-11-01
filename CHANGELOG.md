@@ -9,6 +9,13 @@ already in their SD card folders. With [3dsDL](https://ankush.one/3dsDL/), scan 
 then extract the zip at the root of the card, and everything is in place. No SD card reader
 needed. The steps are in the [README](README.md#install-over-wi-fi-with-3dsdl).
 
+### Fixes
+
+- **"Not enough memory for networking" after a long session.** *Make Anki cards*, *Known words*
+  and finding your PC needed one large block of memory, which a long session could leave in too
+  many pieces. They now make do with a smaller block when the large one isn't there. If even that
+  fails, the message says so plainly (restarting the game frees the memory; saved words are kept).
+
 ## 1.1.0
 
 Thank you for using kotoba3ds! This is the changelog for the newest release, you can download it from the

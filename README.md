@@ -350,6 +350,8 @@ either returning an audio file or Yomitan's JSON audio-source list:
 - **mine.py can't connect**: ftpd must be open on the 3DS, and the PC and 3DS on the same network.
 - **"Couldn't read the screen: No OCR model found"**: unzip `Kotoba3DS-ocr-model.zip` to the
   root of the SD card (the model goes to `SD:/3ds/kotoba3ds/ocr/`).
+- **"Couldn't start networking: not enough memory"**: after a long session the plugin's memory can be too
+  fragmented for networking. Close and restart the game, then choose *Make Anki cards*. Your saved words are kept.
 - **Cards aren't sent to the PC**: check `ocr_server.py` is running and that Windows Firewall
   allows Python on private networks. Then type the address it prints under **PC**. The
   3DS only uses 2.4 GHz Wi-Fi. Saved words are kept either way; `mine.py` adds them later.

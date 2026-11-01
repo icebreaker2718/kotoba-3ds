@@ -1623,6 +1623,21 @@ static void ReadAndLookUp(int mode) {
 // ---------------------------------------------------------------------------
 // Anki cards: saved words to tools/ocr_server.py on the PC, all at once from the menu
 // ---------------------------------------------------------------------------
+// kt::netStart, with what the heap looked like in the log: "not enough memory for networking"
+// after a long session came from a heap with room left but none of it in one piece.
+static bool NetStart(std::string &error) {
+    u32 freeKB = HeapFree() / 1024, largestKB = LargestFreeKB();
+    bool ok = kt::netStart(error);
+    if (ok)
+        LogOcr(Utils::Format("net: started with a %lu KB block (heap free %lu KB, largest %lu KB)",
+                             (unsigned long)(kt::netBufferSize() / 1024), (unsigned long)freeKB,
+                             (unsigned long)largestKB));
+    else
+        LogOcr(Utils::Format("net: not started (heap free %lu KB, largest %lu KB): %s", (unsigned long)freeKB,
+                             (unsigned long)largestKB, error.c_str()));
+    return ok;
+}
+
 // Saved address first, then automatic search. Call between netStart()/netStop().
 static bool ResolveServer(std::string &host, int &port, std::string &error) {
     std::string pingErr;
@@ -1703,7 +1718,11 @@ static void MakeCards() {
     DrawMenu(m);
     std::string err, host;
     int port = kPcPort;
-    if (!kt::netStart(err) || !ResolveServer(host, port, err)) {
+    if (!NetStart(err)) {  // nothing to do with the PC: say so, not "start ocr_server.py"
+        Notice("Make Anki cards", "Couldn't start networking: " + err, kCardsHelp);
+        return;
+    }
+    if (!ResolveServer(host, port, err)) {
         kt::netStop();
         Notice("Make Anki cards",
                "Couldn't reach your PC:\n" + err +
@@ -1806,7 +1825,7 @@ static void KnownWordsMenu() {
         g_knownLoaded = false;
         std::string err, host, reply;
         int port = kPcPort;
-        bool ok = kt::netStart(err) && ResolveServer(host, port, err);
+        bool ok = NetStart(err) && ResolveServer(host, port, err);
         if (ok) {
             m.setMessage("Getting the words of your Anki cards from " + g_server + "...\n\n(A big collection takes a moment.)");
             DrawMenu(m);
@@ -1973,7 +1992,7 @@ static void ChoosePc() {
             DrawMenu(m);
             std::string host;
             int port = kPcPort;
-            bool ok = kt::netStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
+            bool ok = NetStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
             kt::netStop();
             if (ok) {
                 g_server = host + Utils::Format(":%d", port);
@@ -1993,7 +2012,7 @@ static void ChoosePc() {
                 } else {
                     g_server = host + Utils::Format(":%d", port);
                     SaveSettings();
-                    bool ok = kt::netStart(err) && kt::netPing(host, port, 2000, err);
+                    bool ok = NetStart(err) && kt::netPing(host, port, 2000, err);
                     kt::netStop();
                     Notice("PC", ok ? "Connected to " + g_server : "Saved " + g_server + ", but it didn't answer:\n" + err);
                 }

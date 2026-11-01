@@ -156,6 +156,14 @@ works on the code.
      so no game behind the lookup, X did nothing, words saved without a screenshot. Now: a failed picture logs
      "picture: ... not kept" (falls back to malloc, 16-bit if 24 doesn't fit), X says why it can't hide, a save says
      "no screenshot: out of memory". Peak per read (fast mode, all 405 screens, beyond the model): 672 -> 728 KB.
+- On `test` after 1.1.0 (not yet on hardware): `Kotoba3DS-SD.zip` (above); and the networking memory fix. A user
+  got "not enough memory for networking" after a long session: `netStart` (core/net.cpp) memaligned one 512 KB
+  page-aligned block for socInit from the plugin heap, which after a long session has ~1 MB free but in pieces (as
+  with the pictures, item 6 below). Now tries 512 / 256 / 128 KB; main.cpp's `NetStart` logs the size used and the
+  heap's free and largest block (`net:` lines in ocr_log.txt); Make Anki cards tells a memory failure apart from
+  "couldn't reach your PC". Leak check, 2026-11-01: the reader (box and spotter + dict paths) under ASan/LSan on 8
+  real screens: no reports, so fragmentation, not a leak. Unverified: that socInit and a card upload work with 128
+  KB (check on the console); if not, the fallback sizes need raising.
 - Releases: a version bump (plgInfo + PluginMenu) and a CHANGELOG entry, plus UPDATING.md steps when users
   must do more than replace the plugin; the owner reviews them before the merge to main. The old
   `release-1.1.0` branch (drafted on items 1-2 only) is superseded and can be deleted.
