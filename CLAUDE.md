@@ -182,6 +182,12 @@ works on the code.
   5. The two-level head runs both levels through `mm_i16_pairs` (quantised again in the plain layout for the escape).
   6. main.cpp: the read's log lines held in a 2 KB static buffer and written after the lookup's first frame; no model
      file check per read; the core-3 worker thread made once (LightEvent go/done) instead of per read.
+  7. Option A (owner's choice, 2026-11-01): the spotter on every core. Each 3x3 layer's output row is computed in
+     8-pixel blocks that are independent (they read the layer's input rows, write their own columns; scratch per
+     worker), so `produce()` hands them to a team (`vocr_textspot6_find_par`, `TextSpotter::setParallel`): the runner's
+     threads stay for the whole find(), member 0 runs the spotter, the rest spin on atomics and claim blocks by a CAS on
+     ticket = (job << 16) | block (a row's block is ~50 us: a LightEvent wake-up would cost as much). Same boxes on all
+     screens (3 workers, 1, 4 on 2 cores x3, qemu-arm); ThreadSanitizer clean. Console before: spotter 249-251 ms.
   Tried and dropped: an SXTB16/SMLABB 3x3 kernel in C (no fewer instructions than LDRSB+SMLABB), bigger VOCR tiles
   (weights reused more, but tile 8 = +130 KB per worker arena), a cheaper ReLU (results depend on the VFP's
   flush-to-zero). **Alpha-only diagnostic to remove before `test`:** the read line's "workers coreN L lines M ms"

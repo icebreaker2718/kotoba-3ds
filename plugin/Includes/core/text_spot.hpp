@@ -37,10 +37,19 @@ public:
     bool find(const uint8_t *grey, unsigned w, unsigned h, std::vector<SpotBox> &boxes, std::string &error) const;
     // Working memory a find() on a w x h screen needs.
     size_t arenaBytes(unsigned w, unsigned h) const;
+    // Its rows computed by `workers` threads at once (the same boxes): runner(n, job, arg) must run job(arg) on
+    // n threads at the same time and return when all have finished (LocalOcr's runner). The threads wait for
+    // each row's blocks by spinning (a row's block is ~50 us of work: a wake-up would cost as much).
+    typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
+    void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
 
 private:
     void *blob_ = nullptr;
     void *model_ = nullptr;
+    unsigned workers_ = 1;
+    Runner runner_ = nullptr;
+    mutable signed char *scratch_ = nullptr;  // the extra workers' scratch, taken at the first parallel find
+    mutable unsigned scratchFor_ = 0;
 };
 
 }  // namespace kt

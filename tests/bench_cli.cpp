@@ -58,6 +58,7 @@ int main(int argc, char **argv) {
     if (!ocr.load(mf, e)) { printf("MODEL FAILED: %s\n", e.c_str()); return 3; }
     TextSpotter spot;
     if (!spot.load(sf, e)) { printf("SPOTTER FAILED: %s\n", e.c_str()); return 3; }
+    spot.setParallel(workers, workers > 1 ? runThreads : nullptr);
     int first = 4;
     std::string modes = "fsbw";
     if (argc > 4 && !strchr(argv[4], '.')) { modes = argv[4]; first = 5; }
