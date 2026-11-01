@@ -1386,13 +1386,7 @@ static Acc acc_zero(void)
         (a).v[6] += k_ * x_[6 * (S)]; (a).v[7] += k_ * x_[7 * (S)]; \
     } while (0)
 
-#if TS_SIMD32 && defined(__GNUC__)
-/* Kotoba3DS: inlined into the 3x3 blocks, so their 8 sums aren't copied to the stack for each channel's call */
-__attribute__((always_inline)) static inline
-#else
-static
-#endif
-void store_acc(Acc a, const Chan *c, int32_t lo, int8_t *out, unsigned n)
+static void store_acc(Acc a, const Chan *c, int32_t lo, int8_t *out, unsigned n)
 {
     unsigned p;
 #if TS_SIMD32 && defined(__GNUC__)

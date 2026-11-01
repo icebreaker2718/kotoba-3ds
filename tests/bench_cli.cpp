@@ -21,9 +21,10 @@ using namespace kt;
 struct FileReader : Reader {
     FILE *f;
     uint32_t sz = 0;
+    unsigned reads = 0;  // file reads (on the console: SD card reads), for KT_READS
     explicit FileReader(const char *p) { f = fopen(p, "rb"); if (f) { fseek(f, 0, SEEK_END); sz = ftell(f); } }
     ~FileReader() { if (f) fclose(f); }
-    bool read(uint32_t o, void *d, uint32_t n) override { return f && !fseek(f, o, SEEK_SET) && fread(d, 1, n, f) == n; }
+    bool read(uint32_t o, void *d, uint32_t n) override { reads++; return f && !fseek(f, o, SEEK_SET) && fread(d, 1, n, f) == n; }
     uint32_t size() override { return sz; }
 };
 static Dictionary *g_dict;
@@ -86,6 +87,7 @@ int main(int argc, char **argv) {
                 print("whole", ok, paras, e);
             }
             if (g_fixed) printf("  %c fixed %u\n", m, g_fixed);
+            if (getenv("KT_READS")) fprintf(stderr, "%s %c dict reads %u\n", name, m, df.reads), df.reads = 0;
         }
         free(grey);
         free(rgb);
