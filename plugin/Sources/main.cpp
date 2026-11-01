@@ -211,13 +211,42 @@ static std::string TitleIdHex() {
     return tid;
 }
 
-static void LogOcr(const std::string &line) {  // each read's timing, for troubleshooting
+// While a read runs (button to lookup), log lines wait here and are written in one go once the lookup is on
+// screen: each line written at once was its own open/write/close of the SD card, in the time you wait for the
+// lookup. A static buffer: nothing allocated among the read's buffers.
+static char g_logHeld[2048];
+static size_t g_logHeldLen = 0;
+static bool g_logHold = false;
+
+static void WriteLog(const char *text, size_t len) {
     File f;
     if (File::Open(f, "/3ds/kotoba3ds/ocr_log.txt", File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
-        f.Write(line.c_str(), line.size());
-        f.Write("\n", 1);
+        f.Write(text, len);
         f.Close();
     }
+}
+
+static void FlushLog() {  // the held lines, and lines are written at once again
+    g_logHold = false;
+    if (g_logHeldLen) WriteLog(g_logHeld, g_logHeldLen);
+    g_logHeldLen = 0;
+}
+
+static void LogOcr(const std::string &line) {  // each read's timing, for troubleshooting
+    if (g_logHold) {
+        if (g_logHeldLen + line.size() + 1 > sizeof(g_logHeld)) {  // full: out with what's there
+            WriteLog(g_logHeld, g_logHeldLen);
+            g_logHeldLen = 0;
+        }
+        if (line.size() + 1 <= sizeof(g_logHeld)) {
+            memcpy(g_logHeld + g_logHeldLen, line.data(), line.size());
+            g_logHeldLen += line.size();
+            g_logHeld[g_logHeldLen++] = '\n';
+            return;
+        }
+    }
+    std::string l = line + "\n";
+    WriteLog(l.data(), l.size());
 }
 
 // Free heap: what malloc has free inside the heap plus what it hasn't claimed yet (nothing is
@@ -995,6 +1024,7 @@ static void RunLookupView(kt::LookupView &v) {
     g_hide = 0;
     OSD::SwapBuffers();  // let CTRPF finish any pending redraw of its own first
     DrawLookup(v);
+    FlushLog();  // the read's log lines, now that the lookup is on screen
     u64 openMs = g_viewOpenedAt ? osGetTime() - g_viewOpenedAt : 0;
     g_viewOpenedAt = 0;
     u32 moves = 0, draws = 0;
@@ -1322,38 +1352,49 @@ static s32 CoreTask(void *a) {
     return 0;
 }
 // A third worker can go on the New 3DS's core 3, when the kernel lets this process start a thread
-// there (it may refuse: then 2 workers do all the lines, as they share them out as they go).
+// there (it may refuse: then 2 workers do all the lines, as they share them out as they go). The thread
+// is made once, at the first read, and then waits for each read's lines: not made and freed each read
+// (with its 16 KB stack from the plugin's heap, in the middle of the read's buffers).
 static int g_core3 = -1;  // -1 not tried yet, 0 refused, 1 works
+static Thread g_core3Thread = nullptr;
+static LightEvent g_core3Go, g_core3Done;
+static void (*volatile g_core3Job)(void *) = nullptr;
+static void *volatile g_core3Arg = nullptr;
+static void Core3Loop(void *) {
+    for (;;) {
+        LightEvent_Wait(&g_core3Go);
+        void (*job)(void *) = g_core3Job;
+        if (job) job(g_core3Arg);
+        LightEvent_Signal(&g_core3Done);
+    }
+}
 static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
     static const s32 kAffinity[] = {Task::NewAppCore, Task::AppCore};
     CoreJob cj = {job, arg};
-    Thread third = nullptr;
-    if (n >= 3 && g_core3 != 0) {
-        third = threadCreate(job, arg, 16 * 1024, 0x18, 3, false);
-        g_core3 = third ? 1 : 0;
+    const bool third = n >= 3 && g_core3Thread;
+    if (third) {
+        g_core3Job = job;
+        g_core3Arg = arg;
+        LightEvent_Signal(&g_core3Go);
     }
     std::vector<Task> tasks;
     for (unsigned i = 0; i < n && i < 2; i++) tasks.emplace_back(CoreTask, &cj, kAffinity[i]);
     for (Task &t : tasks) t.Start();
     for (Task &t : tasks) t.Wait();
-    if (third) {
-        threadJoin(third, U64_MAX);
-        threadFree(third);
-    }
+    if (third) LightEvent_Wait(&g_core3Done);
 }
-static void Nothing(void *) {}
 static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, Old 1
     if (!System::IsNew3DS()) return 1;
-    if (g_core3 < 0) {  // once: may this process run a thread on core 3?
-        Thread t = threadCreate(Nothing, nullptr, 4096, 0x18, 3, false);
-        g_core3 = t ? 1 : 0;
-        if (t) {
-            threadJoin(t, U64_MAX);
-            threadFree(t);
-        }
+    if (g_core3 < 0) {  // once: may this process run a thread on core 3? Then it stays, waiting.
+        LightEvent_Init(&g_core3Go, RESET_ONESHOT);
+        LightEvent_Init(&g_core3Done, RESET_ONESHOT);
+        g_core3Thread = threadCreate(Core3Loop, nullptr, 16 * 1024, 0x18, 3, true);
+        g_core3 = g_core3Thread ? 1 : 0;
     }
     return g_core3 ? 3 : 2;
 }
+static uint64_t OcrClock() { return osGetTime(); }
+static int OcrCore() { return svcGetProcessorID(); }
 
 static bool LoadSpotter() {
     if (g_spotterState) return g_spotterState > 0;
@@ -1467,12 +1508,21 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
     return ok;
 }
 
+// Alpha diagnostic: each worker of the last recognition, "workers core2 3 lines 140 ms, core0 2 lines 132 ms, ".
+static std::string WorkerSummary() {
+    std::string out = "workers";
+    for (const kt::LocalOcr::WorkerStat &w : g_localOcr.lastWorkerStats())
+        out += Utils::Format(" core%d %u line%s %lu ms,", w.core, w.lines, w.lines == 1 ? "" : "s", (unsigned long)w.ms);
+    return out + " ";
+}
+
 // Reads the screens of `mode` -> text blocks (the top screen's first; with the text spotter in its
 // reading order, else each screen's text boxes top to bottom). Call with the game paused and
 // nothing drawn yet.
 static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string &error) {
     u64 t0 = osGetTime();
-    std::string name = FindModel();
+    // the model loaded at the first read stays: no SD card check for it each read
+    std::string name = g_localOcr.loaded() && !g_modelName.empty() ? g_modelName : FindModel();
     if (name.empty()) {
         error = "No OCR model found.\nUnzip Kotoba3DS-ocr-model.zip to the root of the SD card (it goes to /3ds/kotoba3ds/ocr/).";
         return false;
@@ -1483,6 +1533,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     // A read's pictures then come and go above them.
     Text().reserve();
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
+    g_localOcr.setWorkerClock(OcrClock, OcrCore);
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     ReservePictures();  // kept from the first read on, beside the model
@@ -1540,7 +1591,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                          (unsigned long)(t3 - t2), g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
                          (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
                          (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
-           first);
+           WorkerSummary() + first);
     for (int s = 0; s < 2; s++) free(grey[s]);
     return any;
 }
@@ -1600,9 +1651,12 @@ static void ReadAndLookUp(int mode) {
     g_shotKept = false;
     std::vector<std::string> blocks;
     std::string error;
+    g_logHold = true;  // until the lookup is drawn (RunLookupView), or below
     if (!OpenDict()) {
+        FlushLog();
         Notice("Kotoba3DS", g_dictError);
     } else if (!ReadScreens(mode, blocks, error)) {
+        FlushLog();
         Notice("Couldn't read the screen", error + "\n\n(The screen is saved as shots/failed_*.qoi on the SD card.)");
         std::string ts = Timestamp(), name = "failed_";
         for (char c : ts) name += (c == ' ') ? '_' : (c == ':' ? '-' : c);
@@ -1611,6 +1665,7 @@ static void ReadAndLookUp(int mode) {
         g_viewOpenedAt = osGetTime();
         OpenLookup(blocks, g_readBottom && g_textOnTop);
     }
+    FlushLog();  // (written already when the lookup opened)
     RestoreScreens();
     WriteScreenshotLater();  // the game goes on while it is written
     g_lookupShot = "";
