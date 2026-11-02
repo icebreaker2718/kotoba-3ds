@@ -64,6 +64,7 @@ public:
     void setWorkerClock(uint64_t (*clock)(), int (*core)()) { clock_ = clock; core_ = core; }
     struct WorkerStat { int core = -1; unsigned lines = 0; uint32_t ms = 0; };
     const std::vector<WorkerStat> &lastWorkerStats() const { return wstats_; }
+    bool lastTeam() const { return lastTeam_; }  // the last recognition ran its lines one by one, each on every worker
     // VOCR's batch sizes (0 = its defaults): frames per tile and frames per output-head batch.
     // Bigger batches use more memory; the text is the same. Takes effect at the next load().
     void setOptions(unsigned tileFrames, unsigned headFrames) { tileFrames_ = tileFrames; headFrames_ = headFrames; }
@@ -127,6 +128,7 @@ private:
     uint64_t (*clock_)() = nullptr;
     int (*core_)() = nullptr;
     std::vector<WorkerStat> wstats_;
+    bool lastTeam_ = false;
     LineFixer fixer_ = nullptr;
     void *fixerUser_ = nullptr;
     std::vector<TopK> topk_;

@@ -188,6 +188,12 @@ works on the code.
      threads stay for the whole find(), member 0 runs the spotter, the rest spin on atomics and claim blocks by a CAS on
      ticket = (job << 16) | block (a row's block is ~50 us: a LightEvent wake-up would cost as much). Same boxes on all
      screens (3 workers, 1, 4 on 2 cores x3, qemu-arm); ThreadSanitizer clean. Console before: spotter 249-251 ms.
+  8. Option B (owner's choice, 2026-11-01): with fewer lines than workers, each line by the whole team in turn
+     (`lineTeamMember`, `vocr_set_par`): run_pw's quantisation (even position chunks) and output blocks, k_conv1/k_dw by
+     column, the two-level head's level 1, escape and level 2 by 4-frame chunks (each frame's updates in block order);
+     jobs under ~6000 multiply-accumulates stay on one thread (`par_on`). Shared spinning team in `core/team.hpp`
+     (the spotter uses it too). 3+ lines: a worker per line as before. Same text (2, 3, 4 workers, oversubscribed;
+     qemu-arm); ThreadSanitizer clean. Read line says "team ..." instead of "workers ..." when it ran.
   Tried and dropped: an SXTB16/SMLABB 3x3 kernel in C (no fewer instructions than LDRSB+SMLABB), bigger VOCR tiles
   (weights reused more, but tile 8 = +130 KB per worker arena), a cheaper ReLU (results depend on the VFP's
   flush-to-zero). **Alpha-only diagnostic to remove before `test`:** the read line's "workers coreN L lines M ms"

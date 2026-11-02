@@ -1510,7 +1510,7 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
 
 // Alpha diagnostic: each worker of the last recognition, "workers core2 3 lines 140 ms, core0 2 lines 132 ms, ".
 static std::string WorkerSummary() {
-    std::string out = "workers";
+    std::string out = g_localOcr.lastTeam() ? "team" : "workers";
     for (const kt::LocalOcr::WorkerStat &w : g_localOcr.lastWorkerStats())
         out += Utils::Format(" core%d %u line%s %lu ms,", w.core, w.lines, w.lines == 1 ? "" : "s", (unsigned long)w.ms);
     return out + " ";

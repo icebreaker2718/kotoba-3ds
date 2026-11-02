@@ -1,4 +1,5 @@
 #include "core/local_ocr.hpp"
+#include "core/team.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -303,6 +304,38 @@ struct LineJob {
     std::atomic<unsigned> next{0}, worker{0};
 };
 
+// Fewer lines than workers: the lines one after another, each by the whole team (vocr_set_par: a layer's
+// blocks, columns and frames shared out), instead of a worker per line and the rest idle.
+struct LineTeam : Team {
+    LineJob *job = nullptr;
+    vocr_par par;
+};
+
+void lineTeamMember(void *arg) {
+    LineTeam *t = (LineTeam *)arg;
+    LineJob *j = t->job;
+    const unsigned w = t->join();
+    const uint64_t t0 = j->clock ? j->clock() : 0;
+    if (w == 0) {
+        vocr_ctx *c = (vocr_ctx *)j->ctxs[0];
+        vocr_set_par(c, &t->par);
+        for (unsigned k = 0; k < j->count; k++) {
+            const unsigned i = j->order[k];
+            j->rc[i] = runLine(c, j->model, j->grey, j->stride, j->lines[i], j->text + (size_t)i * kLineCap, kLineCap,
+                               j->tk ? &j->tk[0] : nullptr, j->alts + (size_t)i * kMaxAlts, &j->nAlts[i], &j->conf[i]);
+        }
+        vocr_set_par(c, nullptr);
+        t->finish();
+    } else {
+        t->help(w);
+    }
+    if (j->stats && w < t->workers) {
+        j->stats[w].core = j->core ? j->core() : -1;
+        j->stats[w].lines = w == 0 ? j->count : 0;
+        j->stats[w].ms = j->clock ? (uint32_t)(j->clock() - t0) : 0;
+    }
+}
+
 void lineWorker(void *arg) {
     LineJob *j = (LineJob *)arg;
     unsigned w = j->worker.fetch_add(1);
@@ -463,12 +496,16 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
     lines.clear();
     const vocr_model *m = (const vocr_model *)model_;
     const VocrLine *todoLines = (const VocrLine *)linesIn;
-    // workers: one per line up to workers_, each with its own context (made at the load)
+    // workers: one per line up to workers_, each with its own context (made at the load); with fewer lines than
+    // workers, the whole team on each line in turn (lineTeamMember)
+    const bool team = runner_ && workers_ > 1 && n >= 1 && n < workers_;
+    lastTeam_ = team;
     unsigned workers = runner_ ? std::min<unsigned>(workers_, n) : 1;
+    if (team) workers = 1;  // one context: the team shares it
     ensureWorkers(workers);
     if (workers > ctxs_.size()) workers = (unsigned)ctxs_.size();
     if (workers < 1) workers = 1;
-    lastWorkers_ = workers;
+    lastWorkers_ = team ? workers_ : workers;
     std::vector<char> text((size_t)std::max(n, 1u) * kLineCap, 0);
     std::vector<int> rc(std::max(n, 1u), VOCR_E_ARG);
     std::vector<RawAlt> rawAlts(fixer_ ? (size_t)std::max(n, 1u) * kMaxAlts : 1);
@@ -496,11 +533,20 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
     std::stable_sort(order.begin(), order.begin() + n,
                      [&](unsigned a, unsigned b) { return todoLines[a].w * todoLines[b].h > todoLines[b].w * todoLines[a].h; });
     job.order = order.data();
-    wstats_.assign(workers, WorkerStat());
+    wstats_.assign(team ? workers_ : workers, WorkerStat());
     job.stats = wstats_.data();
     job.clock = clock_;
     job.core = core_;
-    if (workers > 1) {
+    if (team) {
+        if (progress) progress(0, 1);
+        LineTeam lt;
+        lt.job = &job;
+        lt.workers = workers_;
+        lt.par.for_each = Team::forEachC;
+        lt.par.team = (Team *)&lt;
+        lt.par.workers = workers_;
+        runner_(workers_, lineTeamMember, &lt);
+    } else if (workers > 1) {
         if (progress) progress(0, 1);
         runner_(workers, lineWorker, &job);
     } else {
