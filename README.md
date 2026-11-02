@@ -17,8 +17,8 @@ Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-
   text with on-device OCR, in under a second. It needs no PC and no internet. The touchscreen,
   or both screens, can be read too, each with its own hotkey.
 - **Finds the text wherever it is.** Dialogue boxes, speech bubbles, menus and subtitles over the
-  scene are found by a line spotter; a *Fast mode* and a fixed *Reading area* per game are there
-  for speed. Furigana and the "next" arrow are left out, and the dictionary corrects
+  scene are found by a line spotter. *Text boxes only* reads just the dialogue box, and a fixed
+  *Reading area* per game reads just one part of the screen, quicker and with nothing else getting in. Furigana and the "next" arrow are left out, and the dictionary corrects
   kanji the OCR wasn't sure of (造跡 → 遺跡).
 - **Tap a word to look it up.** The full Jitendex entry shows over the paused game, with the
   reading, how common the word is (JPDB rank) and other matches for the same spelling.
@@ -182,7 +182,7 @@ The **Select** menu (drawn like the lookup: tap, or D-pad / Circle Pad and A) ha
 | *Touchscreen text shows on* | the touchscreen (tap the words) or the top screen (the entry then goes on the touchscreen) |
 | *Hide (X)* | see-through, hidden, or see-through then hidden |
 | *Saved words are written* | in kanji (the word's usual kanji form, even when the game wrote it in kana: ちょっと → 一寸) or as in the game (kana stays kana: たべた → たべる) |
-| *Fast mode* | on: only text boxes of one flat colour (most dialogue boxes) are read, which is quicker, but text out in the scene, menus and shaded bubbles may be missed or read in part; off (the default): every line on the screen is found |
+| *Text boxes only* | on: only text boxes of one flat colour (most dialogue boxes) are read, so nothing else on the screen gets in, but text out in the scene, menus and shaded bubbles may be missed or read in part. It may be slightly faster, but only by very little now; off (the default): every line on the screen is found |
 | *Reading area* | for a game whose text always shows in one place (subtitles, a fixed dialogue box): only that part of the screen is read, quicker and with nothing else getting in. Set per game and per screen on the paused game: D-pad moves it, L + D-pad sizes it (R for bigger steps), or drag with the stylus on the touchscreen; X the other screen, A saves, Y clears |
 | *Last lookup* | reopen the text of your last lookup |
 | *Saved words* | review them with their entry; Y deletes one |
@@ -193,7 +193,7 @@ The **Select** menu (drawn like the lookup: tap, or D-pad / Circle Pad and A) ha
 
 **How it reads the screen.** A line spotter (textspot8) finds every line of text on the screen,
 wherever it is: dialogue boxes, speech bubbles, menus, names, subtitles over the scene. Each line is
-read, and furigana and stray marks (the "next" arrow) are dropped. With *Fast mode* on, only
+read, and furigana and stray marks (the "next" arrow) are dropped. With *Text boxes only* on, only
 flat-colour text boxes are looked for instead (with no box on screen, the whole screen is read); with
 a *Reading area* set, only that area is read. Where the recognizer was unsure of a kanji, the
 dictionary decides: a guess that makes a word replaces one that doesn't (造跡 → 遺跡). The OCR is VOCR6 from

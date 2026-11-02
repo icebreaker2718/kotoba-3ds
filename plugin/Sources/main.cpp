@@ -63,7 +63,7 @@ enum ReadMode { kReadTop = 0, kReadBottom = 1, kReadBoth = 2, kModes = 3 };
 static const char *const kModeNames[kModes] = {"Read the top screen", "Read the touchscreen", "Read both screens"};
 static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
 static bool g_kanjiForm = true;  // saved words in their kanji form (or as the game wrote them)
-static bool g_fastMode = false;  // fast mode: flat-colour text boxes only, no text spotter
+static bool g_fastMode = false;  // "Text boxes only" (was "Fast mode"; settings key fast=): flat-colour boxes, no spotter
 static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
 enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
 static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
@@ -2172,12 +2172,13 @@ static void Settings() {
             "even when the game wrote it in kana (ちょっと -> 一寸). As in the game: in kanji only when "
             "the game wrote it in kanji, else in kana (たべた -> たべる).\n\n"
             "A,  or : change.";
-        items[kFast].label = "Fast mode";
+        items[kFast].label = "Text boxes only";
         items[kFast].value = g_fastMode ? "on" : "off";
         items[kFast].help =
-            "On: looks only for text boxes of one flat colour (most games' dialogue boxes) and reads "
-            "their lines: quicker, but text out in the scene, menus and shaded bubbles may be missed or "
-            "read in part. Off: finds every line on the screen with the text spotter.\n\nA,  or : change.";
+            "On: reads only text boxes of one flat colour (most games' dialogue boxes), so nothing else "
+            "on the screen gets in, but text out in the scene, menus and shaded bubbles may be missed or "
+            "read in part. It may be slightly faster, but only by very little now. Off: finds every line "
+            "on the screen with the text spotter.\n\nA,  or : change.";
         items[kArea].label = "Reading area";
         items[kArea].value = AreaSummary();
         items[kArea].help =

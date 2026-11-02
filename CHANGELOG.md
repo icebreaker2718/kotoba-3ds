@@ -17,6 +17,13 @@ text now takes about 100 ms instead of 250 ms. All of the console's cores now sh
 when a screen has only one or two lines, each line is split between them, and when it has
 several text boxes, they're read together instead of one after another.
 
+### "Fast mode" is now "Text boxes only"
+
+Normal reading is now nearly as fast as fast mode was, so the setting has a new name that says
+what it does: it reads only flat-colour text boxes (most dialogue boxes), so nothing else on the
+screen gets in. It may still be slightly faster, but only by very little. Your setting is kept.
+For the quickest reads, set a *Reading area*.
+
 ### Fixes
 
 - **"Not enough memory for networking" after a long session.** *Make Anki cards*, *Known words*

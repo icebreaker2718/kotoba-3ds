@@ -27,9 +27,10 @@ If you skip step 2, the plugin still works: it reads with the old model and find
 
 ## After updating
 
-- **New settings in the Select menu:** *Fast mode* and *Reading area*. The changelog explains
-  both. Fast mode starts off, so the plugin finds text anywhere on the screen. If a game's
-  dialogue box reads more slowly than before, try turning fast mode on.
+- **New settings in the Select menu:** *Text boxes only* (called *Fast mode* in 1.1.0) and
+  *Reading area*. The changelog explains both. Text boxes only starts off, so the plugin finds
+  text anywhere on the screen. For a game whose text always shows in one place, a reading area
+  is the quickest.
 - **`Kotoba3DS-2MiB-test.3gx`:** if you downloaded this test copy for a game that crashed at
   start, you don't need it anymore. The normal plugin now starts those games. You can delete it.
 - **If something goes wrong:** send `SD:/3ds/kotoba3ds/ocr_log.txt` and, for a screen that was
