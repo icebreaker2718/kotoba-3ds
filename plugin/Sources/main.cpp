@@ -1393,8 +1393,6 @@ static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, 
     }
     return g_core3 ? 3 : 2;
 }
-static uint64_t OcrClock() { return osGetTime(); }
-static int OcrCore() { return svcGetProcessorID(); }
 
 static bool LoadSpotter() {
     if (g_spotterState) return g_spotterState > 0;
@@ -1508,14 +1506,6 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
     return ok;
 }
 
-// Alpha diagnostic: each worker of the last recognition, "workers core2 3 lines 140 ms, core0 2 lines 132 ms, ".
-static std::string WorkerSummary() {
-    std::string out = g_localOcr.lastTeam() ? "team" : "workers";
-    for (const kt::LocalOcr::WorkerStat &w : g_localOcr.lastWorkerStats())
-        out += Utils::Format(" core%d %u line%s %lu ms,", w.core, w.lines, w.lines == 1 ? "" : "s", (unsigned long)w.ms);
-    return out + " ";
-}
-
 // Reads the screens of `mode` -> text blocks (the top screen's first; with the text spotter in its
 // reading order, else each screen's text boxes top to bottom). Call with the game paused and
 // nothing drawn yet.
@@ -1533,7 +1523,6 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     // A read's pictures then come and go above them.
     Text().reserve();
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
-    g_localOcr.setWorkerClock(OcrClock, OcrCore);
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     ReservePictures();  // kept from the first read on, beside the model
@@ -1592,7 +1581,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                          (unsigned long)(t3 - t2), g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
                          (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
                          (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
-           WorkerSummary() + first);
+           first);
     for (int s = 0; s < 2; s++) free(grey[s]);
     return any;
 }
