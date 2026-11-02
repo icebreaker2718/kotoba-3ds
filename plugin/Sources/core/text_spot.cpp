@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "core/team.hpp"
 #include "vocr_textspot6.h"
 
 namespace kt {
@@ -21,22 +22,8 @@ void TextSpotter::unload() {
 }
 
 namespace {
-// A team for vocr_textspot6_find_par: the thread that becomes member 0 runs the spotter; for each row it publishes
-// the row's blocks as a job and takes blocks itself, the others take blocks as they come, until it is done.
-// A block is claimed by a compare-and-swap of ticket = (job number << 16) | next block, so a thread still looking at
-// one row can't take a block of the next; the leader waits for the row's `done` count before the next row (so a
-// job's slot, job[number & 1], is reused only once every block of the job before has finished).
-struct SpotTeam {
-    std::atomic<uint32_t> ticket{0};
-    std::atomic<unsigned> done{0}, member{0};
-    std::atomic<bool> quit{false};
-    struct Job {
-        std::atomic<unsigned> n{0};  // read before a claim (may be the slot's next job then: the claim fails)
-        void (*item)(void *, unsigned, unsigned) = nullptr;
-        void *ctx = nullptr;
-    } job[2];
-    uint32_t gen = 0;  // the leader's
-    // the leader's call
+// The spotter's call for a team (core/team.hpp): member 0 runs it, publishing each row's blocks as a job.
+struct SpotTeam : Team {
     const vocr_textspot6 *m = nullptr;
     const VocrLinesImage *im = nullptr;
     void *arena = nullptr;
@@ -46,45 +33,15 @@ struct SpotTeam {
     int rc = VOCR_LINES_E_ARG;
 };
 
-// takes and runs blocks of the current job; false when none is left
-bool claimBlocks(SpotTeam *t, unsigned worker) {
-    bool any = false;
-    for (;;) {
-        uint32_t v = t->ticket.load(std::memory_order_acquire);
-        const SpotTeam::Job &j = t->job[(v >> 16) & 1u];
-        const unsigned i = v & 0xFFFFu;
-        if (i >= j.n.load(std::memory_order_relaxed)) return any;
-        if (!t->ticket.compare_exchange_weak(v, v + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) continue;
-        j.item(j.ctx, i, worker);
-        t->done.fetch_add(1u, std::memory_order_release);
-        any = true;
-    }
-}
-
-void teamForEach(void *team, unsigned n, void (*item)(void *, unsigned, unsigned), void *ctx) {
-    SpotTeam *t = (SpotTeam *)team;
-    const uint32_t g = ++t->gen & 0xFFFFu;
-    SpotTeam::Job &j = t->job[g & 1u];
-    j.n.store(n, std::memory_order_relaxed);
-    j.item = item;
-    j.ctx = ctx;
-    t->done.store(0, std::memory_order_relaxed);
-    t->ticket.store(g << 16, std::memory_order_release);
-    claimBlocks(t, 0);
-    while (t->done.load(std::memory_order_acquire) < n) {
-    }
-}
-
 void teamMember(void *arg) {
     SpotTeam *t = (SpotTeam *)arg;
-    const unsigned w = t->member.fetch_add(1u);
+    const unsigned w = t->join();
     if (w == 0) {
         t->rc = vocr_textspot6_find_par(t->m, t->im, 0, t->arena, t->need, t->set, &t->par);
-        t->quit.store(true, std::memory_order_release);
+        t->finish();
         return;
     }
-    if (w >= t->par.workers) return;  // (never: as many threads as workers)
-    while (!t->quit.load(std::memory_order_acquire)) claimBlocks(t, w);
+    t->help(w);
 }
 }  // namespace
 
@@ -157,8 +114,9 @@ bool TextSpotter::find(const uint8_t *grey, unsigned w, unsigned h, std::vector<
         team.need = need;
         team.set = set;
         memset(&team.par, 0, sizeof team.par);
-        team.par.for_each = teamForEach;
-        team.par.team = &team;
+        team.workers = workers;
+        team.par.for_each = Team::forEachC;
+        team.par.team = (Team *)&team;
         team.par.workers = workers;
         for (unsigned k = 1; k < workers; k++) team.par.tmp[k] = scratch_ + (size_t)(k - 1) * VOCR_TEXTSPOT6_PAR_TMP;
         runner_(workers, teamMember, &team);
