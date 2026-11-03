@@ -26,6 +26,11 @@ For the quickest reads, set a *Reading area*.
 
 ### Fixes
 
+- **A speech bubble's first line read as separate text.** In normal reading, a bubble's first
+  row was sometimes treated as its own piece of text, so a sentence came out split in two
+  (「さあここが」 and 「ツアーの見せ場だぞ!」). Lines right under each other with the same left
+  edge and size are now kept together. A speaker's name beside the text stays separate. On the
+  saved screenshots, 24 of 125 screens now read as one sentence where they were split before.
 - **"Not enough memory for networking" after a long session.** *Make Anki cards*, *Known words*
   and finding your PC needed one large block of memory, which a long session could leave in too
   many pieces. They now make do with a smaller block when the large one isn't there. If even that

@@ -181,6 +181,7 @@ struct SpotReadStats {
     unsigned boxes = 0, vertical = 0;   // boxes the spotter found (vertical ones are not read)
     unsigned ruby = 0;                  // furigana lines left out
     unsigned read = 0, kept = 0;        // lines recognized / kept
+    unsigned joined = 0;                // blocks joined to the one before (one text the spotter split by kind)
     unsigned dictChecks = 0;
     uint64_t (*clock)() = nullptr;      // with a clock (milliseconds), where the time went
     uint32_t spotMs = 0, readMs = 0, dictMs = 0;
@@ -189,7 +190,8 @@ struct SpotReadStats {
 // The text spotter's reader: the spotter finds the screen's lines (no text-box search, no line
 // finder), the recognizer reads each, and a line keeps its place if it reads like text (two
 // Japanese characters or more, and the recognizer sure of it or words in it). Furigana the spotter
-// found as lines of their own are left out. One paragraph per spotter block, in its reading order.
+// found as lines of their own are left out. One paragraph per spotter block, in its reading order;
+// two blocks one under the other with their left edges together join, whatever kind the spotter gave them.
 bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, const uint8_t *grey, unsigned w,
                     unsigned h, std::vector<std::string> &paragraphs, std::string &error,
                     void (*progress)(unsigned i, unsigned n) = nullptr, SpotReadStats *stats = nullptr);

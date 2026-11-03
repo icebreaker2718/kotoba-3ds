@@ -1167,6 +1167,7 @@ static unsigned kanaIn(const std::string &t) {
 // faint glyph at a line's end (ー, …, ！), which the recognizer then loses (35%: best on the labelled
 // screens). A variable for the tests.
 unsigned g_spotGrowPct = 35;
+int g_spotJoinGapPct = 100, g_spotJoinLeftPct = 30;  // block joining (readScreenSpot), percent of the taller line
 
 // Kana and the marks around them only (a line of furigana), at least one kana.
 static bool kanaOnly(const std::string &t) {
@@ -1241,7 +1242,7 @@ bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, co
                 break;
             }
         }
-    struct Kept { unsigned block; TextLine line; };
+    struct Kept { unsigned block; TextLine line; const SpotBox *box; };
     std::vector<Kept> kept;
     const uint32_t dict0 = st.dictMs;
     ScoredReadStats sst;
@@ -1254,7 +1255,39 @@ bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, co
         // as a line found out in the scene: the recognizer sure of it, or words in it (judged as a text
         // box's line, the spotter's dialogue kept sprites and decorations read as text: 「ーロエロー」)
         if (!keepLine(*l, dict, false, &sst)) continue;
-        kept.push_back({boxes[i].block, *l});
+        kept.push_back({boxes[i].block, *l, &boxes[i]});
+    }
+    // The spotter joins lines into a block only when it gave them the same kind, so a speech bubble's first row
+    // tagged as scene text or a name over the rest tagged as dialogue came out as two blocks. Two blocks next to
+    // each other in reading order join (whatever their kinds) when the first's last line and the second's first
+    // line are one text's rows: the second right below (a gap of at most the taller line's height, the spotter's
+    // own rule), heights within 3:2, and the left edges together (within 30% of the line's height, ~7 px: a
+    // speaker's name stands 20-30 px right of the text's edge, Mario & Luigi's "あらすじ" heading 8 px). A block of fewer than 3 Japanese characters (a scrap, dropped
+    // below) joins nothing.
+    for (size_t i = 0; i < kept.size();) {
+        size_t j = i;
+        while (j < kept.size() && kept[j].block == kept[i].block) j++;
+        if (j >= kept.size()) break;
+        size_t k = j;
+        while (k < kept.size() && kept[k].block == kept[j].block) k++;
+        const SpotBox &a = *kept[j - 1].box, &b = *kept[j].box;
+        const int top = (int)std::max(a.h, b.h), low = (int)std::min(a.h, b.h);
+        const int gap = (int)b.y - (int)(a.y + a.h), dx = (int)b.x - (int)a.x;
+        bool join = b.y > a.y && gap <= g_spotJoinGapPct * top / 100 && 2 * top <= 3 * low &&
+                    std::abs(dx) * 100 <= g_spotJoinLeftPct * top;
+        if (join) {
+            unsigned ja = 0, jb = 0;
+            for (size_t m = i; m < j; m++) ja += japaneseIn(kept[m].line.text);
+            for (size_t m = j; m < k; m++) jb += japaneseIn(kept[m].line.text);
+            join = ja >= 3 && jb >= 3;
+        }
+        if (join) {
+            const unsigned into = kept[i].block;
+            for (size_t m = j; m < k; m++) kept[m].block = into;
+            st.joined++;
+            continue;  // the joined block may take the next one too
+        }
+        i = j;
     }
     st.dictChecks = sst.dictChecks;
     st.dictMs = dict0 + sst.dictMs;

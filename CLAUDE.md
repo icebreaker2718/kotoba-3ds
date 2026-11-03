@@ -200,6 +200,13 @@ works on the code.
   flush-to-zero). The alpha-only per-worker timing in the read line
   (`setWorkerClock`, `WorkerSummary`) was removed when it moved to `test`. Open question for the owner: all cores on each line (a team per
   step_op / run_pw, ~96% of a line is parallel per column or position), worth it only if core 3 pulls its weight.
+- On `test` (2026-11-02, owner's request: the spotter's grouping too strict): `readScreenSpot` joins two blocks
+  next in reading order whatever their kinds (the spotter's `joins()` needs one tag, and a bubble's first row was often
+  tagged scene/name over dialogue): the next block's first line below the last line (gap <= the taller height, the
+  spotter's rule), heights within 3:2, left edges within 30% of the taller height (`g_spotJoinGapPct` /
+  `g_spotJoinLeftPct`; bench_cli takes KT_JOIN_GAP / KT_JOIN_LEFT, -1 off), both blocks with 3+ Japanese characters.
+  Backtest, 125 screens (shots/ + luma/screenshots/): 25 changed, 24 better; left 40-75% also joined M&L's "あらすじ"
+  heading (8 px off), 150% Pokémon's speaker names (24-33 px); gap 150-300% changed nothing. Log: "joined N".
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

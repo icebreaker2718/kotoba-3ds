@@ -1493,9 +1493,9 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
         sst.clock = OsTimeMs;
         const bool ok = kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey, ScreenW(s), 240, paras, err, LocalProgress, &sst);
         LogOcr(Utils::Format("spotter reader: %s %lu ms: spotter %lu ms (%u lines, %u furigana, %u vertical), "
-                             "read %u in %lu ms, kept %u, dictionary %u checks %lu ms",
+                             "read %u in %lu ms, kept %u, joined %u, dictionary %u checks %lu ms",
                              s == 0 ? "top" : "touchscreen", (unsigned long)(osGetTime() - tc0), (unsigned long)sst.spotMs,
-                             sst.boxes, sst.ruby, sst.vertical, sst.read, (unsigned long)sst.readMs, sst.kept, sst.dictChecks,
+                             sst.boxes, sst.ruby, sst.vertical, sst.read, (unsigned long)sst.readMs, sst.kept, sst.joined, sst.dictChecks,
                              (unsigned long)sst.dictMs));
         return ok;
     }
