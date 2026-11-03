@@ -7,14 +7,17 @@ works on the code.
 
 ## Standing rules (from the owner)
 
-- **New work goes to the `test` branch.** Nothing new reaches `main` until the owner has
-  confirmed it on real hardware and says to merge. Docs-only changes (README, this file) may go
-  straight to `main`; then merge `main` into `test`.
-- **Experiments the owner wants kept away from the test branch's users go to `alpha`.** It moves
-  to `test` only when the owner says so. CI publishes each alpha build as the `alpha-dev`
+- **All new work goes to the `alpha` branch** (owner, 2026-11-03), unless the owner explicitly says
+  otherwise for a change. **Never push to `test` or `main` without the owner's permission**: that
+  includes docs-only changes. Work moves from `alpha` to `test` only when the owner says so, and
+  from `test` to `main` only after the owner has confirmed it on real hardware and says to merge.
+- **Every change to `alpha` goes on the owner's SD card** when it's connected (the `alpha-dev`
+  build, below).
+- `alpha` and `test` have separate histories: to bring `alpha` up to `test`, commit `test`'s tree
+  on `alpha` (`git rm -r . && git checkout origin/test -- .`), no force push. CI publishes each alpha build as the `alpha-dev`
   pre-release, titled "DEVELOPMENT ONLY - do not use" (the owner's OK, 2026-10-28): run artifacts
   can't be downloaded from this environment (their storage host is blocked), release assets can.
-  Fetch it through the REST API (as below, tag `alpha-dev`) and put it on the owner's SD card.
+  Fetch it through the REST API (as below, tag `alpha-dev`).
 - **When unsure about a design decision, stop and ask** before building it.
 - **Anonymity:** no personal information (names, home paths, emails) in commits or files.
 - **Commits** are authored `Claude <noreply@anthropic.com>` and end with the attribution lines the
@@ -22,7 +25,8 @@ works on the code.
   8a36095) are theirs: never rewrite or re-author them, even if a hook flags them as unverified.
 - **OCR changes are backtested** against every saved screenshot before they go to `test`
   (see below), and the result is reported: how many screens changed, better or worse.
-- After a change is on `test`, put the build on the owner's SD card when it's connected.
+- After a change is on `alpha` (or, with permission, `test`), put that build on the owner's SD card
+  when it's connected.
 
 ## Branches, CI and releases
 
@@ -207,6 +211,16 @@ works on the code.
   `g_spotJoinLeftPct`; bench_cli takes KT_JOIN_GAP / KT_JOIN_LEFT, -1 off), both blocks with 3+ Japanese characters.
   Backtest, 125 screens (shots/ + luma/screenshots/): 25 changed, 24 better; left 40-75% also joined M&L's "あらすじ"
   heading (8 px off), 150% Pokémon's speaker names (24-33 px); gap 150-300% changed nothing. Log: "joined N".
+- On `alpha` (2026-11-03, owner's choice): **a 128 KB networking block reserved at game start** (`kt::netReserve`
+  in core/net.cpp, called in main() after the "start:" line; kept for the session; netStop no longer frees it; the
+  512/256/128 KB fallback only when the reservation failed). Why: after the first read the heap has ~620 KB free
+  (model ~1,160 KB, 3 worker contexts ~540 KB, picture pool 337 KB, glyph slab 96 KB, dict cache 96 KB, spotter
+  52 KB); a 512 KB socket block taken then left ~100 KB, and the card upload's `new char[16384]` (reply buffer in the
+  POST code) threw bad_alloc -> abort() (crash_dump_00000019, Mario & Luigi: Make Anki cards run twice; the first
+  got 256 KB and sent 16 of 17). Reads lose 128 KB of headroom. Log: "net: 128 KB reserved ...", "started with a
+  reserved 128 KB block". Unverified: socInit with 128 KB and a card upload (check on the console). Not done (owner
+  declined for now): a larger plugin memory block (plgInfo MemorySize 10MiB / extra block at runtime); allocations in
+  the upload path still abort on failure instead of reporting it.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

@@ -1674,8 +1674,9 @@ static bool NetStart(std::string &error) {
     u32 freeKB = HeapFree() / 1024, largestKB = LargestFreeKB();
     bool ok = kt::netStart(error);
     if (ok)
-        LogOcr(Utils::Format("net: started with a %lu KB block (heap free %lu KB, largest %lu KB)",
-                             (unsigned long)(kt::netBufferSize() / 1024), (unsigned long)freeKB,
+        LogOcr(Utils::Format("net: started with a%s %lu KB block (heap free %lu KB, largest %lu KB)",
+                             kt::netReserved() ? " reserved" : "", (unsigned long)(kt::netBufferSize() / 1024),
+                             (unsigned long)freeKB,
                              (unsigned long)largestKB));
     else
         LogOcr(Utils::Format("net: not started (heap free %lu KB, largest %lu KB): %s", (unsigned long)freeKB,
@@ -2510,6 +2511,12 @@ int main(void) {
     LoadSettings();
     LogOcr(Utils::Format("start: game %s, plugin heap %lu KB, heap free %lu KB", TitleIdHex().c_str(),
                          (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(HeapFree() / 1024)));
+    // Make Anki cards' networking block, before the reader takes the heap (kept for the session)
+    if (kt::netReserve())
+        LogOcr(Utils::Format("net: %lu KB reserved for networking, heap free %lu KB",
+                             (unsigned long)(kt::netBufferSize() / 1024), (unsigned long)(HeapFree() / 1024)));
+    else
+        LogOcr("net: no block reserved for networking: taken when needed instead");
     {   // CTRPF's own screenshot hotkey stays off: the plugin makes its screenshots itself
         bool *enabled = nullptr;
         u32 *hotkey = nullptr;

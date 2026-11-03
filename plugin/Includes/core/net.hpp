@@ -29,9 +29,13 @@ private:
 // network-related is left open while the game runs or exits.
 // The socket service needs one page-aligned block from the plugin's heap; after a long session
 // the heap is in pieces, so smaller blocks are tried when the full size isn't there.
+// netReserve() (at game start, while the heap is in one piece): takes the block now and keeps it for the
+// whole session (128 KB), so networking doesn't need a big block from a heap the reader has filled.
+bool netReserve();
+bool netReserved();
 bool netStart(std::string &error);
 void netStop();
-// Size of the block the running socket service got (0 when stopped or off the 3DS), for the log.
+// Size of the block the socket service runs on (the reserved one, or the running service's; 0 otherwise), for the log.
 uint32_t netBufferSize();
 
 // TCP connection to an IP address or host name (DNS), with a timeout. Returns the socket
