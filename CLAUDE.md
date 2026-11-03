@@ -164,7 +164,8 @@ works on the code.
   "couldn't reach your PC". Leak check, 2026-11-01: the reader (box and spotter + dict paths) under ASan/LSan on 8
   real screens: no reports, so fragmentation, not a leak. Unverified: that socInit and a card upload work with 128
   KB (check on the console); if not, the fallback sizes need raising.
-- On `alpha` (2026-11-01, owner's request: "optimize as much as possible", nothing may read differently): a speed
+- On `test` since 2026-11-01 (moved from `alpha` at the owner's request; not yet on hardware as a test build). The
+  speed pass (owner's request: "optimize as much as possible", nothing may read differently): a speed
   pass, every change byte-identical on 94 saved screens x 4 modes (fast, shaded, spotter, whole screen) natively,
   with VOCR_SIMD32_EMULATE on x86, and the ARM build under qemu-arm (3 workers and 1). Tooling: `tests/bench_cli.cpp`
   (all modes, many screens, one process; KT_WORKERS, KT_READS); ARM instruction profiles from qemu-arm's
@@ -193,12 +194,23 @@ works on the code.
      column, the two-level head's level 1, escape and level 2 by 4-frame chunks (each frame's updates in block order);
      jobs under ~6000 multiply-accumulates stay on one thread (`par_on`). Shared spinning team in `core/team.hpp`
      (the spotter uses it too). 3+ lines: a worker per line as before. Same text (2, 3, 4 workers, oversubscribed;
-     qemu-arm); ThreadSanitizer clean. Read line says "team ..." instead of "workers ..." when it ran.
+     qemu-arm); ThreadSanitizer clean.
   Tried and dropped: an SXTB16/SMLABB 3x3 kernel in C (no fewer instructions than LDRSB+SMLABB), bigger VOCR tiles
   (weights reused more, but tile 8 = +130 KB per worker arena), a cheaper ReLU (results depend on the VFP's
-  flush-to-zero). **Alpha-only diagnostic to remove before `test`:** the read line's "workers coreN L lines M ms"
-  (`LocalOcr::setWorkerClock`, `WorkerSummary`). Open question for the owner: all cores on each line (a team per
+  flush-to-zero). The alpha-only per-worker timing in the read line
+  (`setWorkerClock`, `WorkerSummary`) was removed when it moved to `test`. Open question for the owner: all cores on each line (a team per
   step_op / run_pw, ~96% of a line is parallel per column or position), worth it only if core 3 pulls its weight.
+- On `test` (2026-11-02, owner's request: the spotter's grouping too strict): `readScreenSpot` joins two blocks
+  next in reading order whatever their kinds (the spotter's `joins()` needs one tag, and a bubble's first row was often
+  tagged scene/name over dialogue): the next block's first line below the last line (gap <= the taller height, the
+  spotter's rule), heights within 3:2, left edges within 30% of the taller height (`g_spotJoinGapPct` /
+  `g_spotJoinLeftPct`; bench_cli takes KT_JOIN_GAP / KT_JOIN_LEFT, -1 off), both blocks with 3+ Japanese characters.
+  Backtest, 125 screens (shots/ + luma/screenshots/): 25 changed, 24 better; left 40-75% also joined M&L's "あらすじ"
+  heading (8 px off), 150% Pokémon's speaker names (24-33 px); gap 150-300% changed nothing. Log: "joined N".
+- Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
+  until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
+  its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
+  Not fixed.
 - Releases: a version bump (plgInfo + PluginMenu) and a CHANGELOG entry, plus UPDATING.md steps when users
   must do more than replace the plugin; the owner reviews them before the merge to main. The old
   `release-1.1.0` branch (drafted on items 1-2 only) is superseded and can be deleted.

@@ -9,8 +9,28 @@ already in their SD card folders. With [3dsDL](https://ankush.one/3dsDL/), scan 
 then extract the zip at the root of the card, and everything is in place. No SD card reader
 needed. The steps are in the [README](README.md#install-over-wi-fi-with-3dsdl).
 
+### Faster reading
+
+Reading the screen is faster, with the same text as before. On a New 3DS, a normal read
+(fast mode off, no reading area) went from about 425 ms to about 230 ms. Finding the lines of
+text now takes about 100 ms instead of 250 ms. All of the console's cores now share the work:
+when a screen has only one or two lines, each line is split between them, and when it has
+several text boxes, they're read together instead of one after another.
+
+### "Fast mode" is now "Text boxes only"
+
+Normal reading is now nearly as fast as fast mode was, so the setting has a new name that says
+what it does: it reads only flat-colour text boxes (most dialogue boxes), so nothing else on the
+screen gets in. It may still be slightly faster, but only by very little. Your setting is kept.
+For the quickest reads, set a *Reading area*.
+
 ### Fixes
 
+- **A speech bubble's first line read as separate text.** In normal reading, a bubble's first
+  row was sometimes treated as its own piece of text, so a sentence came out split in two
+  (「さあここが」 and 「ツアーの見せ場だぞ!」). Lines right under each other with the same left
+  edge and size are now kept together. A speaker's name beside the text stays separate. On the
+  saved screenshots, 24 of 125 screens now read as one sentence where they were split before.
 - **"Not enough memory for networking" after a long session.** *Make Anki cards*, *Known words*
   and finding your PC needed one large block of memory, which a long session could leave in too
   many pieces. They now make do with a smaller block when the large one isn't there. If even that

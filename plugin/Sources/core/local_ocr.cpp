@@ -298,9 +298,6 @@ struct LineJob {
     unsigned *nAlts = nullptr;
     float *conf = nullptr;
     const unsigned *order = nullptr;  // the lines in the order they are handed out
-    LocalOcr::WorkerStat *stats = nullptr;  // per worker (diagnostic), or null
-    uint64_t (*clock)() = nullptr;
-    int (*core)() = nullptr;
     std::atomic<unsigned> next{0}, worker{0};
 };
 
@@ -315,7 +312,6 @@ void lineTeamMember(void *arg) {
     LineTeam *t = (LineTeam *)arg;
     LineJob *j = t->job;
     const unsigned w = t->join();
-    const uint64_t t0 = j->clock ? j->clock() : 0;
     if (w == 0) {
         vocr_ctx *c = (vocr_ctx *)j->ctxs[0];
         vocr_set_par(c, &t->par);
@@ -329,28 +325,16 @@ void lineTeamMember(void *arg) {
     } else {
         t->help(w);
     }
-    if (j->stats && w < t->workers) {
-        j->stats[w].core = j->core ? j->core() : -1;
-        j->stats[w].lines = w == 0 ? j->count : 0;
-        j->stats[w].ms = j->clock ? (uint32_t)(j->clock() - t0) : 0;
-    }
 }
 
 void lineWorker(void *arg) {
     LineJob *j = (LineJob *)arg;
     unsigned w = j->worker.fetch_add(1);
     vocr_ctx *c = (vocr_ctx *)j->ctxs[w];
-    const uint64_t t0 = j->clock ? j->clock() : 0;
-    unsigned lines = 0;
-    for (unsigned k; (k = j->next.fetch_add(1)) < j->count; lines++) {
+    for (unsigned k; (k = j->next.fetch_add(1)) < j->count;) {
         const unsigned i = j->order[k];
         j->rc[i] = runLine(c, j->model, j->grey, j->stride, j->lines[i], j->text + (size_t)i * kLineCap, kLineCap,
                            j->tk ? &j->tk[w] : nullptr, j->alts + (size_t)i * kMaxAlts, &j->nAlts[i], &j->conf[i]);
-    }
-    if (j->stats) {
-        j->stats[w].core = j->core ? j->core() : -1;
-        j->stats[w].lines = lines;
-        j->stats[w].ms = j->clock ? (uint32_t)(j->clock() - t0) : 0;
     }
 }
 }  // namespace
@@ -499,7 +483,6 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
     // workers: one per line up to workers_, each with its own context (made at the load); with fewer lines than
     // workers, the whole team on each line in turn (lineTeamMember)
     const bool team = runner_ && workers_ > 1 && n >= 1 && n < workers_;
-    lastTeam_ = team;
     unsigned workers = runner_ ? std::min<unsigned>(workers_, n) : 1;
     if (team) workers = 1;  // one context: the team shares it
     ensureWorkers(workers);
@@ -533,10 +516,6 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
     std::stable_sort(order.begin(), order.begin() + n,
                      [&](unsigned a, unsigned b) { return todoLines[a].w * todoLines[b].h > todoLines[b].w * todoLines[a].h; });
     job.order = order.data();
-    wstats_.assign(team ? workers_ : workers, WorkerStat());
-    job.stats = wstats_.data();
-    job.clock = clock_;
-    job.core = core_;
     if (team) {
         if (progress) progress(0, 1);
         LineTeam lt;
@@ -550,15 +529,11 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
         if (progress) progress(0, 1);
         runner_(workers, lineWorker, &job);
     } else {
-        const uint64_t t0 = clock_ ? clock_() : 0;
         for (unsigned k = 0; k < n; k++) {  // one at a time, with progress
             if (progress) progress(k, n);
             job.rc[k] = runLine((vocr_ctx *)ctxs_[0], m, grey, w, todoLines[k], job.text + (size_t)k * kLineCap, kLineCap,
                                 job.tk, job.alts + (size_t)k * kMaxAlts, &job.nAlts[k], &job.conf[k]);
         }
-        wstats_[0].core = core_ ? core_() : -1;
-        wstats_[0].lines = n;
-        wstats_[0].ms = clock_ ? (uint32_t)(clock_() - t0) : 0;
     }
     for (unsigned k = 0; k < n; k++) {
         const VocrLine &L = todoLines[k];
@@ -1192,6 +1167,7 @@ static unsigned kanaIn(const std::string &t) {
 // faint glyph at a line's end (ー, …, ！), which the recognizer then loses (35%: best on the labelled
 // screens). A variable for the tests.
 unsigned g_spotGrowPct = 35;
+int g_spotJoinGapPct = 100, g_spotJoinLeftPct = 30;  // block joining (readScreenSpot), percent of the taller line
 
 // Kana and the marks around them only (a line of furigana), at least one kana.
 static bool kanaOnly(const std::string &t) {
@@ -1266,7 +1242,7 @@ bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, co
                 break;
             }
         }
-    struct Kept { unsigned block; TextLine line; };
+    struct Kept { unsigned block; TextLine line; const SpotBox *box; };
     std::vector<Kept> kept;
     const uint32_t dict0 = st.dictMs;
     ScoredReadStats sst;
@@ -1279,7 +1255,39 @@ bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, co
         // as a line found out in the scene: the recognizer sure of it, or words in it (judged as a text
         // box's line, the spotter's dialogue kept sprites and decorations read as text: 「ーロエロー」)
         if (!keepLine(*l, dict, false, &sst)) continue;
-        kept.push_back({boxes[i].block, *l});
+        kept.push_back({boxes[i].block, *l, &boxes[i]});
+    }
+    // The spotter joins lines into a block only when it gave them the same kind, so a speech bubble's first row
+    // tagged as scene text or a name over the rest tagged as dialogue came out as two blocks. Two blocks next to
+    // each other in reading order join (whatever their kinds) when the first's last line and the second's first
+    // line are one text's rows: the second right below (a gap of at most the taller line's height, the spotter's
+    // own rule), heights within 3:2, and the left edges together (within 30% of the line's height, ~7 px: a
+    // speaker's name stands 20-30 px right of the text's edge, Mario & Luigi's "あらすじ" heading 8 px). A block of fewer than 3 Japanese characters (a scrap, dropped
+    // below) joins nothing.
+    for (size_t i = 0; i < kept.size();) {
+        size_t j = i;
+        while (j < kept.size() && kept[j].block == kept[i].block) j++;
+        if (j >= kept.size()) break;
+        size_t k = j;
+        while (k < kept.size() && kept[k].block == kept[j].block) k++;
+        const SpotBox &a = *kept[j - 1].box, &b = *kept[j].box;
+        const int top = (int)std::max(a.h, b.h), low = (int)std::min(a.h, b.h);
+        const int gap = (int)b.y - (int)(a.y + a.h), dx = (int)b.x - (int)a.x;
+        bool join = b.y > a.y && gap <= g_spotJoinGapPct * top / 100 && 2 * top <= 3 * low &&
+                    std::abs(dx) * 100 <= g_spotJoinLeftPct * top;
+        if (join) {
+            unsigned ja = 0, jb = 0;
+            for (size_t m = i; m < j; m++) ja += japaneseIn(kept[m].line.text);
+            for (size_t m = j; m < k; m++) jb += japaneseIn(kept[m].line.text);
+            join = ja >= 3 && jb >= 3;
+        }
+        if (join) {
+            const unsigned into = kept[i].block;
+            for (size_t m = j; m < k; m++) kept[m].block = into;
+            st.joined++;
+            continue;  // the joined block may take the next one too
+        }
+        i = j;
     }
     st.dictChecks = sst.dictChecks;
     st.dictMs = dict0 + sst.dictMs;

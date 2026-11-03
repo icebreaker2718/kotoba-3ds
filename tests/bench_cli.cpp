@@ -18,6 +18,7 @@
 #include "core/textbox.hpp"
 
 using namespace kt;
+namespace kt { extern int g_spotJoinGapPct, g_spotJoinLeftPct; }
 struct FileReader : Reader {
     FILE *f;
     uint32_t sz = 0;
@@ -59,6 +60,8 @@ int main(int argc, char **argv) {
     TextSpotter spot;
     if (!spot.load(sf, e)) { printf("SPOTTER FAILED: %s\n", e.c_str()); return 3; }
     spot.setParallel(workers, workers > 1 ? runThreads : nullptr);
+    if (getenv("KT_JOIN_GAP")) g_spotJoinGapPct = atoi(getenv("KT_JOIN_GAP"));    // block joining (spotter), for tuning
+    if (getenv("KT_JOIN_LEFT")) g_spotJoinLeftPct = atoi(getenv("KT_JOIN_LEFT"));  // -1 turns it off
     int first = 4;
     std::string modes = "fsbw";
     if (argc > 4 && !strchr(argv[4], '.')) { modes = argv[4]; first = 5; }

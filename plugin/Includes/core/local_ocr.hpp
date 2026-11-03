@@ -59,12 +59,6 @@ public:
     typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
     void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
     unsigned lastWorkers() const { return lastWorkers_; }
-    // Per worker of the last recognition (alpha diagnostic): the CPU core it ran on (core(), when set), the lines it
-    // read and its busy milliseconds (clock(), when set). Index = the order the workers started in.
-    void setWorkerClock(uint64_t (*clock)(), int (*core)()) { clock_ = clock; core_ = core; }
-    struct WorkerStat { int core = -1; unsigned lines = 0; uint32_t ms = 0; };
-    const std::vector<WorkerStat> &lastWorkerStats() const { return wstats_; }
-    bool lastTeam() const { return lastTeam_; }  // the last recognition ran its lines one by one, each on every worker
     // VOCR's batch sizes (0 = its defaults): frames per tile and frames per output-head batch.
     // Bigger batches use more memory; the text is the same. Takes effect at the next load().
     void setOptions(unsigned tileFrames, unsigned headFrames) { tileFrames_ = tileFrames; headFrames_ = headFrames; }
@@ -125,10 +119,6 @@ private:
     unsigned workers_ = 1, lastWorkers_ = 1;
     Runner runner_ = nullptr;
     unsigned tileFrames_ = 0, headFrames_ = 0;
-    uint64_t (*clock_)() = nullptr;
-    int (*core_)() = nullptr;
-    std::vector<WorkerStat> wstats_;
-    bool lastTeam_ = false;
     LineFixer fixer_ = nullptr;
     void *fixerUser_ = nullptr;
     std::vector<TopK> topk_;
@@ -191,6 +181,7 @@ struct SpotReadStats {
     unsigned boxes = 0, vertical = 0;   // boxes the spotter found (vertical ones are not read)
     unsigned ruby = 0;                  // furigana lines left out
     unsigned read = 0, kept = 0;        // lines recognized / kept
+    unsigned joined = 0;                // blocks joined to the one before (one text the spotter split by kind)
     unsigned dictChecks = 0;
     uint64_t (*clock)() = nullptr;      // with a clock (milliseconds), where the time went
     uint32_t spotMs = 0, readMs = 0, dictMs = 0;
@@ -199,7 +190,8 @@ struct SpotReadStats {
 // The text spotter's reader: the spotter finds the screen's lines (no text-box search, no line
 // finder), the recognizer reads each, and a line keeps its place if it reads like text (two
 // Japanese characters or more, and the recognizer sure of it or words in it). Furigana the spotter
-// found as lines of their own are left out. One paragraph per spotter block, in its reading order.
+// found as lines of their own are left out. One paragraph per spotter block, in its reading order;
+// two blocks one under the other with their left edges together join, whatever kind the spotter gave them.
 bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, const uint8_t *grey, unsigned w,
                     unsigned h, std::vector<std::string> &paragraphs, std::string &error,
                     void (*progress)(unsigned i, unsigned n) = nullptr, SpotReadStats *stats = nullptr);

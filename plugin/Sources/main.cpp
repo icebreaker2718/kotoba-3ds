@@ -63,7 +63,7 @@ enum ReadMode { kReadTop = 0, kReadBottom = 1, kReadBoth = 2, kModes = 3 };
 static const char *const kModeNames[kModes] = {"Read the top screen", "Read the touchscreen", "Read both screens"};
 static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
 static bool g_kanjiForm = true;  // saved words in their kanji form (or as the game wrote them)
-static bool g_fastMode = false;  // fast mode: flat-colour text boxes only, no text spotter
+static bool g_fastMode = false;  // "Text boxes only" (was "Fast mode"; settings key fast=): flat-colour boxes, no spotter
 static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
 enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
 static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
@@ -1393,8 +1393,6 @@ static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, 
     }
     return g_core3 ? 3 : 2;
 }
-static uint64_t OcrClock() { return osGetTime(); }
-static int OcrCore() { return svcGetProcessorID(); }
 
 static bool LoadSpotter() {
     if (g_spotterState) return g_spotterState > 0;
@@ -1495,9 +1493,9 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
         sst.clock = OsTimeMs;
         const bool ok = kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey, ScreenW(s), 240, paras, err, LocalProgress, &sst);
         LogOcr(Utils::Format("spotter reader: %s %lu ms: spotter %lu ms (%u lines, %u furigana, %u vertical), "
-                             "read %u in %lu ms, kept %u, dictionary %u checks %lu ms",
+                             "read %u in %lu ms, kept %u, joined %u, dictionary %u checks %lu ms",
                              s == 0 ? "top" : "touchscreen", (unsigned long)(osGetTime() - tc0), (unsigned long)sst.spotMs,
-                             sst.boxes, sst.ruby, sst.vertical, sst.read, (unsigned long)sst.readMs, sst.kept, sst.dictChecks,
+                             sst.boxes, sst.ruby, sst.vertical, sst.read, (unsigned long)sst.readMs, sst.kept, sst.joined, sst.dictChecks,
                              (unsigned long)sst.dictMs));
         return ok;
     }
@@ -1506,14 +1504,6 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
                          s == 0 ? "top" : "touchscreen", (unsigned long)(osGetTime() - tc0), (unsigned long)g_boxSearchMs[s],
                          (unsigned)boxes.size(), boxes.empty() ? ", read whole" : ""));
     return ok;
-}
-
-// Alpha diagnostic: each worker of the last recognition, "workers core2 3 lines 140 ms, core0 2 lines 132 ms, ".
-static std::string WorkerSummary() {
-    std::string out = g_localOcr.lastTeam() ? "team" : "workers";
-    for (const kt::LocalOcr::WorkerStat &w : g_localOcr.lastWorkerStats())
-        out += Utils::Format(" core%d %u line%s %lu ms,", w.core, w.lines, w.lines == 1 ? "" : "s", (unsigned long)w.ms);
-    return out + " ";
 }
 
 // Reads the screens of `mode` -> text blocks (the top screen's first; with the text spotter in its
@@ -1533,7 +1523,6 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     // A read's pictures then come and go above them.
     Text().reserve();
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
-    g_localOcr.setWorkerClock(OcrClock, OcrCore);
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     ReservePictures();  // kept from the first read on, beside the model
@@ -1592,7 +1581,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                          (unsigned long)(t3 - t2), g_localOcr.lastWorkers(), CpuMHz(), g_fixedChars,
                          (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
                          (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
-           WorkerSummary() + first);
+           first);
     for (int s = 0; s < 2; s++) free(grey[s]);
     return any;
 }
@@ -2183,12 +2172,13 @@ static void Settings() {
             "even when the game wrote it in kana (ちょっと -> 一寸). As in the game: in kanji only when "
             "the game wrote it in kanji, else in kana (たべた -> たべる).\n\n"
             "A,  or : change.";
-        items[kFast].label = "Fast mode";
+        items[kFast].label = "Text boxes only";
         items[kFast].value = g_fastMode ? "on" : "off";
         items[kFast].help =
-            "On: looks only for text boxes of one flat colour (most games' dialogue boxes) and reads "
-            "their lines: quicker, but text out in the scene, menus and shaded bubbles may be missed or "
-            "read in part. Off: finds every line on the screen with the text spotter.\n\nA,  or : change.";
+            "On: reads only text boxes of one flat colour (most games' dialogue boxes), so nothing else "
+            "on the screen gets in, but text out in the scene, menus and shaded bubbles may be missed or "
+            "read in part. It may be slightly faster, but only by very little now. Off: finds every line "
+            "on the screen with the text spotter.\n\nA,  or : change.";
         items[kArea].label = "Reading area";
         items[kArea].value = AreaSummary();
         items[kArea].help =
