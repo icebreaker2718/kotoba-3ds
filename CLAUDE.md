@@ -221,6 +221,15 @@ works on the code.
   reserved 128 KB block". Unverified: socInit with 128 KB and a card upload (check on the console). Not done (owner
   declined for now): a larger plugin memory block (plgInfo MemorySize 10MiB / extra block at runtime); allocations in
   the upload path still abort on failure instead of reporting it.
+- On `alpha` (2026-11-04, owner's choice): **smaller dictionary caches** + an alpha diagnostic. A top-screen spotter
+  read failed ("not enough memory to look for text") after 36 reads in one M&L session: free before a read fell
+  564 -> 476 KB (no fragmentation: largest == free); the touchscreen still read (spotter arena 178 KB vs 208 KB top,
+  plus the grey copy 75 / 94 KB). Dictionary's recent-answer maps capped 512/512/4096 -> 128/128/1024
+  (`kExactMemoMax` etc. in dict.hpp) and emptied with swap (clear() kept the bucket arrays). Same output on 219
+  screens x 4 modes; dictionary SD reads +14% (0.3 a read). **Alpha-only diagnostic, remove before `test`:**
+  "memory before the spotter: ... heap free, largest; dictionary caches ..." (ReadOneScreen). On paper ~480 KB
+  should still have fitted the top screen's ~300 KB, so ~tens of KB used during a read are unaccounted for: that
+  line tells. Owner declined a fallback to the box reader when the spotter can't get its memory.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

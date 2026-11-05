@@ -14,6 +14,8 @@ static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+// Empties a cache and gives its memory back (clear() keeps the map's bucket array).
+template <class M> static void drop(M &m) { M().swap(m); }
 
 bool Dictionary::open(Reader *r, std::string &error) {
     reader_ = r;
@@ -24,8 +26,8 @@ bool Dictionary::open(Reader *r, std::string &error) {
     memoLen_.clear();
     std::string().swap(fencePool_);
     std::vector<uint32_t>().swap(fenceAt_);
-    maskMemo_.clear();
-    prefixMemo_.clear();
+    drop(maskMemo_);
+    drop(prefixMemo_);
     uint8_t h[64];
     if (size_ < 64 || !r->read(0, h, 64)) { error = "dict.bin is missing or too small"; reader_ = nullptr; return false; }
     if (memcmp(h, "KTB1", 4) != 0) { error = "dict.bin has the wrong format (rebuild it)"; reader_ = nullptr; return false; }
@@ -40,7 +42,7 @@ bool Dictionary::open(Reader *r, std::string &error) {
     radOff_ = le32(h + 28);
     kanjiCount_ = le32(h + 32);
     kanjiOff_ = le32(h + 36);
-    exactMemo_.clear();
+    drop(exactMemo_);
     if ((uint64_t)keyIdxOff_ + (uint64_t)keyCount_ * keyRec_ > size_ ||
         (uint64_t)entryIdxOff_ + (uint64_t)(entryCount_ + 1) * 8 > size_) {
         error = "dict.bin is truncated (copy it again)";
@@ -138,7 +140,7 @@ std::string Dictionary::keyAt(uint32_t i, uint32_t *entryId) {
     if (entryId) {
         *entryId = le32(rec + 4);
         if (keyRec_ >= 12) {  // version 2: the entry's part-of-speech mask comes with it
-            if (maskMemo_.size() >= 4096) maskMemo_.clear();
+            if (maskMemo_.size() >= kMaskMemoMax) drop(maskMemo_);
             maskMemo_[*entryId] = le32(rec + 8);
         }
     }
@@ -222,7 +224,7 @@ void Dictionary::exact(const std::string &key, std::vector<uint32_t> &ids) {
     }
     std::vector<uint32_t> found;
     exactUncached(key, found);
-    if (exactMemo_.size() >= 512) exactMemo_.clear();
+    if (exactMemo_.size() >= kExactMemoMax) drop(exactMemo_);
     exactMemo_[key] = found;
     for (uint32_t eid : found)
         if (std::find(ids.begin(), ids.end(), eid) == ids.end()) ids.push_back(eid);
@@ -243,7 +245,7 @@ bool Dictionary::hasPrefix(const std::string &pre) {
     if (memo != prefixMemo_.end()) return memo->second;
     uint32_t i = lowerBound(pre);
     bool yes = i < keyCount_ && keyAt(i, nullptr).compare(0, pre.size(), pre) == 0;
-    if (prefixMemo_.size() >= 512) prefixMemo_.clear();
+    if (prefixMemo_.size() >= kPrefixMemoMax) drop(prefixMemo_);
     prefixMemo_[pre] = yes;
     return yes;
 }

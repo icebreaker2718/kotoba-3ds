@@ -60,6 +60,12 @@ public:
                 std::vector<std::pair<uint32_t, std::string>> &out);
 
     uint32_t posMask(uint32_t entryId);
+    // How full the recent-answer caches are (for the read log: they hold on to memory between reads).
+    void cacheCounts(size_t &exact, size_t &prefix, size_t &mask) const {
+        exact = exactMemo_.size();
+        prefix = prefixMemo_.size();
+        mask = maskMemo_.size();
+    }
     bool entry(uint32_t entryId, Entry &out);
 
     const std::vector<Radical> &radicals();
@@ -77,6 +83,10 @@ private:
     // The first levels of the binary search over the keys are the same for every lookup: their
     // keys are kept in memory once read (about 30 KB), so a lookup reads ~3 blocks instead of ~20.
     enum : uint32_t { kMemoLevels = 12 };
+    // The recent-answer caches below are emptied (and their memory given back) when this full. They stay for
+    // the session, so they come out of the reader's room: at 512 / 512 / 4096 they took ~100-170 KB in a long
+    // session and a top-screen read ran out of memory (owner, Mario & Luigi, 2026-11-04, 36 reads).
+    enum : size_t { kExactMemoMax = 128, kPrefixMemoMax = 128, kMaskMemoMax = 1024 };
     std::unordered_map<std::string, std::vector<uint32_t>> exactMemo_;  // recent exact() answers
     std::unordered_map<std::string, bool> prefixMemo_;                  // recent hasPrefix() answers
     std::unordered_map<uint32_t, uint32_t> maskMemo_;                   // posMask of recently found entries

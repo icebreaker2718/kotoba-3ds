@@ -1489,6 +1489,15 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
         return ok;
     }
     if (spot) {
+        {   // diagnostic (alpha): the room the spotter's working memory (~208 KB top, ~178 KB touchscreen) has now,
+            // and how full the dictionary's caches are
+            size_t ex = 0, pre = 0, mask = 0;
+            g_dict.cacheCounts(ex, pre, mask);
+            LogOcr(Utils::Format("memory before the spotter: %s heap free %lu KB, largest %lu KB; dictionary caches "
+                                 "%u exact, %u prefix, %u masks",
+                                 s == 0 ? "top" : "touchscreen", (unsigned long)(HeapFree() / 1024),
+                                 (unsigned long)LargestFreeKB(), (unsigned)ex, (unsigned)pre, (unsigned)mask));
+        }
         kt::SpotReadStats sst;
         sst.clock = OsTimeMs;
         const bool ok = kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey, ScreenW(s), 240, paras, err, LocalProgress, &sst);
