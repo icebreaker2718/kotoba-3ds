@@ -381,6 +381,12 @@ works on the code.
   (default 1), KT_POISON. Expected on the console: free between reads ~190 KB -> ~500 KB (207 + 128 back, ~42 KB fixed
   for the caches instead of ~25 KB that came and went). Untried: socInit in the lent block (page-aligned, inside the
   workers' block) and the streamed download on the console.
+  Console result (2026-11-08, 8f424f4, M&L with the 40k known list on the SD card): "net: will use 512 KB of the
+  recognizer's memory", "spotter: works in the recognizer's memory (564 KB, needs 207 KB)"; 45 reads (26 both screens,
+  10 top, 9 touchscreen; 14 of them Text boxes only / reading area), no failure, no heap report, no crash dump; free
+  before a read 567 KB at the first, then 502 KB on every read after (flat: no drift at all); Make Anki cards 3 times
+  "started with a 512 KB block in the recognizer's memory", all fine. Mean read: top 275 ms, both 565 ms, touchscreen
+  362 ms. Still untried on the console: the streamed "Get them from my PC" (known.txt unchanged that session).
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
