@@ -258,6 +258,26 @@ works on the code.
   instead" / "spotter: working memory given back". Heap free drops ~208 KB for the session (the large-known-list and
   large-mined.tsv audit risks get closer). Check: 43 saved screens (39 top, 4 touchscreen) x 4 orders x 1 and 3
   workers, kept vs fresh memory: same boxes, ASan/UBSan clean. The alpha diagnostics stay until the owner confirms.
+  Console result (2026-11-07, M&L, many both-screens reads): the kept arena worked ("207 KB kept", no spotter
+  failure), but after ~30 reads the top screen's grey copy (greyFromRGB, 96,000 bytes) was refused 17 reads in a row
+  with LargestFreeKB = 340 KB measured just before (nothing allocated in between) while the touchscreen's 76,800 worked;
+  "Read both screens" then silently showed the touchscreen alone. A consistent dlmalloc can't refuse 94 KB right after
+  granting 340 KB, and Ubuntu's arm-none-eabi newlib (same mallocr.c) under qemu-arm with a plugin-shaped heap refused
+  nothing in 400 random states: so the console's heap is probably inconsistent (a chunk header overwritten, or sbrk
+  moved by something other than malloc), not short. Recognition workers don't malloc (runLine writes preallocated
+  buffers). Owner declined, for now, reserving the grey copies too; offered: say so when one screen of a both-screens
+  read fails (not decided).
+- On `alpha` (2026-11-07, owner's choice): **heap diagnostic, alpha only, remove before `test`**. `heap_walk.c` /
+  `Includes/heap_walk.h` read newlib's malloc (dlmalloc 2.6.4 layout, 32-bit) through weak symbols (`__malloc_av_`,
+  `__malloc_sbrk_base`, `__malloc_top_pad`, ...; missing -> "malloc's variables not found"), under `__malloc_lock`:
+  malloc's top vs sbrk(0), a walk of every chunk from sbrk's base to top (stops at a fencepost, size 4 = a foreign sbrk,
+  or at a bad size = a header overwritten), free pieces, how many are big enough and whether they're on the bins, the
+  bins' totals, last remainder, bitmap, top pad / trim threshold / most sbrk'd. main.cpp `HeapReport(what, size)`: full
+  report ("heap: ...", "heap walk: ...", "heap bins: ...") for the session's first 4 refusals, one line after; called
+  for the grey copies (then greyFromRGB once more: "heap: the same again now: got/FAILED"), the spotter's fallback
+  memory (`SpotterMemFail`), the pictures' fallback and the reading area's crop. Tested under qemu-arm with Ubuntu's
+  newlib (scratch harness, not in the repo): totals equal mallinfo's; a foreign sbrk -> fencepost; an overwritten header
+  -> BROKEN at it; a fitting free chunk found on the bins.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

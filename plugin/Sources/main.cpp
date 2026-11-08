@@ -33,6 +33,7 @@
 #include "core/textbox.hpp"
 #include "core/textlines.hpp"
 #include "screen_ui.hpp"
+#include "heap_walk.h"  // diagnostic (alpha, remove before test)
 
 extern "C" u32 __ctru_heap_size;  // libctru: the plugin's heap (what Luma gave it, minus code and CTRPF's own)
 
@@ -271,6 +272,49 @@ static u32 LargestFreeKB() {
     return lo;
 }
 
+// Diagnostic (alpha, remove before test): when a big block is refused, how malloc sees the heap at that moment
+// (heap_walk.c): malloc's top against the heap's end (sbrk), every chunk from the start to top, its bins. The whole
+// report for the first 4 refusals of the session, then one line each.
+static void HeapReport(const char *what, size_t asked) {
+    static unsigned reports = 0;
+    HeapWalk w;
+    heap_walk(&w, (unsigned)asked);  // first, before the log's own strings touch the heap
+    reports++;
+    if (!w.ok) {
+        LogOcr(Utils::Format("heap: %s: %lu KB refused; malloc's variables not found (not newlib's malloc?)", what,
+                             (unsigned long)(asked / 1024)));
+        return;
+    }
+    if (reports > 4) {
+        LogOcr(Utils::Format("heap: %s: %lu KB refused (report %u): walk %s, largest free %u KB, %u big enough (%u on "
+                             "bins), top %u KB, sbrk %s top's end",
+                             what, (unsigned long)(asked / 1024), reports, w.walkOk ? "ok" : (w.fencepost ? "fencepost" : "BROKEN"),
+                             w.largestFree / 1024, w.fitting, w.fittingInBins, w.topSize / 1024,
+                             w.brk == w.top + w.topSize ? "at" : "NOT at"));
+        return;
+    }
+    LogOcr(Utils::Format("heap: %s: %lu KB refused. Heap %08X..%08X (sbrk end %08X, %u KB left beyond); malloc's top %08X, "
+                         "%u KB, ends %s sbrk's end",
+                         what, (unsigned long)(asked / 1024), w.base, w.heapEnd, w.brk,
+                         w.heapEnd > w.brk ? (w.heapEnd - w.brk) / 1024 : 0, w.top, w.topSize / 1024,
+                         w.brk == w.top + w.topSize ? "at" : "NOT at"));
+    if (w.walkOk || w.fencepost)
+        LogOcr(Utils::Format("heap walk: %s; %u chunks, %u KB used, %u KB free in %u pieces, largest %u KB at %08X; %u "
+                             "big enough, %u of them on malloc's bins",
+                             w.walkOk ? "start to top ok" : "stopped at a fencepost (sbrk moved by someone else)", w.chunks,
+                             w.usedBytes / 1024, w.freeBytes / 1024, w.freePieces, w.largestFree / 1024, w.largestFreeAt,
+                             w.fitting, w.fittingInBins));
+    else
+        LogOcr(Utils::Format("heap walk: BROKEN at %08X (size field %08X) after %u chunks, %u KB used, %u KB free in %u "
+                             "pieces, largest %u KB at %08X: a chunk header overwritten",
+                             w.walkStop, w.walkStopSize, w.chunks, w.usedBytes / 1024, w.freeBytes / 1024, w.freePieces,
+                             w.largestFree / 1024, w.largestFreeAt));
+    LogOcr(Utils::Format("heap bins: %u chunks, %u KB, largest %u KB; last remainder %u KB; bitmap %08X; top pad %u, trim "
+                         "threshold %u, most sbrk'd %u KB",
+                         w.binChunks, w.binBytes / 1024, w.binLargest / 1024, w.lastRemainder / 1024, w.binBlocks, w.topPad,
+                         w.trimThreshold, w.maxSbrked / 1024));
+}
+
 // New 3DS: 804 MHz + L2 cache while a lookup is open (the game is paused), then back to what the
 // game had. Old titles run at 268 MHz without L2; this is what Rosalina's "New 3DS menu" sets.
 static s64 g_cpuBefore = -1;  // svcKernelSetState(10) bits: 1 = 804 MHz, 2 = L2 cache
@@ -398,6 +442,7 @@ static void TakePicture(int i, u32 bytes) {  // call while the game is paused an
         p.owned = p.px != nullptr;
     }
     if (!p.px) {
+        HeapReport(i == 0 ? "picture, top screen" : "picture, touchscreen", (size_t)p.w * 240 * 2);  // diagnostic (alpha)
         LogOcr(Utils::Format("picture: %s not kept: no %u KB block (heap free %lu KB, largest %lu KB)",
                              i == 0 ? "top screen" : "touchscreen", (unsigned)(p.w * 240 * bytes / 1024),
                              (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB()));
@@ -1397,6 +1442,7 @@ static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, 
 // Diagnostic (alpha, remove before test): when the spotter can't get its working memory, what the heap looks like
 // at that very moment, and whether the same block can be had right after (a second malloc of it).
 static void SpotterMemFail(size_t need, bool arenaOk, bool setOk) {
+    HeapReport("spotter working memory", arenaOk ? 1684 : need);  // 1,684 bytes: its results' block
     void *again = malloc(need);
     const bool gotAgain = again != nullptr;
     free(again);
@@ -1509,6 +1555,11 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxe
     if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240, 3, !g_fastMode);
     g_boxSearchMs[i] = osGetTime() - tb;
     uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
+    if (!grey) {  // diagnostic (alpha): the heap at the refusal, then asked once more
+        HeapReport(i == 0 ? "grey copy, top screen" : "grey copy, touchscreen", (size_t)W * 240);
+        grey = kt::greyFromRGB(rgb, W, 240);
+        LogOcr(Utils::Format("heap: the same again now: %s", grey ? "got" : "FAILED"));
+    }
     if (!inPool) free(rgb);
     return grey;
 }
@@ -1529,6 +1580,7 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
             ok = kt::localReadScreen(g_localOcr, crop, a.w, a.h, std::vector<kt::TextBox>(), paras, err, LocalProgress);
             free(crop);
         } else {
+            HeapReport("reading area's picture", (size_t)a.w * a.h);  // diagnostic (alpha)
             err = "not enough memory for the picture";
         }
         LogOcr(Utils::Format("area reader (line finder): %s %ux%u at %u,%u: %lu ms", s == 0 ? "top" : "touchscreen",
