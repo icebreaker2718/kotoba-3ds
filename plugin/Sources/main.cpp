@@ -719,24 +719,7 @@ static void LoadKnown() {
     g_known.clear();
     g_knownFile.close();
     g_knownFromAnki = 0;
-    bool inMemory = false;
-    if (g_knownFile.open(kKnownPath) && g_knownFile.size() <= kKnownMax) {
-        // up to 1 MB: in memory (no SD read per check); bigger, or no room: searched on the SD card
-        const u32 size = g_knownFile.size();
-        char *buf = (char *)malloc(size + 1);
-        if (buf && !g_knownFile.read(0, buf, size)) {
-            free(buf);
-            buf = nullptr;
-        }
-        if (buf && g_known.adopt(buf, size, size)) {  // adopt owns buf from here on, also when it fails
-            inMemory = true;
-            g_knownFromAnki = g_known.size();
-            g_knownFile.close();
-            LogOcr(Utils::Format("known.txt: %u words (%lu KB), in memory, heap free %lu KB", (unsigned)g_knownFromAnki,
-                                 (unsigned long)(size / 1024), (unsigned long)(HeapFree() / 1024)));
-        }
-    }
-    if (!inMemory && g_knownFile.open(kKnownPath)) {
+    if (g_knownFile.open(kKnownPath)) {
         const u64 t = osGetTime();
         if (g_known.openFile(&g_knownFile)) {
             g_knownFromAnki = g_known.size();
@@ -1689,9 +1672,6 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     Text().reserve();
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
-    // tiles of 8 CTC frames (VOCR's default is 4): each layer's weights stream through the cache half as often;
-    // the same text on every saved screen, ~127 KB more per worker (plugin memory 10 MiB since 2026-11-08)
-    g_localOcr.setOptions(8, 0);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     ReservePictures();  // kept from the first read on, beside the model
     ReserveGreys();     // and the grey copies, next to them

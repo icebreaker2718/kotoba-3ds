@@ -328,7 +328,13 @@ works on the code.
   Console result (2026-11-08, 40k list): "known.txt: 40000 words (406 KB), searched on the SD card: 203 blocks indexed in
   250 ms", ~25 reads in every mode, no memory failure, Make Anki cards fine (the failed_ shots of that session are "no
   text found" reads).
-- On `alpha` (2026-11-08, owner's request: "try making the change for more memory" and "revert any changes we had to make
+- **Shelved on branch `alpha-10mib`** (bb7d6d9; owner, 2026-11-08: "shelve this for now on a 2nd alpha branch ... continue
+  trying to make the plugin work on 5MiB"); reverted on `alpha`, so alpha is 5 MiB again with the small dictionary caches,
+  tiles of 4 and known.txt on the SD card. CI publishes alpha-dev from `alpha` only: the shelved build is that branch's
+  plugin. Console result before shelving (2026-11-08, M&L, RE Revelations, Corpse Party): "gave the game back 10240 KB",
+  all three started, 35 reads, free before a read >= 4,315 KB, no memory errors, no crash dump, Make Anki cards fine;
+  mean read: top 469 ms, both 537 ms, touchscreen 348 ms. What it was:
+  (2026-11-08, owner's request: "try making the change for more memory" and "revert any changes we had to make
   for memory constraints to their faster variants"): **plugin memory 10 MiB** (plgInfo `MemorySize: 10MiB`; Luma's
   loader takes 2 / 5 / 10 MiB only, file_loader.c memRegionSizes; the heap is that minus the 3gx's code, ~8.6 MB).
   GiveGameItsMemory reads the block's size from Luma's header (heapSize + exeSize), so the commit-limit raise and the
