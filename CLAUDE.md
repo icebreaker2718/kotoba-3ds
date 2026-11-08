@@ -401,6 +401,12 @@ works on the code.
   Test list on the owner's SD (not in the repo): known.txt = their 2,510 words + JPDB v2.2, wordfreq 3.1 (ja) and
   OpenSubtitles 2018 (hermitdave/FrequencyWords) taken in turn by rank, Japanese-script only, 30,000 words, 282 KB;
   their real list backed up as known_backup.txt on the card.
+  Console result (2026-11-08, 916d3f0, M&L, two sessions: 19 reads with the 30k list, 36 after "Get them from my PC"
+  put the owner's 2,510 words back): no failure, no heap report, no crash dump; "spotter: works in the recognizer's
+  memory (754 KB ...)"; free before a read 276-278 KB at the first, then 210-214 KB flat (as expected). Make Anki
+  cards started in the lent 512 KB block with 194 KB free; one card timed out on the PC side (network, not memory).
+  Speed: no clear gain from tiles of 6 in the log (recognition ms per line 34 on 8f424f4 vs 42 here, but different
+  screens and line counts, and lines share 3 workers): a same-screen comparison would settle it.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
