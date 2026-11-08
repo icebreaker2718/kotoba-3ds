@@ -160,17 +160,25 @@ static void LoadSettings() {
 class SdReader : public kt::Reader {
 public:
     bool open(const std::string &path) {
+        close();
         if (File::Open(file_, path, File::READ) != File::SUCCESS) return false;
         size_ = (u32)file_.GetSize();
+        open_ = true;
         return true;
     }
     bool read(uint32_t off, void *dst, uint32_t len) override {
         return file_.Seek(off, File::SET) == File::SUCCESS && file_.Read(dst, len) == File::SUCCESS;
     }
     uint32_t size() override { return size_; }
+    void close() {
+        if (open_) file_.Close();
+        open_ = false;
+        size_ = 0;
+    }
 private:
     File file_;
     u32 size_ = 0;
+    bool open_ = false;
 };
 
 static SdReader *g_readerPtr = nullptr;
@@ -672,9 +680,12 @@ static int CountSaved() {
 }
 
 // The words the player has already, green in lookups: known.txt (the words of their Anki cards,
-// from the PC) and the words saved here. Loaded once, kept (reloaded after it changes).
+// from the PC), searched on the SD card (a few KB of index whatever its size), and the words saved
+// and marked here. Opened once, kept (opened again after it changes; CloseKnown() before writing it).
 static kt::KnownWords *g_knownPtr = nullptr;
 #define g_known Leaky(g_knownPtr)
+static SdReader *g_knownFilePtr = nullptr;
+#define g_knownFile Leaky(g_knownFilePtr)
 static bool g_knownLoaded = false;
 static size_t g_knownFromAnki = 0;  // words in known.txt
 static std::vector<std::string> *g_markedPtr = nullptr;  // marked.txt's words
@@ -694,26 +705,35 @@ static std::vector<std::string> FileLines(const char *path) {
     }
     return lines;
 }
-static const u32 kKnownMax = 1024 * 1024;
+static const u32 kKnownMax = 1024 * 1024;  // the most "Get them from my PC" takes
+
+static void CloseKnown() {  // before known.txt is written or removed
+    g_known.clear();
+    g_knownFile.close();
+    g_knownLoaded = false;
+}
 
 static void LoadKnown() {
     if (g_knownLoaded) return;
     g_knownLoaded = true;
     g_known.clear();
+    g_knownFile.close();
     g_knownFromAnki = 0;
-    File f;
-    if (File::Open(f, kKnownPath, File::READ) == File::SUCCESS) {
-        const u64 size = f.GetSize();
-        const u32 len = (u32)std::min<u64>(size, kKnownMax);
-        char *buf = (char *)malloc(len + 1);
-        if (buf && f.Read(buf, len) == File::SUCCESS) {
-            g_known.adopt(buf, len, (size_t)size);  // keeps buf
+    if (g_knownFile.open(kKnownPath)) {
+        const u64 t = osGetTime();
+        if (g_known.openFile(&g_knownFile)) {
             g_knownFromAnki = g_known.size();
+            LogOcr(Utils::Format("known.txt: %u words (%lu KB), searched on the SD card: %u blocks indexed in %lu ms, "
+                                 "%u out of order kept in memory%s, heap free %lu KB",
+                                 (unsigned)g_knownFromAnki, (unsigned long)(g_knownFile.size() / 1024),
+                                 (unsigned)g_known.fileBlocks(), (unsigned long)(osGetTime() - t),
+                                 (unsigned)(g_knownFromAnki - g_known.fileWords()),
+                                 g_known.spillDropped() ? Utils::Format(" (%u more left out)", (unsigned)g_known.spillDropped()).c_str() : "",
+                                 (unsigned long)(HeapFree() / 1024)));
         } else {
-            free(buf);
-            LogOcr(Utils::Format("known.txt (%lu KB) not loaded: not enough memory", (unsigned long)(size / 1024)));
+            g_knownFile.close();
+            LogOcr("known.txt not used: couldn't read it, or no memory for its index");
         }
-        f.Close();
     }
     std::vector<std::string> cols, saved;
     for (const std::string &l : SavedLines()) {
@@ -1962,6 +1982,7 @@ static void MakeCards() {
     }
     WriteWholeFile(kLogPath, out);
     if (!cards.empty()) {
+        CloseKnown();  // it's searched where it is: closed while it grows
         File f;
         if (File::Open(f, kKnownPath, File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
             f.Write(cards.data(), cards.size());
@@ -1999,8 +2020,8 @@ static void KnownWordsMenu() {
         if (c == 1) {
             if (Ask("Known words", "Forget the words of your Anki cards? (Saved words stay green.)",
                     {"Forget them", "Keep them"}) == 0) {
+                CloseKnown();
                 File::Remove(kKnownPath);
-                g_knownLoaded = false;
                 LoadKnown();
             }
             continue;
@@ -2010,8 +2031,7 @@ static void KnownWordsMenu() {
         m.setHelp(kKnownHelp);
         m.setMessage("Looking for your PC...");
         DrawMenu(m);
-        g_known.clear();  // room for the new list
-        g_knownLoaded = false;
+        CloseKnown();  // known.txt is written below
         std::string err, host, reply;
         int port = kPcPort;
         bool ok = NetStart(err) && ResolveServer(host, port, err);
@@ -2039,7 +2059,7 @@ static void KnownWordsMenu() {
         }
         Notice("Known words",
                Utils::Format("%u words with Anki cards. They show in green in lookups.", (unsigned)g_knownFromAnki) +
-                   (g_known.truncated() ? "\n\n(The list is too long for the 3DS: only its first part is used.)" : ""),
+                   (g_known.spillDropped() ? "\n\n(Part of the list wasn't in order and is left out: get it from your PC again.)" : ""),
                kKnownHelp);
         return;
     }

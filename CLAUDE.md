@@ -309,6 +309,22 @@ works on the code.
   Test list for the owner's SD (not in the repo): known.txt with their 2,494 words + JPDB v2.2 kana frequency's most
   common terms, 40,000 words, 406 KB (their own list backed up as known_backup.txt on the card). LoadKnown takes it at
   game start (file + 4 bytes a word), so expect less room for the model, pictures, grey copies and spotter.
+  Console result (2026-11-08): with the 40,000-word list loaded at start, the first read had 158 KB free: no room to
+  keep the grey copies or the spotter, every read "not enough memory for the picture" (52 KB free in 44 pieces), no
+  crash. Make Anki cards worked with 86 KB free (the low-memory upload is settled). With the owner's normal list 522 KB
+  was free at that point: room for only ~50 KB more of list (~7,000 words in all) before reads fail.
+- On `alpha` (2026-11-08, owner's choice): **known.txt searched on the SD card**, not loaded. `KnownWords::openFile(Reader*,
+  blockBytes = 2048)` (core/known_words.cpp) reads the file once in 4 KB chunks: words in UTF-8 byte order (as mine.py /
+  ocr_server.py write them) are indexed by block (the first word of each ~2 KB block: offsets + keys), a word out of
+  order (Make Anki cards appends its cards' words) goes to `spill_` in memory (at most kMaxSpill 4096; the rest
+  `spillDropped()`), duplicates skipped, '#' / blank lines and '\r' / spaces trimmed as before. has(): in-memory list (load/
+  adopt, still there for tests), extra_ (saved / marked), spill_, then one block read (the last block kept). main.cpp:
+  `g_knownFile` (SdReader, now with close()) kept open; `CloseKnown()` before known.txt is appended (MakeCards), removed
+  or rewritten (Known words menu); LoadKnown logs "known.txt: N words (K KB), searched on the SD card: B blocks indexed in
+  T ms, M out of order kept in memory ...". 40,000 words: 203 blocks, ~5 KB in memory (was ~570 KB). Checked: every word
+  of the 40k list (+3 appended) and twice as many near-misses give the in-memory list's answers (ASan/UBSan); 1,000
+  scattered checks = 1,000 block reads; test_ui gains an on-card case, test_ui / test_core pass. Still open (audit 1):
+  "Get them from my PC" holds the whole reply in memory (up to kKnownMax + 64) before writing known.txt.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
