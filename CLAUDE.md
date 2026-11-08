@@ -407,6 +407,8 @@ works on the code.
   cards started in the lent 512 KB block with 194 KB free; one card timed out on the PC side (network, not memory).
   Speed: no clear gain from tiles of 6 in the log (recognition ms per line 34 on 8f424f4 vs 42 here, but different
   screens and line counts, and lines share 3 workers): a same-screen comparison would settle it.
+  Owner's choice (2026-11-08): tiles back to VOCR's default 4 (no setOptions call; the workers' block 564 KB again), the
+  full caches kept: free before a read expected ~400 KB.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

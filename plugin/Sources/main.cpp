@@ -1756,10 +1756,6 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     Text().reserve();
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
-    // tiles of 6 CTC frames (VOCR's default is 4): each layer's weights stream through the cache less often; the same
-    // text on every saved screen (native and qemu-arm); the workers' block 564 -> 754 KB (8 would be 944 KB: too much
-    // of 5 MiB; it is on the shelved alpha-10mib branch)
-    g_localOcr.setOptions(6, 0);
     if (kt::netUp()) kt::netStop();  // never: the socket service would own the workers' memory the read uses
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     LendReaderMemory();  // the workers' memory, idle between reads, to Make Anki cards' networking
