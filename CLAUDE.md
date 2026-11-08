@@ -386,7 +386,9 @@ works on the code.
   10 top, 9 touchscreen; 14 of them Text boxes only / reading area), no failure, no heap report, no crash dump; free
   before a read 567 KB at the first, then 502 KB on every read after (flat: no drift at all); Make Anki cards 3 times
   "started with a 512 KB block in the recognizer's memory", all fine. Mean read: top 275 ms, both 565 ms, touchscreen
-  362 ms. Still untried on the console: the streamed "Get them from my PC" (known.txt unchanged that session).
+  362 ms. Streamed "Get them from my PC" confirmed the same day: "known: from the PC done, 19 KB written to the card",
+  then "known.txt: 2510 words (19 KB), searched on the SD card: 10 blocks indexed in 21 ms" (the 40k test list replaced
+  by the owner's real one; known_backup.txt still on the card), no crash; Make Anki cards fine after it.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
