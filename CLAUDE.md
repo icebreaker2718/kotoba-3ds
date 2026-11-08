@@ -290,6 +290,12 @@ works on the code.
   it with `kt::greyFromRGBInto` (core/local_ocr.cpp; greyFromRGB now uses it), malloc only without the pool, and
   ReadScreens frees only owned copies. Peak during a read unchanged; free between reads ~340 -> ~170 KB. Offered next if
   still tight: fixed storage for the dictionary caches (fewer small pieces); a larger plugin memory block (declined).
+  Console result (2026-11-08, owner: "can no longer get the plugin to run out of memory"): 48 reads in one M&L session
+  (39 both screens, 5 top, 4 touchscreen), all read, no heap reports, no memory errors, no crash dump; "grey copies: 168
+  KB kept" then "spotter: 207 KB kept" at the first read (heap free 258 KB); free before a read 158-186 KB the whole
+  session, no drift. Make Anki cards' networking started with 148-161 KB free, but the PC wasn't on, so an upload with
+  this little free memory is still untried on this build. The alpha diagnostics (memory before the spotter, spotter
+  memory, cards:, heap_walk/HeapReport) are still in: remove before `test`.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
