@@ -142,6 +142,8 @@ void ocrUsePairKernel(bool on);
 uint8_t *topScreenGrey(Reader &bmp, unsigned &w, unsigned &h, std::string &error);
 // R, G, B bytes -> grey bytes as the model expects (malloc'd; nullptr if out of memory).
 uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h);
+// The same into out (w x h bytes), for a buffer kept by the caller.
+void greyFromRGBInto(const uint8_t *rgb, unsigned w, unsigned h, uint8_t *out);
 
 // Reads every text box found (findTextBoxes) that holds Japanese, top to bottom, and falls back
 // to the whole screen when none does. Returns the text blocks (textParagraphs, the game's line

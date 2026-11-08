@@ -584,11 +584,14 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((optimize("O2")))  // every read, every pixel: built for speed (the file is built for size)
 #endif
-uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
-    uint8_t *grey = (uint8_t *)malloc((size_t)w * h);
-    if (!grey) return nullptr;
+void greyFromRGBInto(const uint8_t *rgb, unsigned w, unsigned h, uint8_t *grey) {
     for (size_t i = 0; i < (size_t)w * h; i++)
         grey[i] = (uint8_t)((77u * rgb[i * 3] + 150u * rgb[i * 3 + 1] + 29u * rgb[i * 3 + 2]) >> 8);
+}
+
+uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
+    uint8_t *grey = (uint8_t *)malloc((size_t)w * h);
+    if (grey) greyFromRGBInto(rgb, w, h, grey);
     return grey;
 }
 

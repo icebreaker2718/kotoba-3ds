@@ -278,6 +278,18 @@ works on the code.
   memory (`SpotterMemFail`), the pictures' fallback and the reading area's crop. Tested under qemu-arm with Ubuntu's
   newlib (scratch harness, not in the repo): totals equal mallinfo's; a foreign sbrk -> fencepost; an overwritten header
   -> BROKEN at it; a fitting free chunk found on the bins.
+  Console result (2026-11-07, 68 reads, M&L, mostly both screens): the heap is consistent (walk start to top ok, sbrk at
+  top's end, no fencepost) but full: 3,276 of 3,520 KB in use, ~214 KB free inside in 470-540 pieces + 20 KB beyond
+  sbrk. From read 26 the touchscreen's grey copy (76,800) was refused on every both-screens read (the top's 96,000 had
+  taken the biggest area), retry too; single-screen reads worked. The largest free piece (~75 KB, same address each
+  time) counted as big enough by the walk (>= request + 8) yet malloc never used it: a few bytes short or misfiled, not
+  settled. So: tight and fragmented, not corrupt; the earlier "allocator quirk" reading was wrong.
+- On `alpha` (2026-11-07, owner's choice): **the grey copies kept for the session**. `g_greyPool` (172,800 bytes: top
+  400x240 then touchscreen 320x240), `ReserveGreys()` after `ReservePictures()` in ReadScreens (once; logs "grey copies:
+  N KB kept for them ..." or "no N KB block ... taken each read instead"); `ScreenGrey(i, boxes, owned, ...)` writes into
+  it with `kt::greyFromRGBInto` (core/local_ocr.cpp; greyFromRGB now uses it), malloc only without the pool, and
+  ReadScreens frees only owned copies. Peak during a read unchanged; free between reads ~340 -> ~170 KB. Offered next if
+  still tight: fixed storage for the dictionary caches (fewer small pieces); a larger plugin memory block (declined).
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

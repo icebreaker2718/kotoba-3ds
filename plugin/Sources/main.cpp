@@ -416,6 +416,25 @@ static void ReservePictures() {
                              (unsigned)(kPicPoolBytes / 1024), (unsigned long)(HeapFree() / 1024)));
 }
 
+// The OCR's grey copies of the screens (top 400x240, touchscreen 320x240), kept for the session from the first read
+// on, beside the pictures: a both-screens read took 94 KB + 75 KB each time, and after ~25 reads in one session the
+// heap (~93% in use, its free memory in hundreds of small pieces) no longer had the second one (alpha log
+// 2026-11-07). Short of memory at the first read, they are taken each read as before.
+static const size_t kGreyTopBytes = (size_t)400 * 240;
+static const size_t kGreyPoolBytes = kGreyTopBytes + (size_t)320 * 240;  // 172,800
+static u8 *g_greyPool = nullptr;
+
+static void ReserveGreys() {
+    static bool tried = false;
+    if (g_greyPool || tried) return;
+    tried = true;
+    g_greyPool = (u8 *)malloc(kGreyPoolBytes);
+    LogOcr(g_greyPool ? Utils::Format("grey copies: %u KB kept for them, heap free %lu KB", (unsigned)(kGreyPoolBytes / 1024),
+                                      (unsigned long)(HeapFree() / 1024))
+                      : Utils::Format("grey copies: no %u KB block to keep for them (heap free %lu KB): taken each read instead",
+                                      (unsigned)(kGreyPoolBytes / 1024), (unsigned long)(HeapFree() / 1024)));
+}
+
 static void ReleasePicture(Picture &p) {
     if (p.owned) free(p.px);
     p.px = nullptr;
@@ -1529,10 +1548,12 @@ static bool LoadModel(const std::string &name, std::string &error) {
 }
 
 // The OCR's input for screen i, straight from its framebuffer (call before anything is drawn on
-// it): the text boxes found by their colour, and the grey picture (malloc'd; nullptr on failure).
+// it): the text boxes found by their colour, and the grey picture (in g_greyPool, or malloc'd with owned set;
+// nullptr on failure).
 static u64 g_boxSearchMs[2] = {0, 0};  // the last ScreenGrey's text-box search, per screen
 
-static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxes = true) {
+static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool &owned, bool wantBoxes = true) {
+    owned = false;
     const Screen &s = ScreenOf(i);
     const u32 W = ScreenW(i), bpp = s.BytesPerPixel;
     if (bpp < 2 || bpp > 4) return nullptr;
@@ -1554,13 +1575,21 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxe
     boxes.clear();
     if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240, 3, !g_fastMode);
     g_boxSearchMs[i] = osGetTime() - tb;
-    uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
+    uint8_t *grey = nullptr;
+    if (g_greyPool && (size_t)W * 240 <= (i == 0 ? kGreyTopBytes : kGreyPoolBytes - kGreyTopBytes)) {
+        grey = g_greyPool + (i == 0 ? 0 : kGreyTopBytes);
+        kt::greyFromRGBInto(rgb, W, 240, grey);
+        if (!inPool) free(rgb);
+        return grey;
+    }
+    grey = kt::greyFromRGB(rgb, W, 240);
     if (!grey) {  // diagnostic (alpha): the heap at the refusal, then asked once more
         HeapReport(i == 0 ? "grey copy, top screen" : "grey copy, touchscreen", (size_t)W * 240);
         grey = kt::greyFromRGB(rgb, W, 240);
         LogOcr(Utils::Format("heap: the same again now: %s", grey ? "got" : "FAILED"));
     }
     if (!inPool) free(rgb);
+    owned = grey != nullptr;
     return grey;
 }
 
@@ -1634,6 +1663,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     g_localOcr.setFixer(FixLine, nullptr);
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
     ReservePictures();  // kept from the first read on, beside the model
+    ReserveGreys();     // and the grey copies, next to them
     const bool spot = !g_fastMode && LoadSpotter();
     if (spot) g_spotter.setParallel(OcrWorkers(), RunOnCores);  // its rows on every core (the same boxes)
     if (spot) g_spotter.setMemFail(SpotterMemFail);
@@ -1645,11 +1675,12 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     // the screens' pictures for the OCR, before anything is drawn on them
     const bool screens[2] = {mode != kReadBottom, mode != kReadTop};
     uint8_t *grey[2] = {nullptr, nullptr};
+    bool greyOwned[2] = {false, false};
     std::vector<kt::TextBox> boxes[2];
     DropPictures();  // the last lookup's (written out by now): their memory is the colour copies' first
     for (int s = 0; s < 2; s++)
         if (screens[s])  // the spotter and an area need no boxes
-            grey[s] = ScreenGrey(s, boxes[s], !g_area[s].set && !spot);
+            grey[s] = ScreenGrey(s, boxes[s], greyOwned[s], !g_area[s].set && !spot);
     const u64 tBoxes = osGetTime();
     // then the game's screens as they are, for drawing under the lookup and the card's
     // screenshot (after the colour copies above are freed: the pictures take their place): the
@@ -1692,7 +1723,8 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                          (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
                          (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
            first);
-    for (int s = 0; s < 2; s++) free(grey[s]);
+    for (int s = 0; s < 2; s++)
+        if (greyOwned[s]) free(grey[s]);
     return any;
 }
 
