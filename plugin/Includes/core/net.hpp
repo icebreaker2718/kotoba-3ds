@@ -33,6 +33,13 @@ private:
 // whole session (128 KB), so networking doesn't need a big block from a heap the reader has filled.
 bool netReserve();
 bool netReserved();
+// Lends netStart() memory owned by someone else (the recognizer's workers' block, idle outside reads): the
+// largest page-aligned 512 / 256 / 128 KB inside [p, p + bytes) is used for the socket service from then on,
+// instead of a reserved or newly taken block. While the service runs (netStart .. netStop) that memory belongs to
+// it: the lender must not touch it. nullptr withdraws the loan (only while the service is stopped).
+void netLend(void *p, uint32_t bytes);
+bool netUp();
+bool netInLentMemory();  // the running service uses netLend's memory
 bool netStart(std::string &error);
 void netStop();
 // Size of the block the socket service runs on (the reserved one, or the running service's; 0 otherwise), for the log.
@@ -57,6 +64,17 @@ bool netPost(const std::string &host, int port, const std::string &path,
              const std::vector<std::string> &headers, Reader &src,
              int connectTimeoutMs, int replyTimeoutMs, std::string &responseBody, std::string &error,
              size_t maxReply = 256 * 1024);
+
+// The same, but the reply's body goes to `sink` as it arrives (nothing big held in memory): for a long answer
+// such as the known-words list. write() returning false stops it (error left to the sink's owner to say).
+// A reply other than 200 is read into `error` as netPost does.
+struct ReplySink {
+    virtual ~ReplySink() {}
+    virtual bool write(const char *p, size_t n) = 0;
+};
+bool netPostToSink(const std::string &host, int port, const std::string &path,
+                   const std::vector<std::string> &headers, Reader &src, int connectTimeoutMs, int replyTimeoutMs,
+                   ReplySink &sink, std::string &error, uint64_t maxReply);
 
 // Parses the server reply: "KOTOBA1\n<sentence>\n<chunk>\t<chunk>...\n".
 bool parseOcrReply(const std::string &body, std::string &sentence, std::vector<std::string> &chunks,

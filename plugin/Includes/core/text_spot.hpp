@@ -42,6 +42,11 @@ public:
     // console's malloc sometimes misses a free block that big). False if it couldn't be taken (find() then takes
     // its memory each call, as before). releaseMemory() gives it back.
     bool keepMemory(unsigned w, unsigned h);
+    // Or works in memory someone else owns (bytes long; not freed here): the recognizer's workers' block, idle while
+    // the spotter runs. Used by every find() it is big enough for. False if bytes is too small for a w x h screen or
+    // no memory for the results (1.7 KB).
+    bool lendMemory(void *p, size_t bytes, unsigned w, unsigned h);
+    bool memoryLent() const { return keptLent_; }
     void releaseMemory();
     size_t keptBytes() const { return keptBytes_; }
     // Its rows computed by `workers` threads at once (the same boxes): runner(n, job, arg) must run job(arg) on
@@ -63,6 +68,7 @@ private:
     void *kept_ = nullptr;      // keepMemory()'s working memory, keptBytes_ long
     size_t keptBytes_ = 0;
     void *keptSet_ = nullptr;   // and its results
+    bool keptLent_ = false;     // kept_ is lendMemory()'s (not ours to free)
     mutable signed char *scratch_ = nullptr;  // the extra workers' scratch, taken at the first parallel find
     mutable unsigned scratchFor_ = 0;
 };

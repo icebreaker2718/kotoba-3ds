@@ -14,8 +14,45 @@ static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-// Empties a cache and gives its memory back (clear() keeps the map's bucket array).
-template <class M> static void drop(M &m) { M().swap(m); }
+// Each cache's block (MemoArena). Measured on 32-bit ARM (qemu) over the 180 saved screens' lookups with the tables
+// reserved at full size: exact 7.9 KB, prefix 5.1 KB, mask 20.5 KB (full at kMaskMemoMax: its ceiling). With room
+// for longer keys; what doesn't fit comes from malloc as before (64-bit builds' nodes are bigger: some does there).
+static const size_t kExactArenaBytes = 12 * 1024, kPrefixArenaBytes = 8 * 1024, kMaskArenaBytes = 22 * 1024;
+
+// Empties a cache: the map (its nodes in the block) goes, then the whole block is free again.
+void Dictionary::dropExact() {
+    { ExactMemo t(0, std::hash<std::string_view>(), std::equal_to<std::string_view>(), MemoAlloc<int>(&exactArena_)); exactMemo_.swap(t); }
+    exactArena_.reset();
+    exactMemo_.reserve(kExactMemoMax);  // its bucket table at full size once (a growing one leaves old tables in the block)
+}
+void Dictionary::dropPrefix() {
+    { PrefixMemo t(0, std::hash<std::string_view>(), std::equal_to<std::string_view>(), MemoAlloc<int>(&prefixArena_)); prefixMemo_.swap(t); }
+    prefixArena_.reset();
+    prefixMemo_.reserve(kPrefixMemoMax);
+}
+void Dictionary::dropMask() {
+    { MaskMemo t(0, std::hash<uint32_t>(), std::equal_to<uint32_t>(), MemoAlloc<int>(&maskArena_)); maskMemo_.swap(t); }
+    maskArena_.reset();
+    maskMemo_.reserve(kMaskMemoMax);
+}
+std::string_view Dictionary::memoKey(MemoArena &a, const std::string &key) {
+    char *p = (char *)a.take(key.size() ? key.size() : 1);
+    if (!p) abort();
+    memcpy(p, key.data(), key.size());
+    return std::string_view(p, key.size());
+}
+// The maps emptied (no table reserved again), then whatever came from malloc and the blocks themselves.
+Dictionary::~Dictionary() {
+    { ExactMemo t(0, std::hash<std::string_view>(), std::equal_to<std::string_view>(), MemoAlloc<int>(&exactArena_)); exactMemo_.swap(t); }
+    { PrefixMemo t(0, std::hash<std::string_view>(), std::equal_to<std::string_view>(), MemoAlloc<int>(&prefixArena_)); prefixMemo_.swap(t); }
+    { MaskMemo t(0, std::hash<uint32_t>(), std::equal_to<uint32_t>(), MemoAlloc<int>(&maskArena_)); maskMemo_.swap(t); }
+    exactArena_.reset();
+    prefixArena_.reset();
+    maskArena_.reset();
+    free(exactArena_.base);
+    free(prefixArena_.base);
+    free(maskArena_.base);
+}
 
 bool Dictionary::open(Reader *r, std::string &error) {
     reader_ = r;
@@ -26,8 +63,16 @@ bool Dictionary::open(Reader *r, std::string &error) {
     memoLen_.clear();
     std::string().swap(fencePool_);
     std::vector<uint32_t>().swap(fenceAt_);
-    drop(maskMemo_);
-    drop(prefixMemo_);
+    if (!exactArena_.base) {  // the caches' blocks, once, while the heap is still in one piece
+        exactArena_.base = (char *)malloc(kExactArenaBytes);
+        exactArena_.cap = exactArena_.base ? kExactArenaBytes : 0;
+        prefixArena_.base = (char *)malloc(kPrefixArenaBytes);
+        prefixArena_.cap = prefixArena_.base ? kPrefixArenaBytes : 0;
+        maskArena_.base = (char *)malloc(kMaskArenaBytes);
+        maskArena_.cap = maskArena_.base ? kMaskArenaBytes : 0;
+    }
+    dropMask();
+    dropPrefix();
     uint8_t h[64];
     if (size_ < 64 || !r->read(0, h, 64)) { error = "dict.bin is missing or too small"; reader_ = nullptr; return false; }
     if (memcmp(h, "KTB1", 4) != 0) { error = "dict.bin has the wrong format (rebuild it)"; reader_ = nullptr; return false; }
@@ -42,7 +87,7 @@ bool Dictionary::open(Reader *r, std::string &error) {
     radOff_ = le32(h + 28);
     kanjiCount_ = le32(h + 32);
     kanjiOff_ = le32(h + 36);
-    drop(exactMemo_);
+    dropExact();
     if ((uint64_t)keyIdxOff_ + (uint64_t)keyCount_ * keyRec_ > size_ ||
         (uint64_t)entryIdxOff_ + (uint64_t)(entryCount_ + 1) * 8 > size_) {
         error = "dict.bin is truncated (copy it again)";
@@ -140,7 +185,7 @@ std::string Dictionary::keyAt(uint32_t i, uint32_t *entryId) {
     if (entryId) {
         *entryId = le32(rec + 4);
         if (keyRec_ >= 12) {  // version 2: the entry's part-of-speech mask comes with it
-            if (maskMemo_.size() >= kMaskMemoMax) drop(maskMemo_);
+            if (maskMemo_.size() >= kMaskMemoMax) dropMask();
             maskMemo_[*entryId] = le32(rec + 8);
         }
     }
@@ -216,7 +261,7 @@ void Dictionary::exact(const std::string &key, std::vector<uint32_t> &ids) {
     if (!reader_ || key.empty()) return;
     // the same keys come up again and again (each spot is looked up at several lengths, then
     // again when the cursor gets there): remember the last few hundred answers
-    auto memo = exactMemo_.find(key);
+    auto memo = exactMemo_.find(std::string_view(key));
     if (memo != exactMemo_.end()) {
         for (uint32_t eid : memo->second)
             if (std::find(ids.begin(), ids.end(), eid) == ids.end()) ids.push_back(eid);
@@ -224,8 +269,8 @@ void Dictionary::exact(const std::string &key, std::vector<uint32_t> &ids) {
     }
     std::vector<uint32_t> found;
     exactUncached(key, found);
-    if (exactMemo_.size() >= kExactMemoMax) drop(exactMemo_);
-    exactMemo_[key] = found;
+    if (exactMemo_.size() >= kExactMemoMax) dropExact();
+    exactMemo_.emplace(memoKey(exactArena_, key), MemoIds(found.begin(), found.end(), MemoAlloc<uint32_t>(&exactArena_)));
     for (uint32_t eid : found)
         if (std::find(ids.begin(), ids.end(), eid) == ids.end()) ids.push_back(eid);
 }
@@ -241,12 +286,12 @@ void Dictionary::exactUncached(const std::string &key, std::vector<uint32_t> &id
 bool Dictionary::hasPrefix(const std::string &pre) {
     if (!reader_) return false;
     if (pre.empty()) return true;
-    auto memo = prefixMemo_.find(pre);
+    auto memo = prefixMemo_.find(std::string_view(pre));
     if (memo != prefixMemo_.end()) return memo->second;
     uint32_t i = lowerBound(pre);
     bool yes = i < keyCount_ && keyAt(i, nullptr).compare(0, pre.size(), pre) == 0;
-    if (prefixMemo_.size() >= kPrefixMemoMax) drop(prefixMemo_);
-    prefixMemo_[pre] = yes;
+    if (prefixMemo_.size() >= kPrefixMemoMax) dropPrefix();
+    prefixMemo_.emplace(memoKey(prefixArena_, pre), yes);
     return yes;
 }
 

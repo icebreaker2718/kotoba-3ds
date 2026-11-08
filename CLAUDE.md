@@ -351,6 +351,36 @@ works on the code.
      memory"), else searched on the SD card as above.
   Kept as they are (faster or not a speed trade): the picture pool, kept grey copies and spotter arena, the 128 KB
   networking block, the dictionary's 48-block cache (unchanged since the first version). The alpha diagnostics stay.
+- On `alpha` (2026-11-08, owner's choice of the 5 MiB options 1, 2, 6, 7): **memory shared and steadied, nothing reads
+  differently**.
+  1. `LocalOcr` takes the workers' arenas as one block at the first load (`workBlock_`, `workSlots_` arenas of
+     `arenaBytes_`, now rounded to 16; one by one as before if it can't be had) and offers it as `scratch(p, bytes)`:
+     vocr_init only plans, nothing stays in an arena between recognitions. `TextSpotter::lendMemory(p, bytes, w, h)` runs
+     find() in it (`memoryLent()`; releaseMemory doesn't free it); main.cpp `KeepSpotterMemory` lends first ("spotter:
+     works in the recognizer's memory (N KB, needs N KB)"), else keeps its own block as before. Saves the 207 KB kept
+     arena. 3 workers: ~564 KB block; 2: ~376; 1 worker (188 KB) is too small: own block.
+  2. `kt::netLend(p, bytes)` (core/net.cpp): the largest page-aligned 512 / 256 / 128 KB inside the same block is the
+     socket service's buffer from then on (`netInLentMemory()`); main.cpp `LendReaderMemory()` after the model loads
+     ("net: will use N KB of the recognizer's memory"); the 128 KB block reserved at game start is gone (before the first
+     read netStart takes a block of the moment and frees it). The service owns that memory between netStart and netStop,
+     so ReadScreens stops it first if it were ever up (`kt::netUp()`); every netStart path calls netStop before returning.
+  6. Dictionary recent-answer caches in fixed blocks (`MemoArena` + `MemoAlloc` in dict.hpp): the same unordered_maps
+     and the same emptying (what is remembered changes posMask's answers, so semantics kept exactly), keys as
+     string_views of bytes copied into the block, tables reserved at full size after each emptying, a bump block reset
+     when the cache is emptied, overflow from malloc (listed, freed at reset). 12 / 8 / 22 KB (ARM peaks over the 180
+     screens' lookups: 7.9 / 5.1 / 20.5 KB, mask full at 1024). Dictionary is now non-copyable. `memoArenaStats()`.
+  7. "Get them from my PC" streamed: `kt::netPostToSink(..., ReplySink&, ..., maxReply)` (readReplyTo: header in memory,
+     body to the sink; non-200 read into the error); main.cpp `KnownFileSink` checks "KNOWN1\n", writes known.tmp through
+     a 16 KB buffer, then known.txt is removed and known.tmp renamed (File::Rename); a failed or cut-short download
+     removes known.tmp and the old list stays. Log "known: from the PC done/failed, N KB written to the card".
+  Checks: OCR output identical on all 180 saved screens x 4 modes (lent spotter memory, junk written into the block
+  before every mode, 2 and 3 workers; 1 worker falls back), ASan/UBSan and ThreadSanitizer clean; every lookup
+  (1,204 words, 33,228 results with all pages) identical to the old caches under qemu-arm and natively (where 2,227
+  pieces overflowed to malloc; ASan/LSan clean); netPostToSink against a local server (720 KB list byte-exact, error
+  reply, cut short, no Content-Length); test_ui / test_core / test_ocr_core / test_wrap pass. bench_cli: KT_LEND
+  (default 1), KT_POISON. Expected on the console: free between reads ~190 KB -> ~500 KB (207 + 128 back, ~42 KB fixed
+  for the caches instead of ~25 KB that came and went). Untried: socInit in the lent block (page-aligned, inside the
+  workers' block) and the streamed download on the console.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

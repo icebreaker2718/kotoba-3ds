@@ -33,6 +33,7 @@
 #include "core/textbox.hpp"
 #include "core/textlines.hpp"
 #include "screen_ui.hpp"
+#include <new>
 #include "heap_walk.h"  // diagnostic (alpha, remove before test)
 
 extern "C" u32 __ctru_heap_size;  // libctru: the plugin's heap (what Luma gave it, minus code and CTRPF's own)
@@ -705,7 +706,62 @@ static std::vector<std::string> FileLines(const char *path) {
     }
     return lines;
 }
-static const u32 kKnownMax = 1024 * 1024;  // the most "Get them from my PC" takes
+static const u32 kKnownMax = 1024 * 1024;  // (unused since the list is written to the card as it comes)
+static const char *kKnownTmpPath = "/3ds/kotoba3ds/known.tmp";
+
+// "Get them from my PC": the PC's answer ("KNOWN1\n" + the list) written to known.tmp as it arrives, through a
+// 16 KB buffer: nothing the size of the list in memory (a big Anki collection's list used to be held whole first).
+struct KnownFileSink : kt::ReplySink {
+    File f;
+    bool opened = false, oldServer = false, failed = false;
+    char head[8] = {0};
+    size_t headLen = 0, used = 0;
+    uint64_t written = 0;
+    char buf[16 * 1024];
+    bool flush() {
+        if (used && f.Write(buf, used) != File::SUCCESS) failed = true;
+        written += used;
+        used = 0;
+        return !failed;
+    }
+    bool write(const char *p, size_t n) override {
+        while (headLen < 7 && n) {  // the answer's first line
+            head[headLen++] = *p++;
+            n--;
+            if (headLen == 7 && memcmp(head, "KNOWN1\n", 7) != 0) {
+                oldServer = true;
+                return false;
+            }
+        }
+        if (!n) return true;
+        if (!opened) {
+            if (File::Open(f, kKnownTmpPath, File::WRITE | File::CREATE | File::TRUNCATE) != File::SUCCESS) {
+                failed = true;
+                return false;
+            }
+            opened = true;
+        }
+        while (n) {
+            const size_t k = std::min(n, sizeof(buf) - used);
+            memcpy(buf + used, p, k);
+            used += k;
+            p += k;
+            n -= k;
+            if (used == sizeof(buf) && !flush()) return false;
+        }
+        return true;
+    }
+    bool finish() {  // the rest out and the file closed
+        if (!opened) {  // an empty list: an empty file
+            if (File::Open(f, kKnownTmpPath, File::WRITE | File::CREATE | File::TRUNCATE) != File::SUCCESS) return false;
+            opened = true;
+        }
+        const bool ok = flush();
+        f.Close();
+        opened = false;
+        return ok && !failed;
+    }
+};
 
 static void CloseKnown() {  // before known.txt is written or removed
     g_known.clear();
@@ -1505,6 +1561,16 @@ static void SpotterMemFail(size_t need, bool arenaOk, bool setOk) {
 static void KeepSpotterMemory(bool wanted) {
     static int logged = 0;  // 1 kept, -1 couldn't: logged once per change
     if (!wanted || g_spotter.keptBytes()) return;
+    // first choice: the recognizer's workers' memory (the spotter is done before they start on the lines)
+    void *block;
+    size_t blockBytes;
+    if (g_localOcr.scratch(block, blockBytes) && g_spotter.lendMemory(block, blockBytes, 400, 240)) {
+        LogOcr(Utils::Format("spotter: works in the recognizer's memory (%lu KB, needs %lu KB), heap free %lu KB",
+                             (unsigned long)(blockBytes / 1024), (unsigned long)(g_spotter.arenaBytes(400, 240) / 1024),
+                             (unsigned long)(HeapFree() / 1024)));
+        logged = 1;
+        return;
+    }
     const bool ok = g_spotter.keepMemory(400, 240);
     if (ok && logged != 1)
         LogOcr(Utils::Format("spotter: %lu KB kept for its working memory, heap free %lu KB",
@@ -1515,6 +1581,24 @@ static void KeepSpotterMemory(bool wanted) {
                              (unsigned long)(g_spotter.arenaBytes(400, 240) / 1024), (unsigned long)(HeapFree() / 1024),
                              (unsigned long)LargestFreeKB()));
     logged = ok ? 1 : -1;
+}
+
+// The recognizer's workers' memory (one block, idle between reads) lent to the socket service for Make Anki cards /
+// Get known words, instead of a networking block kept for the session (128 KB). Before the first read loads the
+// model there is none: netStart then takes a block of the moment and gives it back.
+static void LendReaderMemory() {
+    static bool lent = false;
+    if (lent) return;
+    void *block;
+    size_t bytes;
+    if (!g_localOcr.scratch(block, bytes)) {
+        LogOcr("net: the recognizer's memory isn't in one piece: networking takes a block when needed");
+        lent = true;
+        return;
+    }
+    kt::netLend(block, (u32)bytes);
+    lent = true;
+    LogOcr(Utils::Format("net: will use %lu KB of the recognizer's memory", (unsigned long)(kt::netBufferSize() / 1024)));
 }
 
 static bool LoadSpotter() {
@@ -1672,7 +1756,9 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     Text().reserve();
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
+    if (kt::netUp()) kt::netStop();  // never: the socket service would own the workers' memory the read uses
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
+    LendReaderMemory();  // the workers' memory, idle between reads, to Make Anki cards' networking
     ReservePictures();  // kept from the first read on, beside the model
     ReserveGreys();     // and the grey copies, next to them
     // the spotter (model and working memory) taken at the first read whatever the mode, and kept: given back while
@@ -1830,8 +1916,9 @@ static bool NetStart(std::string &error) {
     u32 freeKB = HeapFree() / 1024, largestKB = LargestFreeKB();
     bool ok = kt::netStart(error);
     if (ok)
-        LogOcr(Utils::Format("net: started with a%s %lu KB block (heap free %lu KB, largest %lu KB)",
-                             kt::netReserved() ? " reserved" : "", (unsigned long)(kt::netBufferSize() / 1024),
+        LogOcr(Utils::Format("net: started with a %lu KB block%s (heap free %lu KB, largest %lu KB)",
+                             (unsigned long)(kt::netBufferSize() / 1024),
+                             kt::netInLentMemory() ? " in the recognizer's memory" : "",
                              (unsigned long)freeKB,
                              (unsigned long)largestKB));
     else
@@ -2031,27 +2118,45 @@ static void KnownWordsMenu() {
         m.setHelp(kKnownHelp);
         m.setMessage("Looking for your PC...");
         DrawMenu(m);
-        CloseKnown();  // known.txt is written below
-        std::string err, host, reply;
+        CloseKnown();  // known.txt is replaced below
+        std::string err, host;
         int port = kPcPort;
         bool ok = NetStart(err) && ResolveServer(host, port, err);
+        uint64_t got = 0;
         if (ok) {
             m.setMessage("Getting the words of your Anki cards from " + g_server + "...\n\n(A big collection takes a moment.)");
             DrawMenu(m);
             kt::MemReader none("");
-            ok = kt::netPost(host, port, "/known", {}, none, 1500, 60000, reply, err, kKnownMax + 64);
+            KnownFileSink *sink = new (std::nothrow) KnownFileSink();  // 16 KB: not on the stack
+            if (!sink) {
+                ok = false;
+                err = "not enough memory";
+            } else {
+                ok = kt::netPostToSink(host, port, "/known", {}, none, 1500, 60000, *sink, err, 64ull << 20);
+                const bool written = sink->finish();
+                if (sink->oldServer) err = "the PC's ocr_server.py is too old: update it (it comes with this release)";
+                else if (sink->failed || (ok && !written)) err = "could not write " + std::string(kKnownTmpPath);
+                if (sink->oldServer || sink->failed || !written) ok = false;
+                if (ok && sink->headLen < 7) {
+                    ok = false;
+                    err = "the PC's ocr_server.py is too old: update it (it comes with this release)";
+                }
+                got = sink->written;
+                delete sink;
+            }
         }
         kt::netStop();
-        if (ok && reply.compare(0, 7, "KNOWN1\n") != 0) {
-            ok = false;
-            err = "the PC's ocr_server.py is too old: update it (it comes with this release)";
+        if (ok) {  // the whole list is in known.tmp: it takes known.txt's place
+            File::Remove(kKnownPath);
+            if (File::Rename(kKnownTmpPath, kKnownPath) != File::SUCCESS) {
+                ok = false;
+                err = "could not write " + std::string(kKnownPath);
+            }
+        } else {
+            File::Remove(kKnownTmpPath);  // a part of a list is no use: the old known.txt stays
         }
-        if (ok && !WriteWholeFile(kKnownPath, reply.substr(7))) {
-            ok = false;
-            err = "could not write " + std::string(kKnownPath);
-        }
-        reply.clear();
-        reply.shrink_to_fit();
+        LogOcr(Utils::Format("known: from the PC %s, %lu KB written to the card", ok ? "done" : "failed",
+                             (unsigned long)(got / 1024)) + (ok ? std::string() : ": " + err));
         LoadKnown();
         if (!ok) {
             Notice("Known words", "Couldn't get the list:\n" + err, kKnownHelp);
@@ -2674,12 +2779,8 @@ int main(void) {
     LoadSettings();
     LogOcr(Utils::Format("start: game %s, plugin heap %lu KB, heap free %lu KB", TitleIdHex().c_str(),
                          (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(HeapFree() / 1024)));
-    // Make Anki cards' networking block, before the reader takes the heap (kept for the session)
-    if (kt::netReserve())
-        LogOcr(Utils::Format("net: %lu KB reserved for networking, heap free %lu KB",
-                             (unsigned long)(kt::netBufferSize() / 1024), (unsigned long)(HeapFree() / 1024)));
-    else
-        LogOcr("net: no block reserved for networking: taken when needed instead");
+    // no networking block kept any more: after the first read the socket service borrows the recognizer's memory
+    // (LendReaderMemory); before it, netStart takes a block of the moment while the heap is still in one piece
     {   // CTRPF's own screenshot hotkey stays off: the plugin makes its screenshots itself
         bool *enabled = nullptr;
         u32 *hotkey = nullptr;

@@ -16,6 +16,18 @@ TextSpotter::~TextSpotter() {
     free(scratch_);
 }
 
+bool TextSpotter::lendMemory(void *p, size_t bytes, unsigned w, unsigned h) {
+    const size_t need = arenaBytes(w, h);
+    if (!need || !p || bytes < need) return false;
+    releaseMemory();
+    keptSet_ = malloc(sizeof(VocrTextspot6Set));
+    if (!keptSet_) return false;
+    kept_ = p;
+    keptBytes_ = bytes;
+    keptLent_ = true;
+    return true;
+}
+
 bool TextSpotter::keepMemory(unsigned w, unsigned h) {
     const size_t need = arenaBytes(w, h);
     if (!need) return false;
@@ -32,10 +44,11 @@ bool TextSpotter::keepMemory(unsigned w, unsigned h) {
 }
 
 void TextSpotter::releaseMemory() {
-    free(kept_);
+    if (!keptLent_) free(kept_);
     free(keptSet_);
     kept_ = keptSet_ = nullptr;
     keptBytes_ = 0;
+    keptLent_ = false;
 }
 
 void TextSpotter::unload() {
