@@ -1394,6 +1394,25 @@ static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, 
     return g_core3 ? 3 : 2;
 }
 
+// Diagnostic (alpha, remove before test): when the spotter can't get its working memory, what the heap looks like
+// at that very moment, and whether the same block can be had right after (a second malloc of it).
+static void SpotterMemFail(size_t need, bool arenaOk, bool setOk) {
+    void *again = malloc(need);
+    const bool gotAgain = again != nullptr;
+    free(again);
+    struct mallinfo mi = mallinfo();
+    char *top = (char *)sbrk(0);
+    const u32 unclaimed = top && top < fake_heap_end ? (u32)(fake_heap_end - top) : 0;
+    LogOcr(Utils::Format("spotter memory: no block of %lu KB (working memory %s, results %s); the same again now: %s",
+                         (unsigned long)(need / 1024), arenaOk ? "got" : "FAILED", setOk ? "got" : "FAILED",
+                         gotAgain ? "got" : "FAILED") +
+           Utils::Format("; heap free %lu KB, largest %lu KB; malloc: %lu KB from the system, %lu KB free in it, top "
+                         "piece %lu KB, %lu KB not taken yet",
+                         (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(),
+                         (unsigned long)(mi.arena / 1024), (unsigned long)(mi.fordblks / 1024),
+                         (unsigned long)(mi.keepcost / 1024), (unsigned long)(unclaimed / 1024)));
+}
+
 static bool LoadSpotter() {
     if (g_spotterState) return g_spotterState > 0;
     SdReader f;
@@ -1537,6 +1556,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     ReservePictures();  // kept from the first read on, beside the model
     const bool spot = !g_fastMode && LoadSpotter();
     if (spot) g_spotter.setParallel(OcrWorkers(), RunOnCores);  // its rows on every core (the same boxes)
+    if (spot) g_spotter.setMemFail(SpotterMemFail);
     LoadAreas();
     u64 t1 = osGetTime();
     const u32 largestBefore = LargestFreeKB();  // for the log: room for the read's buffers?
@@ -1779,6 +1799,7 @@ static void MakeCards() {
     }
     if (!ResolveServer(host, port, err)) {
         kt::netStop();
+        LogOcr("cards: PC not reached: " + err);  // diagnostic (alpha, remove before test)
         Notice("Make Anki cards",
                "Couldn't reach your PC:\n" + err +
                    "\n\nStart ocr_server.py on the PC (same Wi-Fi), or set its address under \"PC\".",
@@ -1804,6 +1825,12 @@ static void MakeCards() {
         if (r) done.push_back(words[k]);
     }
     kt::netStop();
+    // diagnostic (alpha, remove before test): how the upload went
+    LogOcr(Utils::Format("cards: %u saved words, %d new cards, %d already in Anki, %d failed", (unsigned)words.size(),
+                         sent, already, failed) +
+           (firstError.empty() ? std::string() : ": " + firstError) +
+           Utils::Format("%s; heap free %lu KB, largest %lu KB", SleepRequested() ? " (stopped: lid closed)" : "",
+                         (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB()));
     std::string result = Utils::Format("%d new card%s", sent, sent == 1 ? "" : "s");
     if (already) result += Utils::Format(", %d already in Anki", already);
     if (failed) result += Utils::Format(", %d failed:\n%s", failed, firstError.c_str());

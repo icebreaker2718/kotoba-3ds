@@ -230,6 +230,19 @@ works on the code.
   "memory before the spotter: ... heap free, largest; dictionary caches ..." (ReadOneScreen). On paper ~480 KB
   should still have fitted the top screen's ~300 KB, so ~tens of KB used during a read are unaccounted for: that
   line tells. Owner declined a fallback to the box reader when the spotter can't get its memory.
+  Console result (2026-11-07, two M&L sessions of 59 and 33 reads): no drift (before a read 543-576 KB, up when the
+  caches empty), no failure; that line showed 450-480 KB. But the arena is exactly 212,855 bytes top / 182,047
+  touchscreen (+ 1,684 for the result set; same on x86-64 and ARM), and the old build's log had top reads work at 404
+  KB free at that point and fail at 388 KB while 388 KB in one piece was mallocable right after: the spotter step
+  needs ~390-400 KB, ~190 KB more than it asks for. Nothing found in the read path (pictures in the pool, screenshot
+  thread joined first, core-3 thread made once). Margin now ~50 KB.
+- On `alpha` (2026-11-07, owner's OK): **more alpha-only diagnostics, remove before `test`**: `TextSpotter::setMemFail`
+  (core/text_spot.cpp) calls main.cpp's `SpotterMemFail` at the failure itself: "spotter memory: no block of N KB
+  (working memory got/FAILED, results ...); the same again now: ...; heap free, largest; malloc: from the system,
+  free in it, top piece, not taken yet" (mallinfo arena / fordblks / keepcost, fake_heap_end - sbrk(0)). MakeCards logs
+  "cards: N saved words, N new cards, N already in Anki, N failed[: error]; heap ..." and "cards: PC not reached: ...".
+  Both settled 2026-11-07: socInit with the reserved 128 KB block worked (3 uploads, no crash); whether the cards
+  arrived is what the new "cards:" line shows.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

@@ -42,12 +42,17 @@ public:
     // each row's blocks by spinning (a row's block is ~50 us of work: a wake-up would cost as much).
     typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
     void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
+    // Diagnostic (alpha): called when find() can't get its working memory, right there (after what it did get is
+    // freed again): need = the arena's bytes; arenaOk / setOk = which of its two blocks malloc gave.
+    typedef void (*MemFail)(size_t need, bool arenaOk, bool setOk);
+    void setMemFail(MemFail fn) { memFail_ = fn; }
 
 private:
     void *blob_ = nullptr;
     void *model_ = nullptr;
     unsigned workers_ = 1;
     Runner runner_ = nullptr;
+    MemFail memFail_ = nullptr;
     mutable signed char *scratch_ = nullptr;  // the extra workers' scratch, taken at the first parallel find
     mutable unsigned scratchFor_ = 0;
 };
