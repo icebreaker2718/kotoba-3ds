@@ -325,6 +325,26 @@ works on the code.
   of the 40k list (+3 appended) and twice as many near-misses give the in-memory list's answers (ASan/UBSan); 1,000
   scattered checks = 1,000 block reads; test_ui gains an on-card case, test_ui / test_core pass. Still open (audit 1):
   "Get them from my PC" holds the whole reply in memory (up to kKnownMax + 64) before writing known.txt.
+  Console result (2026-11-08, 40k list): "known.txt: 40000 words (406 KB), searched on the SD card: 203 blocks indexed in
+  250 ms", ~25 reads in every mode, no memory failure, Make Anki cards fine (the failed_ shots of that session are "no
+  text found" reads).
+- On `alpha` (2026-11-08, owner's request: "try making the change for more memory" and "revert any changes we had to make
+  for memory constraints to their faster variants"): **plugin memory 10 MiB** (plgInfo `MemorySize: 10MiB`; Luma's
+  loader takes 2 / 5 / 10 MiB only, file_loader.c memRegionSizes; the heap is that minus the 3gx's code, ~8.6 MB).
+  GiveGameItsMemory reads the block's size from Luma's header (heapSize + exeSize), so the commit-limit raise and the
+  hidden share follow it: the boot line should say "gave the game back 10240 KB". Untried on the console: games that use
+  the New 3DS's bigger memory modes (less slack in the 124 MB app region). Reverted / made faster with the room:
+  1. VOCR tiles of 8 CTC frames (`g_localOcr.setOptions(8, 0)` before the model loads; VOCR's default 4): worker arena
+     180 -> 307 KB (x3), same text on all 180 saved screens (163 top, 17 touchscreen, from shots/) x 4 modes natively and
+     on 30 of them under qemu-arm (which also matches the native text); ~4% less time natively, ~6% under qemu (no cache
+     model: the gain on the ARM11's small L1 should be larger; tile 16 = 560 KB/worker, same text, ~6% native). bench_cli
+     takes KT_TILE.
+  2. Dictionary recent-answer caches back to 512 / 512 / 4096: same output, dictionary reads over the 180 screens x 4
+     modes 2108 -> 1875.
+  3. known.txt in memory when it is up to kKnownMax (1 MB) and the memory is there ("known.txt: N words (K KB), in
+     memory"), else searched on the SD card as above.
+  Kept as they are (faster or not a speed trade): the picture pool, kept grey copies and spotter arena, the 128 KB
+  networking block, the dictionary's 48-block cache (unchanged since the first version). The alpha diagnostics stay.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

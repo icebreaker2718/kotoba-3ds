@@ -3,7 +3,8 @@
 // modes (one argument, letters, default "fsbw"): f fast mode (flat boxes), s shaded boxes, b spotter,
 // w the whole screen (the line finder, as a reading area does). Prints, per screen and mode, the boxes found
 // and the text read; the output must stay byte-identical when the code is only made faster.
-// KT_WORKERS=n reads lines on n threads (default 3, as on a New 3DS).
+// KT_WORKERS=n reads lines on n threads (default 3, as on a New 3DS). KT_TILE=n: VOCR tiles of n CTC frames
+// (0 or unset: the plugin's setting).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -56,6 +57,7 @@ int main(int argc, char **argv) {
     const unsigned workers = wk ? (unsigned)atoi(wk) : 3;
     ocr.setParallel(workers, workers > 1 ? runThreads : nullptr);
     ocr.setFixer(fix, nullptr);
+    if (getenv("KT_TILE")) ocr.setOptions((unsigned)atoi(getenv("KT_TILE")), 0);
     if (!ocr.load(mf, e)) { printf("MODEL FAILED: %s\n", e.c_str()); return 3; }
     TextSpotter spot;
     if (!spot.load(sf, e)) { printf("SPOTTER FAILED: %s\n", e.c_str()); return 3; }

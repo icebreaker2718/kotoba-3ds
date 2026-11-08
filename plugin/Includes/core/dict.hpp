@@ -84,9 +84,9 @@ private:
     // keys are kept in memory once read (about 30 KB), so a lookup reads ~3 blocks instead of ~20.
     enum : uint32_t { kMemoLevels = 12 };
     // The recent-answer caches below are emptied (and their memory given back) when this full. They stay for
-    // the session, so they come out of the reader's room: at 512 / 512 / 4096 they took ~100-170 KB in a long
-    // session and a top-screen read ran out of memory (owner, Mario & Luigi, 2026-11-04, 36 reads).
-    enum : size_t { kExactMemoMax = 128, kPrefixMemoMax = 128, kMaskMemoMax = 1024 };
+    // the session (~100-170 KB at these sizes in a long session): cut to 128 / 128 / 1024 while the plugin had
+    // 5 MiB (+14% dictionary SD reads), back since it has 10 MiB (2026-11-08).
+    enum : size_t { kExactMemoMax = 512, kPrefixMemoMax = 512, kMaskMemoMax = 4096 };
     std::unordered_map<std::string, std::vector<uint32_t>> exactMemo_;  // recent exact() answers
     std::unordered_map<std::string, bool> prefixMemo_;                  // recent hasPrefix() answers
     std::unordered_map<uint32_t, uint32_t> maskMemo_;                   // posMask of recently found entries
