@@ -243,6 +243,21 @@ works on the code.
   "cards: N saved words, N new cards, N already in Anki, N failed[: error]; heap ..." and "cards: PC not reached: ...".
   Both settled 2026-11-07: socInit with the reserved 128 KB block worked (3 uploads, no crash); whether the cards
   arrived is what the new "cards:" line shows.
+  Console result (same evening, M&L, mostly both-screens reads): 16 reads failed, each time the 207 KB arena malloc
+  FAILED and the same malloc right after got it (heap free 380-386 KB in one piece; malloc: 224-230 KB free inside,
+  top piece 4-79 KB, 156 KB beyond sbrk). Not a shortage: a read failed at 548 KB before and the next one at 548
+  worked; reads worked with 374 KB left and failed with 386. The console's newlib malloc misses a big-enough free
+  chunk on the first large request (the results' small malloc/free in between seems to put it where the retry
+  finds it; newlib's source couldn't be fetched to confirm).
+- On `alpha` (2026-11-07, owner's choice of 3 options): **the spotter's working memory kept for the session**.
+  `TextSpotter::keepMemory(400, 240)` / `releaseMemory()` (core/text_spot.cpp): one 212,855-byte arena + the result set,
+  used by every find() on a screen that size or smaller (both screens of a read in turn), else find() mallocs as before.
+  main.cpp `KeepSpotterMemory(wanted)` in ReadScreens after LoadAreas: kept while the spotter is on and the game lacks a
+  reading area on at least one screen; given back in "Text boxes only" or with areas on both screens. Log once per
+  change: "spotter: N KB kept for its working memory ..." / "spotter: no N KB block to keep ... taken each read
+  instead" / "spotter: working memory given back". Heap free drops ~208 KB for the session (the large-known-list and
+  large-mined.tsv audit risks get closer). Check: 43 saved screens (39 top, 4 touchscreen) x 4 orders x 1 and 3
+  workers, kept vs fresh memory: same boxes, ASan/UBSan clean. The alpha diagnostics stay until the owner confirms.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

@@ -1413,6 +1413,34 @@ static void SpotterMemFail(size_t need, bool arenaOk, bool setOk) {
                          (unsigned long)(mi.keepcost / 1024), (unsigned long)(unclaimed / 1024)));
 }
 
+// The spotter's working memory (~208 KB: the top screen's, enough for the touchscreen's too), kept from the first
+// read on while the spotter is used, beside the model and the pictures. Taken each read, the console's malloc
+// sometimes refused it with more than enough free in one piece and gave the same block when asked again
+// ("not enough memory to look for text", alpha log 2026-11-07). Given back in "Text boxes only" or when both
+// screens have a reading area.
+static void KeepSpotterMemory(bool wanted) {
+    static int logged = 0;  // 1 kept, -1 couldn't: logged once per change
+    if (!wanted) {
+        if (g_spotter.keptBytes()) {
+            g_spotter.releaseMemory();
+            LogOcr(Utils::Format("spotter: working memory given back, heap free %lu KB", (unsigned long)(HeapFree() / 1024)));
+            logged = 0;
+        }
+        return;
+    }
+    if (g_spotter.keptBytes()) return;
+    const bool ok = g_spotter.keepMemory(400, 240);
+    if (ok && logged != 1)
+        LogOcr(Utils::Format("spotter: %lu KB kept for its working memory, heap free %lu KB",
+                             (unsigned long)(g_spotter.keptBytes() / 1024), (unsigned long)(HeapFree() / 1024)));
+    else if (!ok && logged != -1)
+        LogOcr(Utils::Format("spotter: no %lu KB block to keep for its working memory (heap free %lu KB, largest %lu KB): "
+                             "taken each read instead",
+                             (unsigned long)(g_spotter.arenaBytes(400, 240) / 1024), (unsigned long)(HeapFree() / 1024),
+                             (unsigned long)LargestFreeKB()));
+    logged = ok ? 1 : -1;
+}
+
 static bool LoadSpotter() {
     if (g_spotterState) return g_spotterState > 0;
     SdReader f;
@@ -1558,6 +1586,7 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     if (spot) g_spotter.setParallel(OcrWorkers(), RunOnCores);  // its rows on every core (the same boxes)
     if (spot) g_spotter.setMemFail(SpotterMemFail);
     LoadAreas();
+    KeepSpotterMemory(spot && (!g_area[0].set || !g_area[1].set));  // not needed when both screens have an area
     u64 t1 = osGetTime();
     const u32 largestBefore = LargestFreeKB();  // for the log: room for the read's buffers?
     const u64 tMem = osGetTime();
