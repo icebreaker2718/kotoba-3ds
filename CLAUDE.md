@@ -296,6 +296,19 @@ works on the code.
   session, no drift. Make Anki cards' networking started with 148-161 KB free, but the PC wasn't on, so an upload with
   this little free memory is still untried on this build. The alpha diagnostics (memory before the spotter, spotter
   memory, cards:, heap_walk/HeapReport) are still in: remove before `test`.
+  Console (2026-11-08, later): after switching to a reading area and Text boxes only and back, "spotter: working memory
+  given back", then "no 207 KB block to keep" (254 KB free in 727 pieces, largest 62 KB; top 89 + 32 beyond) and every
+  spotter read failed. (Oddity: LargestFreeKB said 376 KB and SpotterMemFail's retry of 207 KB succeeded although malloc's
+  own chunks/top/sbrk show no room; LargestFreeKB has always equalled HeapFree. Not explained; how sbrk grows on the
+  console may not match fake_heap_end.) The Anki send in that session ran at game start (2.6 MB free): an upload with
+  ~160 KB free is still untried.
+- On `alpha` (2026-11-08, owner's OK): **the spotter loaded and its memory kept from the first read in every mode**:
+  ReadScreens loads the spotter (`spotterHere = LoadSpotter()`) whatever the mode, `spot = !g_fastMode && spotterHere`,
+  `KeepSpotterMemory(spotterHere)`, never given back (the release branch removed). Areas and Text boxes only need ~10-20
+  KB of their own (line finder arena 400x240: 20,091 bytes; 304x112: 9,803).
+  Test list for the owner's SD (not in the repo): known.txt with their 2,494 words + JPDB v2.2 kana frequency's most
+  common terms, 40,000 words, 406 KB (their own list backed up as known_backup.txt on the card). LoadKnown takes it at
+  game start (file + 4 bytes a word), so expect less room for the model, pictures, grey copies and spotter.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
