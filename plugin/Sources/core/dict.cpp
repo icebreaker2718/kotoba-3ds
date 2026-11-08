@@ -14,10 +14,11 @@ static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-// Each cache's block (MemoArena). Measured on 32-bit ARM (qemu) over the 180 saved screens' lookups with the tables
-// reserved at full size: exact 7.9 KB, prefix 5.1 KB, mask 20.5 KB (full at kMaskMemoMax: its ceiling). With room
-// for longer keys; what doesn't fit comes from malloc as before (64-bit builds' nodes are bigger: some does there).
-static const size_t kExactArenaBytes = 12 * 1024, kPrefixArenaBytes = 8 * 1024, kMaskArenaBytes = 22 * 1024;
+// Each cache's block (MemoArena). Measured on 32-bit ARM (qemu) at 512 / 512 / 4096 over the saved screens' lookups
+// (183 spotter reads, and 705 reads of every mode) with the tables reserved at full size: exact 29.8 KB, prefix
+// 20.5 KB, mask 81.0 KB (full at kMaskMemoMax: its ceiling). With room for longer keys; what doesn't fit comes from
+// malloc as before (64-bit builds' nodes are bigger: some does there).
+static const size_t kExactArenaBytes = 36 * 1024, kPrefixArenaBytes = 24 * 1024, kMaskArenaBytes = 84 * 1024;
 
 // Empties a cache: the map (its nodes in the block) goes, then the whole block is free again.
 void Dictionary::dropExact() {

@@ -56,6 +56,7 @@ int main(int argc, char **argv) {
     const unsigned workers = wk ? (unsigned)atoi(wk) : 3;
     ocr.setParallel(workers, workers > 1 ? runThreads : nullptr);
     ocr.setFixer(fix, nullptr);
+    if (getenv("KT_TILE")) ocr.setOptions((unsigned)atoi(getenv("KT_TILE")), 0);  // VOCR frames per tile (0: its default 4)
     if (!ocr.load(mf, e)) { printf("MODEL FAILED: %s\n", e.c_str()); return 3; }
     TextSpotter spot;
     if (!spot.load(sf, e)) { printf("SPOTTER FAILED: %s\n", e.c_str()); return 3; }
@@ -68,6 +69,7 @@ int main(int argc, char **argv) {
     const bool poison = getenv("KT_POISON") && atoi(getenv("KT_POISON"));
     if (ocr.scratch(scratch, scratchBytes) && lend && !spot.lendMemory(scratch, scratchBytes, 400, 240))
         fprintf(stderr, "the spotter didn't take the recognizer's memory\n");
+    fprintf(stderr, "recognizer's memory: %zu bytes\n", scratchBytes);
     if (getenv("KT_JOIN_GAP")) g_spotJoinGapPct = atoi(getenv("KT_JOIN_GAP"));    // block joining (spotter), for tuning
     if (getenv("KT_JOIN_LEFT")) g_spotJoinLeftPct = atoi(getenv("KT_JOIN_LEFT"));  // -1 turns it off
     int first = 4;

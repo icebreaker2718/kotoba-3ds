@@ -389,6 +389,18 @@ works on the code.
   362 ms. Streamed "Get them from my PC" confirmed the same day: "known: from the PC done, 19 KB written to the card",
   then "known.txt: 2510 words (19 KB), searched on the SD card: 10 blocks indexed in 21 ms" (the 40k test list replaced
   by the owner's real one; known_backup.txt still on the card), no crash; Make Anki cards fine after it.
+- On `alpha` (2026-11-08, owner's choice of 1 and 2 after the 5 MiB result): **some speed back from the headroom**,
+  nothing reads differently.
+  1. Dictionary recent-answer caches back to 512 / 512 / 4096 in fixed blocks of 36 / 24 / 84 KB (144 KB, was 42 KB).
+     ARM peaks (qemu) over 705 reads' lookups of every mode: 29.8 / 20.5 / 81.0 KB, nothing overflowed; every lookup
+     (6,954 steps, all pages) identical to alpha-10mib's malloc'd caches under qemu-arm and natively (ASan/UBSan).
+  2. VOCR tiles of 6 CTC frames (`g_localOcr.setOptions(6, 0)`): the workers' block 577,920 -> 772,464 bytes (3
+     workers; tiles of 8 would be 966,768). Same text on all 180 saved screens x 4 modes natively (junk written into the
+     block first) and on 30 under qemu-arm, which match the native text. ~2% less time natively (tiles of 8: ~7%).
+  Expected on the console: free before a read ~502 -> ~210 KB. bench_cli takes KT_TILE again and prints the block's size.
+  Test list on the owner's SD (not in the repo): known.txt = their 2,510 words + JPDB v2.2, wordfreq 3.1 (ja) and
+  OpenSubtitles 2018 (hermitdave/FrequencyWords) taken in turn by rank, Japanese-script only, 30,000 words, 282 KB;
+  their real list backed up as known_backup.txt on the card.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

@@ -153,10 +153,12 @@ private:
     // The first levels of the binary search over the keys are the same for every lookup: their
     // keys are kept in memory once read (about 30 KB), so a lookup reads ~3 blocks instead of ~20.
     enum : uint32_t { kMemoLevels = 12 };
-    // The recent-answer caches below are emptied (and their memory given back) when this full. They stay for
-    // the session, so they come out of the reader's room: at 512 / 512 / 4096 they took ~100-170 KB in a long
-    // session and a top-screen read ran out of memory (owner, Mario & Luigi, 2026-11-04, 36 reads).
-    enum : size_t { kExactMemoMax = 128, kPrefixMemoMax = 128, kMaskMemoMax = 1024 };
+    // The recent-answer caches below are emptied (their block reset) when this full. They stay for the session, so
+    // they come out of the reader's room: at 512 / 512 / 4096 in malloc'd pieces they took ~100-170 KB in a long
+    // session and a top-screen read ran out of memory (owner, Mario & Luigi, 2026-11-04, 36 reads); 128 / 128 / 1024
+    // after that. Back at full size (2026-11-08) now that they live in fixed blocks (144 KB, taken at open()) and the
+    // reader's other memory is kept for the session: ~11% fewer dictionary reads.
+    enum : size_t { kExactMemoMax = 512, kPrefixMemoMax = 512, kMaskMemoMax = 4096 };
     // Kept in one fixed block each (MemoArena), keys as views of bytes copied into it: the same maps and the same
     // emptying as before (what is remembered changes which masks posMask() answers with), only the memory moved.
     typedef std::vector<uint32_t, MemoAlloc<uint32_t>> MemoIds;
