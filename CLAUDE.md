@@ -414,6 +414,12 @@ works on the code.
   end (settled, no drift); 63 words saved, 50 screenshots; top read mean 247 ms (median 244). Make Anki cards in the lent
   512 KB block with 377 KB free: 57 saved words, 18 new cards, 0 failed; next session at game start: 42 new cards, 0
   failed. known.txt now 2,607 words with 97 out of order (cards' words appended) kept in memory.
+- **Moved to `test` (2026-11-09, owner's request)** with the alpha-only diagnostics removed: "memory before the spotter",
+  `TextSpotter::setMemFail` / `SpotterMemFail`, the "cards:" lines, `heap_walk.c` / `heap_walk.h` / `HeapReport` (and the
+  grey copy's retry that went with it). Kept: the "net:", "known.txt:", "known: from the PC", "grey copies:", "spotter:"
+  lines. OCR output identical on the 180 saved screens x 4 modes after the removal; test_ui / test_core / test_ocr_core /
+  test_wrap pass. CHANGELOG's next-release entry gained the memory fixes (long sessions, Make Anki cards, long known
+  lists). So everything listed above as on `alpha` up to here is on `test` too.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

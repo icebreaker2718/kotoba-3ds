@@ -125,10 +125,8 @@ bool TextSpotter::find(const uint8_t *grey, unsigned w, unsigned h, std::vector<
     void *arena = useKept ? kept_ : need ? malloc(need) : nullptr;
     VocrTextspot6Set *set = useKept ? (VocrTextspot6Set *)keptSet_ : (VocrTextspot6Set *)malloc(sizeof(VocrTextspot6Set));
     if (!arena || !set) {
-        const bool arenaOk = arena != nullptr, setOk = set != nullptr;
         free(arena);
         free(set);
-        if (memFail_) memFail_(need, arenaOk, setOk);
         error = "not enough memory to look for text";
         return false;
     }

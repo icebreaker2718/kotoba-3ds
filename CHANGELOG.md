@@ -31,10 +31,18 @@ For the quickest reads, set a *Reading area*.
   (「さあここが」 and 「ツアーの見せ場だぞ!」). Lines right under each other with the same left
   edge and size are now kept together. A speaker's name beside the text stays separate. On the
   saved screenshots, 24 of 125 screens now read as one sentence where they were split before.
-- **"Not enough memory for networking" after a long session.** *Make Anki cards*, *Known words*
-  and finding your PC needed one large block of memory, which a long session could leave in too
-  many pieces. They now make do with a smaller block when the large one isn't there. If even that
-  fails, the message says so plainly (restarting the game frees the memory; saved words are kept).
+- **Running out of memory in a long session.** After many reads, especially *Read both screens*
+  over and over, reading could start failing with "not enough memory to look for text" or "not
+  enough memory for the picture", or show only one of the two screens. The plugin now sets aside
+  the memory it reads with once, at the first read, and reuses it for the rest of the session, so
+  how much is free no longer shrinks as you play. In a 104-read session, every read worked.
+- **"Not enough memory for networking", or a crash, when making Anki cards after a long
+  session.** *Make Anki cards*, *Known words* and finding your PC now use memory the plugin has
+  already set aside, so they work however long you've been playing.
+- **Long known-word lists.** A big `known.txt` used to take memory away from reading (about
+  40,000 words left none). The list is now looked up on the SD card instead of being loaded, so
+  it can be as long as you like. *Get them from my PC* writes the list straight to the card as it
+  arrives, and if the download is cut short, your old list is kept.
 
 ## 1.1.0
 
