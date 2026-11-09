@@ -12,7 +12,43 @@ namespace kt {
 
 TextSpotter::~TextSpotter() {
     unload();
+    releaseMemory();
     free(scratch_);
+}
+
+bool TextSpotter::lendMemory(void *p, size_t bytes, unsigned w, unsigned h) {
+    const size_t need = arenaBytes(w, h);
+    if (!need || !p || bytes < need) return false;
+    releaseMemory();
+    keptSet_ = malloc(sizeof(VocrTextspot6Set));
+    if (!keptSet_) return false;
+    kept_ = p;
+    keptBytes_ = bytes;
+    keptLent_ = true;
+    return true;
+}
+
+bool TextSpotter::keepMemory(unsigned w, unsigned h) {
+    const size_t need = arenaBytes(w, h);
+    if (!need) return false;
+    if (kept_ && keptBytes_ >= need && keptSet_) return true;
+    releaseMemory();
+    kept_ = malloc(need);
+    keptSet_ = malloc(sizeof(VocrTextspot6Set));
+    if (!kept_ || !keptSet_) {
+        releaseMemory();
+        return false;
+    }
+    keptBytes_ = need;
+    return true;
+}
+
+void TextSpotter::releaseMemory() {
+    if (!keptLent_) free(kept_);
+    free(keptSet_);
+    kept_ = keptSet_ = nullptr;
+    keptBytes_ = 0;
+    keptLent_ = false;
 }
 
 void TextSpotter::unload() {
@@ -84,8 +120,10 @@ bool TextSpotter::find(const uint8_t *grey, unsigned w, unsigned h, std::vector<
     if (!model_) { error = "no text spotter loaded"; return false; }
     const vocr_textspot6 *m = (const vocr_textspot6 *)model_;
     const size_t need = vocr_textspot6_frame_arena_bytes(m, w, h);
-    void *arena = need ? malloc(need) : nullptr;
-    VocrTextspot6Set *set = (VocrTextspot6Set *)malloc(sizeof(VocrTextspot6Set));
+    // the kept working memory when it is big enough (the arena's size for this screen is passed, as before)
+    const bool useKept = need && kept_ && keptSet_ && keptBytes_ >= need;
+    void *arena = useKept ? kept_ : need ? malloc(need) : nullptr;
+    VocrTextspot6Set *set = useKept ? (VocrTextspot6Set *)keptSet_ : (VocrTextspot6Set *)malloc(sizeof(VocrTextspot6Set));
     if (!arena || !set) {
         free(arena);
         free(set);
@@ -142,8 +180,10 @@ bool TextSpotter::find(const uint8_t *grey, unsigned w, unsigned h, std::vector<
     } else {
         error = "the text spotter failed";
     }
-    free(arena);
-    free(set);
+    if (!useKept) {
+        free(arena);
+        free(set);
+    }
     return r == VOCR_LINES_OK;
 }
 

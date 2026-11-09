@@ -11,6 +11,7 @@
 #include "core/bmp.hpp"
 #include "core/kana.hpp"
 #include "core/known_words.hpp"
+#include "core/net.hpp"  // MemReader
 #include "core/lookup_view.hpp"
 #include "core/menu_view.hpp"
 #include "core/hotkeys.hpp"
@@ -406,6 +407,22 @@ int main(int argc, char **argv) {
         for (const std::string &f : forms) k3.remove(f);
         y.refreshKnown();
         check(!y.cellKnown(cellOf(y, "こ", 1)) && k3.size() == 0, "unmarked: white again");
+        {   // searched where it is (known.txt on the SD card): sorted, then card words appended out of order
+            const std::string text = "# words with cards\n" "いらっしゃる\n外\n天気\r\n幅\n弟子\n" "食べる\nあいつ\n";
+            MemReader file(text);
+            KnownWords kf;
+            check(kf.openFile(&file, 8) && kf.size() == 7 && kf.fileWords() == 6 && kf.fileBlocks() > 1,
+                  "known.txt searched on the card: indexed in blocks, the appended word kept aside");
+            check(kf.has("天気") && kf.has("あいつ") && kf.has("いらっしゃる") && !kf.has("天") && !kf.has("今日"),
+                  "known.txt searched on the card: the same answers");
+            LookupView v2(dict, tr);
+            v2.setKnown(&kf);
+            v2.setText({"今日はいい天気だから\nケーキを食べた"});
+            guard = 0;
+            while (v2.prefetch() && guard++ < 1000) {}
+            check(v2.cellKnown(cellOf(v2, "天")) && v2.cellKnown(cellOf(v2, "食")) && !v2.cellKnown(cellOf(v2, "今")),
+                  "known words searched on the card are green");
+        }
     }
     {   // hotkeys: names, and one that is part of another waits for it
         check(keyComboName(keys::ZL | keys::ZR) == "ZL + ZR" && keyComboName(0) == "Off" &&

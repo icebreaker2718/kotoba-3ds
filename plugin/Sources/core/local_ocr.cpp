@@ -56,7 +56,8 @@ void *LocalOcr::alignedAlloc(size_t bytes) {  // 16-byte aligned; freed by the d
 void LocalOcr::unload() {
     for (void *p : raw_) free(p);
     std::vector<void *>().swap(raw_);
-    blob_ = arena_ = nullptr;
+    blob_ = arena_ = workBlock_ = nullptr;
+    workSlots_ = 0;
     model_ = ctx_ = nullptr;
     ctxs_.clear();
     arenas_.clear();
@@ -154,9 +155,16 @@ bool LocalOcr::setUp(uint32_t n, std::string &error) {
     o.two_level = twoLevel_ ? 1 : 0;
     const size_t need = vocr_arena_bytes(m, &o);
     if (!need) { error = "could not start the OCR"; return false; }
-    if (!arena_) {  // the first load: the main context's arena, with room for another model
-        arenaBytes_ = need + kArenaSpare;
-        arena_ = (unsigned char *)alignedAlloc(arenaBytes_);
+    if (!arena_) {  // the first load: every worker's arena in one block, with room for another model
+        arenaBytes_ = (need + kArenaSpare + 15) & ~(size_t)15;
+        const unsigned slots = runner_ && workers_ > 1 ? workers_ : 1;
+        workBlock_ = (unsigned char *)alignedAlloc(arenaBytes_ * slots);
+        if (workBlock_) {
+            workSlots_ = slots;
+            arena_ = workBlock_;
+        } else {  // not in one piece: the main context's arena alone (the others are tried one by one)
+            arena_ = (unsigned char *)alignedAlloc(arenaBytes_);
+        }
         if (!arena_) { error = "not enough memory for the OCR"; return false; }
         arenas_.assign(1, arena_);
     }
@@ -185,7 +193,9 @@ void LocalOcr::ensureWorkers(unsigned n) {
     if (!m) return;
     while (ctxs_.size() < n) {
         vocr_ctx *c2 = (vocr_ctx *)alignedAlloc(sizeof(vocr_ctx));
-        unsigned char *a2 = c2 ? (unsigned char *)alignedAlloc(arenaBytes_) : nullptr;
+        unsigned char *a2 = !c2 ? nullptr
+                            : ctxs_.size() < workSlots_ ? workBlock_ + ctxs_.size() * arenaBytes_  // its place in the block
+                                                        : (unsigned char *)alignedAlloc(arenaBytes_);
         vocr_opts o;
         memset(&o, 0, sizeof(o));
         o.mode = mode_;
@@ -584,11 +594,14 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
 #if defined(__GNUC__) && !defined(__clang__)
 __attribute__((optimize("O2")))  // every read, every pixel: built for speed (the file is built for size)
 #endif
-uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
-    uint8_t *grey = (uint8_t *)malloc((size_t)w * h);
-    if (!grey) return nullptr;
+void greyFromRGBInto(const uint8_t *rgb, unsigned w, unsigned h, uint8_t *grey) {
     for (size_t i = 0; i < (size_t)w * h; i++)
         grey[i] = (uint8_t)((77u * rgb[i * 3] + 150u * rgb[i * 3 + 1] + 29u * rgb[i * 3 + 2]) >> 8);
+}
+
+uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
+    uint8_t *grey = (uint8_t *)malloc((size_t)w * h);
+    if (grey) greyFromRGBInto(rgb, w, h, grey);
     return grey;
 }
 

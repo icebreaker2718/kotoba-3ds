@@ -58,6 +58,15 @@ public:
     // at the next load() (call this first) or else at the first read that uses it.
     typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
     void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
+    // The workers' working memory is taken as one block at the first load (one arena per worker, back to back).
+    // Nothing is kept there between recognitions (vocr_init only plans), so while no read() / readLines() /
+    // readRegions() is running, others may use it as scratch: the text spotter's find(), the socket service.
+    // False when the workers' arenas couldn't be had in one piece.
+    bool scratch(void *&p, size_t &bytes) const {
+        p = workBlock_;
+        bytes = workBlock_ ? arenaBytes_ * workSlots_ : 0;
+        return workBlock_ != nullptr;
+    }
     unsigned lastWorkers() const { return lastWorkers_; }
     // VOCR's batch sizes (0 = its defaults): frames per tile and frames per output-head batch.
     // Bigger batches use more memory; the text is the same. Takes effect at the next load().
@@ -112,6 +121,8 @@ private:
     std::vector<void *> raw_;  // every allocation, for the destructor
     std::vector<void *> ctxs_; // vocr_ctx per worker (the first is ctx_)
     std::vector<void *> arenas_;  // each context's arena (arenaBytes_ each)
+    unsigned char *workBlock_ = nullptr;  // the workers' arenas in one block (workSlots_ of them), or none
+    unsigned workSlots_ = 0;
     size_t arenaBytes_ = 0;       // allocated per arena: a little more than the model needs, for another
     size_t blobCap_ = 0;          // bytes allocated for the model file (the same)
     int mode_ = 0;
@@ -142,6 +153,8 @@ void ocrUsePairKernel(bool on);
 uint8_t *topScreenGrey(Reader &bmp, unsigned &w, unsigned &h, std::string &error);
 // R, G, B bytes -> grey bytes as the model expects (malloc'd; nullptr if out of memory).
 uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h);
+// The same into out (w x h bytes), for a buffer kept by the caller.
+void greyFromRGBInto(const uint8_t *rgb, unsigned w, unsigned h, uint8_t *out);
 
 // Reads every text box found (findTextBoxes) that holds Japanese, top to bottom, and falls back
 // to the whole screen when none does. Returns the text blocks (textParagraphs, the game's line

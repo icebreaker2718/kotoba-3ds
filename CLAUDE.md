@@ -7,14 +7,17 @@ works on the code.
 
 ## Standing rules (from the owner)
 
-- **New work goes to the `test` branch.** Nothing new reaches `main` until the owner has
-  confirmed it on real hardware and says to merge. Docs-only changes (README, this file) may go
-  straight to `main`; then merge `main` into `test`.
-- **Experiments the owner wants kept away from the test branch's users go to `alpha`.** It moves
-  to `test` only when the owner says so. CI publishes each alpha build as the `alpha-dev`
+- **All new work goes to the `alpha` branch** (owner, 2026-11-03), unless the owner explicitly says
+  otherwise for a change. **Never push to `test` or `main` without the owner's permission**: that
+  includes docs-only changes. Work moves from `alpha` to `test` only when the owner says so, and
+  from `test` to `main` only after the owner has confirmed it on real hardware and says to merge.
+- **Every change to `alpha` goes on the owner's SD card** when it's connected (the `alpha-dev`
+  build, below).
+- `alpha` and `test` have separate histories: to bring `alpha` up to `test`, commit `test`'s tree
+  on `alpha` (`git rm -r . && git checkout origin/test -- .`), no force push. CI publishes each alpha build as the `alpha-dev`
   pre-release, titled "DEVELOPMENT ONLY - do not use" (the owner's OK, 2026-10-28): run artifacts
   can't be downloaded from this environment (their storage host is blocked), release assets can.
-  Fetch it through the REST API (as below, tag `alpha-dev`) and put it on the owner's SD card.
+  Fetch it through the REST API (as below, tag `alpha-dev`).
 - **When unsure about a design decision, stop and ask** before building it.
 - **Anonymity:** no personal information (names, home paths, emails) in commits or files.
 - **Commits** are authored `Claude <noreply@anthropic.com>` and end with the attribution lines the
@@ -22,7 +25,8 @@ works on the code.
   8a36095) are theirs: never rewrite or re-author them, even if a hook flags them as unverified.
 - **OCR changes are backtested** against every saved screenshot before they go to `test`
   (see below), and the result is reported: how many screens changed, better or worse.
-- After a change is on `test`, put the build on the owner's SD card when it's connected.
+- After a change is on `alpha` (or, with permission, `test`), put that build on the owner's SD card
+  when it's connected.
 
 ## Branches, CI and releases
 
@@ -207,6 +211,215 @@ works on the code.
   `g_spotJoinLeftPct`; bench_cli takes KT_JOIN_GAP / KT_JOIN_LEFT, -1 off), both blocks with 3+ Japanese characters.
   Backtest, 125 screens (shots/ + luma/screenshots/): 25 changed, 24 better; left 40-75% also joined M&L's "あらすじ"
   heading (8 px off), 150% Pokémon's speaker names (24-33 px); gap 150-300% changed nothing. Log: "joined N".
+- On `alpha` (2026-11-03, owner's choice): **a 128 KB networking block reserved at game start** (`kt::netReserve`
+  in core/net.cpp, called in main() after the "start:" line; kept for the session; netStop no longer frees it; the
+  512/256/128 KB fallback only when the reservation failed). Why: after the first read the heap has ~620 KB free
+  (model ~1,160 KB, 3 worker contexts ~540 KB, picture pool 337 KB, glyph slab 96 KB, dict cache 96 KB, spotter
+  52 KB); a 512 KB socket block taken then left ~100 KB, and the card upload's `new char[16384]` (reply buffer in the
+  POST code) threw bad_alloc -> abort() (crash_dump_00000019, Mario & Luigi: Make Anki cards run twice; the first
+  got 256 KB and sent 16 of 17). Reads lose 128 KB of headroom. Log: "net: 128 KB reserved ...", "started with a
+  reserved 128 KB block". Unverified: socInit with 128 KB and a card upload (check on the console). Not done (owner
+  declined for now): a larger plugin memory block (plgInfo MemorySize 10MiB / extra block at runtime); allocations in
+  the upload path still abort on failure instead of reporting it.
+- On `alpha` (2026-11-04, owner's choice): **smaller dictionary caches** + an alpha diagnostic. A top-screen spotter
+  read failed ("not enough memory to look for text") after 36 reads in one M&L session: free before a read fell
+  564 -> 476 KB (no fragmentation: largest == free); the touchscreen still read (spotter arena 178 KB vs 208 KB top,
+  plus the grey copy 75 / 94 KB). Dictionary's recent-answer maps capped 512/512/4096 -> 128/128/1024
+  (`kExactMemoMax` etc. in dict.hpp) and emptied with swap (clear() kept the bucket arrays). Same output on 219
+  screens x 4 modes; dictionary SD reads +14% (0.3 a read). **Alpha-only diagnostic, remove before `test`:**
+  "memory before the spotter: ... heap free, largest; dictionary caches ..." (ReadOneScreen). On paper ~480 KB
+  should still have fitted the top screen's ~300 KB, so ~tens of KB used during a read are unaccounted for: that
+  line tells. Owner declined a fallback to the box reader when the spotter can't get its memory.
+  Console result (2026-11-07, two M&L sessions of 59 and 33 reads): no drift (before a read 543-576 KB, up when the
+  caches empty), no failure; that line showed 450-480 KB. But the arena is exactly 212,855 bytes top / 182,047
+  touchscreen (+ 1,684 for the result set; same on x86-64 and ARM), and the old build's log had top reads work at 404
+  KB free at that point and fail at 388 KB while 388 KB in one piece was mallocable right after: the spotter step
+  needs ~390-400 KB, ~190 KB more than it asks for. Nothing found in the read path (pictures in the pool, screenshot
+  thread joined first, core-3 thread made once). Margin now ~50 KB.
+- On `alpha` (2026-11-07, owner's OK): **more alpha-only diagnostics, remove before `test`**: `TextSpotter::setMemFail`
+  (core/text_spot.cpp) calls main.cpp's `SpotterMemFail` at the failure itself: "spotter memory: no block of N KB
+  (working memory got/FAILED, results ...); the same again now: ...; heap free, largest; malloc: from the system,
+  free in it, top piece, not taken yet" (mallinfo arena / fordblks / keepcost, fake_heap_end - sbrk(0)). MakeCards logs
+  "cards: N saved words, N new cards, N already in Anki, N failed[: error]; heap ..." and "cards: PC not reached: ...".
+  Both settled 2026-11-07: socInit with the reserved 128 KB block worked (3 uploads, no crash); whether the cards
+  arrived is what the new "cards:" line shows.
+  Console result (same evening, M&L, mostly both-screens reads): 16 reads failed, each time the 207 KB arena malloc
+  FAILED and the same malloc right after got it (heap free 380-386 KB in one piece; malloc: 224-230 KB free inside,
+  top piece 4-79 KB, 156 KB beyond sbrk). Not a shortage: a read failed at 548 KB before and the next one at 548
+  worked; reads worked with 374 KB left and failed with 386. The console's newlib malloc misses a big-enough free
+  chunk on the first large request (the results' small malloc/free in between seems to put it where the retry
+  finds it; newlib's source couldn't be fetched to confirm).
+- On `alpha` (2026-11-07, owner's choice of 3 options): **the spotter's working memory kept for the session**.
+  `TextSpotter::keepMemory(400, 240)` / `releaseMemory()` (core/text_spot.cpp): one 212,855-byte arena + the result set,
+  used by every find() on a screen that size or smaller (both screens of a read in turn), else find() mallocs as before.
+  main.cpp `KeepSpotterMemory(wanted)` in ReadScreens after LoadAreas: kept while the spotter is on and the game lacks a
+  reading area on at least one screen; given back in "Text boxes only" or with areas on both screens. Log once per
+  change: "spotter: N KB kept for its working memory ..." / "spotter: no N KB block to keep ... taken each read
+  instead" / "spotter: working memory given back". Heap free drops ~208 KB for the session (the large-known-list and
+  large-mined.tsv audit risks get closer). Check: 43 saved screens (39 top, 4 touchscreen) x 4 orders x 1 and 3
+  workers, kept vs fresh memory: same boxes, ASan/UBSan clean. The alpha diagnostics stay until the owner confirms.
+  Console result (2026-11-07, M&L, many both-screens reads): the kept arena worked ("207 KB kept", no spotter
+  failure), but after ~30 reads the top screen's grey copy (greyFromRGB, 96,000 bytes) was refused 17 reads in a row
+  with LargestFreeKB = 340 KB measured just before (nothing allocated in between) while the touchscreen's 76,800 worked;
+  "Read both screens" then silently showed the touchscreen alone. A consistent dlmalloc can't refuse 94 KB right after
+  granting 340 KB, and Ubuntu's arm-none-eabi newlib (same mallocr.c) under qemu-arm with a plugin-shaped heap refused
+  nothing in 400 random states: so the console's heap is probably inconsistent (a chunk header overwritten, or sbrk
+  moved by something other than malloc), not short. Recognition workers don't malloc (runLine writes preallocated
+  buffers). Owner declined, for now, reserving the grey copies too; offered: say so when one screen of a both-screens
+  read fails (not decided).
+- On `alpha` (2026-11-07, owner's choice): **heap diagnostic, alpha only, remove before `test`**. `heap_walk.c` /
+  `Includes/heap_walk.h` read newlib's malloc (dlmalloc 2.6.4 layout, 32-bit) through weak symbols (`__malloc_av_`,
+  `__malloc_sbrk_base`, `__malloc_top_pad`, ...; missing -> "malloc's variables not found"), under `__malloc_lock`:
+  malloc's top vs sbrk(0), a walk of every chunk from sbrk's base to top (stops at a fencepost, size 4 = a foreign sbrk,
+  or at a bad size = a header overwritten), free pieces, how many are big enough and whether they're on the bins, the
+  bins' totals, last remainder, bitmap, top pad / trim threshold / most sbrk'd. main.cpp `HeapReport(what, size)`: full
+  report ("heap: ...", "heap walk: ...", "heap bins: ...") for the session's first 4 refusals, one line after; called
+  for the grey copies (then greyFromRGB once more: "heap: the same again now: got/FAILED"), the spotter's fallback
+  memory (`SpotterMemFail`), the pictures' fallback and the reading area's crop. Tested under qemu-arm with Ubuntu's
+  newlib (scratch harness, not in the repo): totals equal mallinfo's; a foreign sbrk -> fencepost; an overwritten header
+  -> BROKEN at it; a fitting free chunk found on the bins.
+  Console result (2026-11-07, 68 reads, M&L, mostly both screens): the heap is consistent (walk start to top ok, sbrk at
+  top's end, no fencepost) but full: 3,276 of 3,520 KB in use, ~214 KB free inside in 470-540 pieces + 20 KB beyond
+  sbrk. From read 26 the touchscreen's grey copy (76,800) was refused on every both-screens read (the top's 96,000 had
+  taken the biggest area), retry too; single-screen reads worked. The largest free piece (~75 KB, same address each
+  time) counted as big enough by the walk (>= request + 8) yet malloc never used it: a few bytes short or misfiled, not
+  settled. So: tight and fragmented, not corrupt; the earlier "allocator quirk" reading was wrong.
+- On `alpha` (2026-11-07, owner's choice): **the grey copies kept for the session**. `g_greyPool` (172,800 bytes: top
+  400x240 then touchscreen 320x240), `ReserveGreys()` after `ReservePictures()` in ReadScreens (once; logs "grey copies:
+  N KB kept for them ..." or "no N KB block ... taken each read instead"); `ScreenGrey(i, boxes, owned, ...)` writes into
+  it with `kt::greyFromRGBInto` (core/local_ocr.cpp; greyFromRGB now uses it), malloc only without the pool, and
+  ReadScreens frees only owned copies. Peak during a read unchanged; free between reads ~340 -> ~170 KB. Offered next if
+  still tight: fixed storage for the dictionary caches (fewer small pieces); a larger plugin memory block (declined).
+  Console result (2026-11-08, owner: "can no longer get the plugin to run out of memory"): 48 reads in one M&L session
+  (39 both screens, 5 top, 4 touchscreen), all read, no heap reports, no memory errors, no crash dump; "grey copies: 168
+  KB kept" then "spotter: 207 KB kept" at the first read (heap free 258 KB); free before a read 158-186 KB the whole
+  session, no drift. Make Anki cards' networking started with 148-161 KB free, but the PC wasn't on, so an upload with
+  this little free memory is still untried on this build. The alpha diagnostics (memory before the spotter, spotter
+  memory, cards:, heap_walk/HeapReport) are still in: remove before `test`.
+  Console (2026-11-08, later): after switching to a reading area and Text boxes only and back, "spotter: working memory
+  given back", then "no 207 KB block to keep" (254 KB free in 727 pieces, largest 62 KB; top 89 + 32 beyond) and every
+  spotter read failed. (Oddity: LargestFreeKB said 376 KB and SpotterMemFail's retry of 207 KB succeeded although malloc's
+  own chunks/top/sbrk show no room; LargestFreeKB has always equalled HeapFree. Not explained; how sbrk grows on the
+  console may not match fake_heap_end.) The Anki send in that session ran at game start (2.6 MB free): an upload with
+  ~160 KB free is still untried.
+- On `alpha` (2026-11-08, owner's OK): **the spotter loaded and its memory kept from the first read in every mode**:
+  ReadScreens loads the spotter (`spotterHere = LoadSpotter()`) whatever the mode, `spot = !g_fastMode && spotterHere`,
+  `KeepSpotterMemory(spotterHere)`, never given back (the release branch removed). Areas and Text boxes only need ~10-20
+  KB of their own (line finder arena 400x240: 20,091 bytes; 304x112: 9,803).
+  Test list for the owner's SD (not in the repo): known.txt with their 2,494 words + JPDB v2.2 kana frequency's most
+  common terms, 40,000 words, 406 KB (their own list backed up as known_backup.txt on the card). LoadKnown takes it at
+  game start (file + 4 bytes a word), so expect less room for the model, pictures, grey copies and spotter.
+  Console result (2026-11-08): with the 40,000-word list loaded at start, the first read had 158 KB free: no room to
+  keep the grey copies or the spotter, every read "not enough memory for the picture" (52 KB free in 44 pieces), no
+  crash. Make Anki cards worked with 86 KB free (the low-memory upload is settled). With the owner's normal list 522 KB
+  was free at that point: room for only ~50 KB more of list (~7,000 words in all) before reads fail.
+- On `alpha` (2026-11-08, owner's choice): **known.txt searched on the SD card**, not loaded. `KnownWords::openFile(Reader*,
+  blockBytes = 2048)` (core/known_words.cpp) reads the file once in 4 KB chunks: words in UTF-8 byte order (as mine.py /
+  ocr_server.py write them) are indexed by block (the first word of each ~2 KB block: offsets + keys), a word out of
+  order (Make Anki cards appends its cards' words) goes to `spill_` in memory (at most kMaxSpill 4096; the rest
+  `spillDropped()`), duplicates skipped, '#' / blank lines and '\r' / spaces trimmed as before. has(): in-memory list (load/
+  adopt, still there for tests), extra_ (saved / marked), spill_, then one block read (the last block kept). main.cpp:
+  `g_knownFile` (SdReader, now with close()) kept open; `CloseKnown()` before known.txt is appended (MakeCards), removed
+  or rewritten (Known words menu); LoadKnown logs "known.txt: N words (K KB), searched on the SD card: B blocks indexed in
+  T ms, M out of order kept in memory ...". 40,000 words: 203 blocks, ~5 KB in memory (was ~570 KB). Checked: every word
+  of the 40k list (+3 appended) and twice as many near-misses give the in-memory list's answers (ASan/UBSan); 1,000
+  scattered checks = 1,000 block reads; test_ui gains an on-card case, test_ui / test_core pass. Still open (audit 1):
+  "Get them from my PC" holds the whole reply in memory (up to kKnownMax + 64) before writing known.txt.
+  Console result (2026-11-08, 40k list): "known.txt: 40000 words (406 KB), searched on the SD card: 203 blocks indexed in
+  250 ms", ~25 reads in every mode, no memory failure, Make Anki cards fine (the failed_ shots of that session are "no
+  text found" reads).
+- **Shelved on branch `alpha-10mib`** (bb7d6d9; owner, 2026-11-08: "shelve this for now on a 2nd alpha branch ... continue
+  trying to make the plugin work on 5MiB"); reverted on `alpha`, so alpha is 5 MiB again with the small dictionary caches,
+  tiles of 4 and known.txt on the SD card. CI publishes alpha-dev from `alpha` only: the shelved build is that branch's
+  plugin. Console result before shelving (2026-11-08, M&L, RE Revelations, Corpse Party): "gave the game back 10240 KB",
+  all three started, 35 reads, free before a read >= 4,315 KB, no memory errors, no crash dump, Make Anki cards fine;
+  mean read: top 469 ms, both 537 ms, touchscreen 348 ms. What it was:
+  (2026-11-08, owner's request: "try making the change for more memory" and "revert any changes we had to make
+  for memory constraints to their faster variants"): **plugin memory 10 MiB** (plgInfo `MemorySize: 10MiB`; Luma's
+  loader takes 2 / 5 / 10 MiB only, file_loader.c memRegionSizes; the heap is that minus the 3gx's code, ~8.6 MB).
+  GiveGameItsMemory reads the block's size from Luma's header (heapSize + exeSize), so the commit-limit raise and the
+  hidden share follow it: the boot line should say "gave the game back 10240 KB". Untried on the console: games that use
+  the New 3DS's bigger memory modes (less slack in the 124 MB app region). Reverted / made faster with the room:
+  1. VOCR tiles of 8 CTC frames (`g_localOcr.setOptions(8, 0)` before the model loads; VOCR's default 4): worker arena
+     180 -> 307 KB (x3), same text on all 180 saved screens (163 top, 17 touchscreen, from shots/) x 4 modes natively and
+     on 30 of them under qemu-arm (which also matches the native text); ~4% less time natively, ~6% under qemu (no cache
+     model: the gain on the ARM11's small L1 should be larger; tile 16 = 560 KB/worker, same text, ~6% native). bench_cli
+     takes KT_TILE.
+  2. Dictionary recent-answer caches back to 512 / 512 / 4096: same output, dictionary reads over the 180 screens x 4
+     modes 2108 -> 1875.
+  3. known.txt in memory when it is up to kKnownMax (1 MB) and the memory is there ("known.txt: N words (K KB), in
+     memory"), else searched on the SD card as above.
+  Kept as they are (faster or not a speed trade): the picture pool, kept grey copies and spotter arena, the 128 KB
+  networking block, the dictionary's 48-block cache (unchanged since the first version). The alpha diagnostics stay.
+- On `alpha` (2026-11-08, owner's choice of the 5 MiB options 1, 2, 6, 7): **memory shared and steadied, nothing reads
+  differently**.
+  1. `LocalOcr` takes the workers' arenas as one block at the first load (`workBlock_`, `workSlots_` arenas of
+     `arenaBytes_`, now rounded to 16; one by one as before if it can't be had) and offers it as `scratch(p, bytes)`:
+     vocr_init only plans, nothing stays in an arena between recognitions. `TextSpotter::lendMemory(p, bytes, w, h)` runs
+     find() in it (`memoryLent()`; releaseMemory doesn't free it); main.cpp `KeepSpotterMemory` lends first ("spotter:
+     works in the recognizer's memory (N KB, needs N KB)"), else keeps its own block as before. Saves the 207 KB kept
+     arena. 3 workers: ~564 KB block; 2: ~376; 1 worker (188 KB) is too small: own block.
+  2. `kt::netLend(p, bytes)` (core/net.cpp): the largest page-aligned 512 / 256 / 128 KB inside the same block is the
+     socket service's buffer from then on (`netInLentMemory()`); main.cpp `LendReaderMemory()` after the model loads
+     ("net: will use N KB of the recognizer's memory"); the 128 KB block reserved at game start is gone (before the first
+     read netStart takes a block of the moment and frees it). The service owns that memory between netStart and netStop,
+     so ReadScreens stops it first if it were ever up (`kt::netUp()`); every netStart path calls netStop before returning.
+  6. Dictionary recent-answer caches in fixed blocks (`MemoArena` + `MemoAlloc` in dict.hpp): the same unordered_maps
+     and the same emptying (what is remembered changes posMask's answers, so semantics kept exactly), keys as
+     string_views of bytes copied into the block, tables reserved at full size after each emptying, a bump block reset
+     when the cache is emptied, overflow from malloc (listed, freed at reset). 12 / 8 / 22 KB (ARM peaks over the 180
+     screens' lookups: 7.9 / 5.1 / 20.5 KB, mask full at 1024). Dictionary is now non-copyable. `memoArenaStats()`.
+  7. "Get them from my PC" streamed: `kt::netPostToSink(..., ReplySink&, ..., maxReply)` (readReplyTo: header in memory,
+     body to the sink; non-200 read into the error); main.cpp `KnownFileSink` checks "KNOWN1\n", writes known.tmp through
+     a 16 KB buffer, then known.txt is removed and known.tmp renamed (File::Rename); a failed or cut-short download
+     removes known.tmp and the old list stays. Log "known: from the PC done/failed, N KB written to the card".
+  Checks: OCR output identical on all 180 saved screens x 4 modes (lent spotter memory, junk written into the block
+  before every mode, 2 and 3 workers; 1 worker falls back), ASan/UBSan and ThreadSanitizer clean; every lookup
+  (1,204 words, 33,228 results with all pages) identical to the old caches under qemu-arm and natively (where 2,227
+  pieces overflowed to malloc; ASan/LSan clean); netPostToSink against a local server (720 KB list byte-exact, error
+  reply, cut short, no Content-Length); test_ui / test_core / test_ocr_core / test_wrap pass. bench_cli: KT_LEND
+  (default 1), KT_POISON. Expected on the console: free between reads ~190 KB -> ~500 KB (207 + 128 back, ~42 KB fixed
+  for the caches instead of ~25 KB that came and went). Untried: socInit in the lent block (page-aligned, inside the
+  workers' block) and the streamed download on the console.
+  Console result (2026-11-08, 8f424f4, M&L with the 40k known list on the SD card): "net: will use 512 KB of the
+  recognizer's memory", "spotter: works in the recognizer's memory (564 KB, needs 207 KB)"; 45 reads (26 both screens,
+  10 top, 9 touchscreen; 14 of them Text boxes only / reading area), no failure, no heap report, no crash dump; free
+  before a read 567 KB at the first, then 502 KB on every read after (flat: no drift at all); Make Anki cards 3 times
+  "started with a 512 KB block in the recognizer's memory", all fine. Mean read: top 275 ms, both 565 ms, touchscreen
+  362 ms. Streamed "Get them from my PC" confirmed the same day: "known: from the PC done, 19 KB written to the card",
+  then "known.txt: 2510 words (19 KB), searched on the SD card: 10 blocks indexed in 21 ms" (the 40k test list replaced
+  by the owner's real one; known_backup.txt still on the card), no crash; Make Anki cards fine after it.
+- On `alpha` (2026-11-08, owner's choice of 1 and 2 after the 5 MiB result): **some speed back from the headroom**,
+  nothing reads differently.
+  1. Dictionary recent-answer caches back to 512 / 512 / 4096 in fixed blocks of 36 / 24 / 84 KB (144 KB, was 42 KB).
+     ARM peaks (qemu) over 705 reads' lookups of every mode: 29.8 / 20.5 / 81.0 KB, nothing overflowed; every lookup
+     (6,954 steps, all pages) identical to alpha-10mib's malloc'd caches under qemu-arm and natively (ASan/UBSan).
+  2. VOCR tiles of 6 CTC frames (`g_localOcr.setOptions(6, 0)`): the workers' block 577,920 -> 772,464 bytes (3
+     workers; tiles of 8 would be 966,768). Same text on all 180 saved screens x 4 modes natively (junk written into the
+     block first) and on 30 under qemu-arm, which match the native text. ~2% less time natively (tiles of 8: ~7%).
+  Expected on the console: free before a read ~502 -> ~210 KB. bench_cli takes KT_TILE again and prints the block's size.
+  Test list on the owner's SD (not in the repo): known.txt = their 2,510 words + JPDB v2.2, wordfreq 3.1 (ja) and
+  OpenSubtitles 2018 (hermitdave/FrequencyWords) taken in turn by rank, Japanese-script only, 30,000 words, 282 KB;
+  their real list backed up as known_backup.txt on the card.
+  Console result (2026-11-08, 916d3f0, M&L, two sessions: 19 reads with the 30k list, 36 after "Get them from my PC"
+  put the owner's 2,510 words back): no failure, no heap report, no crash dump; "spotter: works in the recognizer's
+  memory (754 KB ...)"; free before a read 276-278 KB at the first, then 210-214 KB flat (as expected). Make Anki
+  cards started in the lent 512 KB block with 194 KB free; one card timed out on the PC side (network, not memory).
+  Speed: no clear gain from tiles of 6 in the log (recognition ms per line 34 on 8f424f4 vs 42 here, but different
+  screens and line counts, and lines share 3 workers): a same-screen comparison would settle it.
+  Owner's choice (2026-11-08): tiles back to VOCR's default 4 (no setOptions call; the workers' block 564 KB again), the
+  full caches kept: free before a read expected ~400 KB.
+  Console result (2026-11-09, bf4db3e, M&L, one long session: 104 reads, 102 top + 2 both screens, all spotter): no
+  failure, no heap report, no crash dump; free before a read 468 KB at the first, 404 for 22 reads, then 401-402 to the
+  end (settled, no drift); 63 words saved, 50 screenshots; top read mean 247 ms (median 244). Make Anki cards in the lent
+  512 KB block with 377 KB free: 57 saved words, 18 new cards, 0 failed; next session at game start: 42 new cards, 0
+  failed. known.txt now 2,607 words with 97 out of order (cards' words appended) kept in memory.
+- **Moved to `test` (2026-11-09, owner's request)** with the alpha-only diagnostics removed: "memory before the spotter",
+  `TextSpotter::setMemFail` / `SpotterMemFail`, the "cards:" lines, `heap_walk.c` / `heap_walk.h` / `HeapReport` (and the
+  grey copy's retry that went with it). Kept: the "net:", "known.txt:", "known: from the PC", "grey copies:", "spotter:"
+  lines. OCR output identical on the 180 saved screens x 4 modes after the removal; test_ui / test_core / test_ocr_core /
+  test_wrap pass. CHANGELOG's next-release entry gained the memory fixes (long sessions, Make Anki cards, long known
+  lists). So everything listed above as on `alpha` up to here is on `test` too.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

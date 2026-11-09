@@ -56,10 +56,20 @@ int main(int argc, char **argv) {
     const unsigned workers = wk ? (unsigned)atoi(wk) : 3;
     ocr.setParallel(workers, workers > 1 ? runThreads : nullptr);
     ocr.setFixer(fix, nullptr);
+    if (getenv("KT_TILE")) ocr.setOptions((unsigned)atoi(getenv("KT_TILE")), 0);  // VOCR frames per tile (0: its default 4)
     if (!ocr.load(mf, e)) { printf("MODEL FAILED: %s\n", e.c_str()); return 3; }
     TextSpotter spot;
     if (!spot.load(sf, e)) { printf("SPOTTER FAILED: %s\n", e.c_str()); return 3; }
     spot.setParallel(workers, workers > 1 ? runThreads : nullptr);
+    // as the plugin: the spotter works in the recognizer's workers' memory (KT_LEND=0: its own, as before);
+    // KT_POISON=1 fills that memory with junk before every mode, to show nothing relies on what was left there
+    void *scratch = nullptr;
+    size_t scratchBytes = 0;
+    const bool lend = !getenv("KT_LEND") || atoi(getenv("KT_LEND"));
+    const bool poison = getenv("KT_POISON") && atoi(getenv("KT_POISON"));
+    if (ocr.scratch(scratch, scratchBytes) && lend && !spot.lendMemory(scratch, scratchBytes, 400, 240))
+        fprintf(stderr, "the spotter didn't take the recognizer's memory\n");
+    fprintf(stderr, "recognizer's memory: %zu bytes\n", scratchBytes);
     if (getenv("KT_JOIN_GAP")) g_spotJoinGapPct = atoi(getenv("KT_JOIN_GAP"));    // block joining (spotter), for tuning
     if (getenv("KT_JOIN_LEFT")) g_spotJoinLeftPct = atoi(getenv("KT_JOIN_LEFT"));  // -1 turns it off
     int first = 4;
@@ -74,6 +84,7 @@ int main(int argc, char **argv) {
         if (!rgb) { printf("  BMP FAILED: %s\n", e.c_str()); continue; }
         uint8_t *grey = greyFromRGB(rgb, w, h);
         for (char m : modes) {
+            if (poison && scratch) memset(scratch, 0xA5 ^ (int)(m + a), scratchBytes);
             std::vector<std::string> paras;
             g_fixed = 0;
             if (m == 'f' || m == 's') {
