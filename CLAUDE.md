@@ -409,6 +409,11 @@ works on the code.
   screens and line counts, and lines share 3 workers): a same-screen comparison would settle it.
   Owner's choice (2026-11-08): tiles back to VOCR's default 4 (no setOptions call; the workers' block 564 KB again), the
   full caches kept: free before a read expected ~400 KB.
+  Console result (2026-11-09, bf4db3e, M&L, one long session: 104 reads, 102 top + 2 both screens, all spotter): no
+  failure, no heap report, no crash dump; free before a read 468 KB at the first, 404 for 22 reads, then 401-402 to the
+  end (settled, no drift); 63 words saved, 50 screenshots; top read mean 247 ms (median 244). Make Anki cards in the lent
+  512 KB block with 377 KB free: 57 saved words, 18 new cards, 0 failed; next session at game start: 42 new cards, 0
+  failed. known.txt now 2,607 words with 97 out of order (cards' words appended) kept in memory.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
