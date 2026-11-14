@@ -50,9 +50,9 @@ screen gets in. Your setting is kept. For the quickest reads, set a *Reading are
 
 ## 1.1.0
 
-Thank you for using kotoba3ds! This is the changelog for the newest release, you can download it from the
-[Releases page](https://github.com/icebreaker2718/kotoba-3ds/releases/latest); the version shows
-in Luma's plugin loader. If you are updating from 1.0.0, check out [UPDATING.md](UPDATING.md).
+Released October 29, 2026. This version has been replaced by 1.2.0 (above), which is the one on
+the [Releases page](https://github.com/icebreaker2718/kotoba-3ds/releases/latest) now. To update
+from 1.1.0 or 1.0.0, see [UPDATING.md](UPDATING.md).
 
 This release makes use of the new OCR models from bee-san's vita-ocr project. Many thanks!! Check out the [Rubi for Vita](https://github.com/bee-san/Rubi_for_vita) project if you haven't already!
 
@@ -77,7 +77,8 @@ dialogue. If that gets in the way, use a *Reading area* (below).
 
 ### Fast mode
 
-**Select → Fast mode** switches between two ways of finding text:
+(Renamed *Text boxes only* in 1.2.0.) **Select → Fast mode** switches between two ways of
+finding text:
 
 - **Off (default):** vita-vn-ocr's line spotter finds every line on the screen.
 - **On:** only solid-coloured text boxes are read, as in earlier versions. This is quicker in
@@ -129,8 +130,8 @@ Press Start again to take it back. This is useful for reporting screens that wer
 - **Reading area:** about 30% faster per read than finding the text with the line spotter.
 
 The line spotter (fast mode off) costs a fixed amount of time per screen, so on a plain dialogue
-box it can be a little slower than fast mode. For the quickest reads, use fast mode or a reading
-area.
+box it can be a little slower than fast mode. (1.2.0 made the line spotter much faster, so the
+difference is now very small.)
 
 ### Fixes
 
