@@ -427,6 +427,21 @@ works on the code.
   out under the one tag `latest`, so 1.1.0's files are replaced (offered: a tag per version, not decided). Found while
   rewriting the README, not fixed: `mine.py setup` with note_type "Kotoba3DS" creates the note type but doesn't save
   KOTOBA_FIELDS to config.json, so cards would then fail (offered a fix); ocr_log.txt has no size cap (offered).
+- **1.2.0 as released (f7bcd2a) is broken; fixed build on `alpha` (2026-11-14).** Owner installed it by QR code: the
+  plugin logs "start:" and then nothing (no known.txt line, no menu, no reads; no crash dump). Cause: not the code.
+  `install-ctrpf.sh` cloned CTRPF's newest commit; upstream (gitlab thepixellizeross, develop) got commits on 2026-11-10
+  (packed icons / event fixes / compile-time toggles) that removed the "size = 0x100000; ///< Mostly used for Search"
+  line the script shrinks, so the script fell through, with only a warning, to the Tekito-256 fork, and every build of
+  2026-11-14 (alpha, test, main: 1,147,093 bytes instead of ~1,161,000) was linked against that fork. Fix: one source
+  only, pinned: `CTRPF_COMMIT=96fd3d940be85f014fad21dc16c4fd305fa798ce` (2026-10-26, what 1.1.0 and the 2026-11-09 test
+  build were built on); any failure there is an error, no other forks. The owner's card was put back on the 2026-11-09
+  test build (09b465e, 1,161,027 bytes) meanwhile. Lesson: a build whose size jumps without a code change is a
+  different toolchain: check "libctrpf built from" in the plugin job's log before it goes anywhere. Moving to newer
+  CTRPF is its own piece of work (needs the heap shrink redone and a console test).
+  Console result (2026-11-14, alpha ba8f567 = 1.2.0 on the pinned CTRPF, 1,161,027 bytes, M&L): starts as before
+  (known.txt line, heap 3512 KB), 9 reads (top and touchscreen) with 404 KB free before each, Make Anki cards in the
+  lent 512 KB block (7 words became cards), no crash dump. Moved to `test` and merged to `main` the same day at the
+  owner's request: the release's files are replaced by this build.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
