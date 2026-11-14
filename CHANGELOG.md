@@ -18,7 +18,7 @@ needed. The steps are in the [README](README.md#install-over-wi-fi-with-3dsdl).
 
 Reading the screen is faster, with the same text as before. On a New 3DS, a normal read
 (no reading area) went from about 425 ms to about 230 ms. Finding the lines of text now takes
-about 100 ms instead of 250 ms. All of the console's cores now share the work: when a screen
+about 100 ms instead of 250 ms (in my testing, exact values may vary). All of the console's cores now share the work: when a screen
 has only one or two lines, each line is split between them, and when it has several text
 boxes, they're read together instead of one after another.
 
