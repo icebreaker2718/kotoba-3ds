@@ -438,6 +438,10 @@ works on the code.
   test build (09b465e, 1,161,027 bytes) meanwhile. Lesson: a build whose size jumps without a code change is a
   different toolchain: check "libctrpf built from" in the plugin job's log before it goes anywhere. Moving to newer
   CTRPF is its own piece of work (needs the heap shrink redone and a console test).
+  Console result (2026-11-14, alpha ba8f567 = 1.2.0 on the pinned CTRPF, 1,161,027 bytes, M&L): starts as before
+  (known.txt line, heap 3512 KB), 9 reads (top and touchscreen) with 404 KB free before each, Make Anki cards in the
+  lent 512 KB block (7 words became cards), no crash dump. Moved to `test` and merged to `main` the same day at the
+  owner's request: the release's files are replaced by this build.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
