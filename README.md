@@ -190,8 +190,8 @@ the area.
 
 ### Good to know
 
-- **Speed:** while a lookup is open, the console runs at full speed and uses all its CPU
-  cores to read; the game's own setting comes back when you close it.
+- **Speed:** while a lookup is open, the console runs at full speed and reads on up to three of
+  its four CPU cores; the game's own speed setting comes back when you close it.
 - **The OCR** is VOCR6 from bee-san's [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr),
   the same reader [Rubi](https://github.com/bee-san/Rubi_for_vita) uses on the PS Vita, trained
   for game dialogue. Its line spotter (textspot8) finds the text. The model files are for
@@ -223,7 +223,7 @@ somewhere you'll find again, like your Documents folder. You get a folder called
 
 **3. Open a terminal in that folder.** Every command below is typed there.
 - Windows: open the `kotoba-3ds-main` folder, click the address bar, type `cmd` and press Enter.
-- Mac: right-click the folder in Finder → **New Terminal at Folder**.
+- Mac: right-click the folder in Finder → **Services → New Terminal at Folder**.
 - Linux: right-click in the folder → **Open in Terminal**.
 
 **4. Install Pillow** (it makes the screenshot for each card):
@@ -233,7 +233,7 @@ python -m pip install pillow
 ```
 
 On Windows, if `python` isn't found, type `py` instead of `python` here and in every command
-below.
+below. On a Mac or Linux, type `python3` instead.
 
 **5. Set up Anki.**
 1. In Anki, go to **Tools → Add-ons → Get Add-ons**, enter `2055492159` (AnkiConnect), and
@@ -423,7 +423,8 @@ screen to keep one).
   after the game starts.
 - **The game crashes or shows an error at start:** update to the latest release. If it still
   happens, turn the plugin loader off in the Rosalina menu to play, and please report the game.
-- **"Dictionary not found":** the file must be exactly `SD:/3ds/kotoba3ds/dict.bin`.
+- **"The dictionary isn't on the SD card":** the file must be exactly
+  `SD:/3ds/kotoba3ds/dict.bin`.
 - **"wrong format / truncated":** download `dict.bin` (or the SD zip) again and copy it again.
 - **"Couldn't read the screen: No OCR model found":** extract Kotoba3DS-SD.zip (or
   `Kotoba3DS-ocr-model.zip`) to the root of the SD card.
@@ -449,7 +450,8 @@ Most people don't need this: the [latest release](../../releases/latest) has eve
 ### Let GitHub build it (no tools to install)
 
 1. Fork this repository.
-2. Open the **Actions** tab. The `build` workflow starts on its own (or press *Run workflow*).
+2. Open your fork's **Actions** tab and turn workflows on (GitHub asks the first time). Then
+   pick the `build` workflow and press **Run workflow**. After that it also runs on every push.
 3. When it's green, download the **Kotoba3DS-plugin**, **Kotoba3DS-dict** and
    **Kotoba3DS-ocr-model** artifacts from the run's page.
 

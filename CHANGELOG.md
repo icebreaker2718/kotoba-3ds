@@ -17,8 +17,8 @@ needed. The steps are in the [README](README.md#install-over-wi-fi-with-3dsdl).
 ### Faster reading
 
 Reading the screen is faster, with the same text as before. On a New 3DS, a normal read
-(no reading area) went from about 425 ms to about 230 ms. Finding the lines of text now takes
-about 100 ms instead of 250 ms (in my testing, exact values may vary). All of the console's cores now share the work: when a screen
+(no reading area) went from about 425 ms to about 245 ms. Finding the lines of text now takes
+about 100 ms instead of 250 ms (in my testing, exact values may vary). Up to three of the console's cores now share the work: when a screen
 has only one or two lines, each line is split between them, and when it has several text
 boxes, they're read together instead of one after another.
 
@@ -43,8 +43,8 @@ screen gets in. Your setting is kept. For the quickest reads, set a *Reading are
   loaded, so it can be as long as you like. *Get them from my PC* writes the list straight to
   the card as it arrives, and if the download is cut short, your old list is kept.
 - **A speech bubble's first line read as separate text.** A bubble's first row was sometimes
-  treated as its own piece of text, so a sentence came out split in two. Lines right under each other with the same left
-  edge and size are now kept together.
+  treated as its own piece of text, so a sentence came out split in two. Lines right under each other, lined up on the
+  left and about the same size, are now kept together.
 
 ## 1.1.0
 
