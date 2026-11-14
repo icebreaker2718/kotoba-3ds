@@ -4,6 +4,23 @@ This page is for people who already have Kotoba3DS on their SD card. If you're i
 the first time, follow the [README](README.md) instead. To see what's new, read the
 [changelog](CHANGELOG.md).
 
+## Updating from 1.1.0 to 1.2.0
+
+Download **Kotoba3DS.3gx** from the
+[latest release](https://github.com/icebreaker2718/kotoba-3ds/releases/latest) and copy it over
+your old plugin: `SD:/luma/plugins/default.3gx`, or `SD:/luma/plugins/<TitleID>/Kotoba3DS.3gx`
+if you installed it for one game. That's all: the dictionary, the OCR models, your saved words,
+screenshots, known words, settings and the PC tools stay as they are.
+
+Without a card reader, you can use **Kotoba3DS-SD.zip** with 3dsDL instead (see the
+[README](README.md#install-over-wi-fi-with-3dsdl)). When it asks about existing files, choose
+**Overwrite** so the new plugin replaces the old one. The zip has only the plugin, the
+dictionary and the OCR models, so your saved words, screenshots, known words and settings aren't
+touched. If you built your own `dict.bin`, copy it somewhere safe first: Overwrite replaces it
+with the standard one.
+
+If you're coming from 1.0.0, do the steps below for 1.1.0 as well.
+
 ## Updating from 1.0.0 to 1.1.0
 
 Download **Kotoba3DS.3gx** and **Kotoba3DS-ocr-model.zip** from the

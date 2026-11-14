@@ -1,6 +1,11 @@
 # Changelog
 
-## Next release (on the test build)
+## 1.2.0
+
+This release makes reading faster and fixes running out of memory in long sessions. You can
+download it from the [Releases page](https://github.com/icebreaker2718/kotoba-3ds/releases/latest);
+the version shows in Luma's plugin loader. Updating from 1.1.0 only needs the new plugin: see
+[UPDATING.md](UPDATING.md).
 
 ### Install over Wi-Fi
 
@@ -12,37 +17,36 @@ needed. The steps are in the [README](README.md#install-over-wi-fi-with-3dsdl).
 ### Faster reading
 
 Reading the screen is faster, with the same text as before. On a New 3DS, a normal read
-(fast mode off, no reading area) went from about 425 ms to about 230 ms. Finding the lines of
-text now takes about 100 ms instead of 250 ms. All of the console's cores now share the work:
-when a screen has only one or two lines, each line is split between them, and when it has
-several text boxes, they're read together instead of one after another.
+(no reading area) went from about 425 ms to about 230 ms. Finding the lines of text now takes
+about 100 ms instead of 250 ms. All of the console's cores now share the work: when a screen
+has only one or two lines, each line is split between them, and when it has several text
+boxes, they're read together instead of one after another.
 
 ### "Fast mode" is now "Text boxes only"
 
 Normal reading is now nearly as fast as fast mode was, so the setting has a new name that says
 what it does: it reads only flat-colour text boxes (most dialogue boxes), so nothing else on the
-screen gets in. It may still be slightly faster, but only by very little. Your setting is kept.
-For the quickest reads, set a *Reading area*.
+screen gets in. Your setting is kept. For the quickest reads, set a *Reading area*.
 
 ### Fixes
 
-- **A speech bubble's first line read as separate text.** In normal reading, a bubble's first
-  row was sometimes treated as its own piece of text, so a sentence came out split in two
-  (「さあここが」 and 「ツアーの見せ場だぞ!」). Lines right under each other with the same left
-  edge and size are now kept together. A speaker's name beside the text stays separate. On the
-  saved screenshots, 24 of 125 screens now read as one sentence where they were split before.
 - **Running out of memory in a long session.** After many reads, especially *Read both screens*
   over and over, reading could start failing with "not enough memory to look for text" or "not
   enough memory for the picture", or show only one of the two screens. The plugin now sets aside
   the memory it reads with once, at the first read, and reuses it for the rest of the session, so
-  how much is free no longer shrinks as you play. In a 104-read session, every read worked.
-- **"Not enough memory for networking", or a crash, when making Anki cards after a long
-  session.** *Make Anki cards*, *Known words* and finding your PC now use memory the plugin has
-  already set aside, so they work however long you've been playing.
-- **Long known-word lists.** A big `known.txt` used to take memory away from reading (about
-  40,000 words left none). The list is now looked up on the SD card instead of being loaded, so
-  it can be as long as you like. *Get them from my PC* writes the list straight to the card as it
-  arrives, and if the download is cut short, your old list is kept.
+  the free memory no longer shrinks as you play. In a 104-read test session, every read worked.
+- **"Not enough memory for networking", or a crash, in *Make Anki cards* after a long
+  session.** *Make Anki cards* and *Get them from my PC* now use memory the plugin has already
+  set aside, so they work however long you've been playing.
+- **Long known-word lists.** A big `known.txt` used to take memory away from reading (a list of
+  about 40,000 words left none). The list is now looked up on the SD card instead of being
+  loaded, so it can be as long as you like. *Get them from my PC* writes the list straight to
+  the card as it arrives, and if the download is cut short, your old list is kept.
+- **A speech bubble's first line read as separate text.** A bubble's first row was sometimes
+  treated as its own piece of text, so a sentence came out split in two
+  (「さあここが」 and 「ツアーの見せ場だぞ!」). Lines right under each other with the same left
+  edge and size are now kept together; a speaker's name beside the text stays separate. On the
+  saved screenshots, 24 of 125 screens now read as one sentence where they were split before.
 
 ## 1.1.0
 
