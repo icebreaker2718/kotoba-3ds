@@ -34,7 +34,7 @@ screen gets in. Your setting is kept. For the quickest reads, set a *Reading are
   over and over, reading could start failing with "not enough memory to look for text" or "not
   enough memory for the picture", or show only one of the two screens. The plugin now sets aside
   the memory it reads with once, at the first read, and reuses it for the rest of the session, so
-  the free memory no longer shrinks as you play. In a 104-read test session, every read worked.
+  the free memory no longer shrinks as you play.
 - **"Not enough memory for networking", or a crash, in *Make Anki cards* after a long
   session.** *Make Anki cards* and *Get them from my PC* now use memory the plugin has already
   set aside, so they work however long you've been playing.
@@ -43,10 +43,8 @@ screen gets in. Your setting is kept. For the quickest reads, set a *Reading are
   loaded, so it can be as long as you like. *Get them from my PC* writes the list straight to
   the card as it arrives, and if the download is cut short, your old list is kept.
 - **A speech bubble's first line read as separate text.** A bubble's first row was sometimes
-  treated as its own piece of text, so a sentence came out split in two
-  (「さあここが」 and 「ツアーの見せ場だぞ!」). Lines right under each other with the same left
-  edge and size are now kept together; a speaker's name beside the text stays separate. On the
-  saved screenshots, 24 of 125 screens now read as one sentence where they were split before.
+  treated as its own piece of text, so a sentence came out split in two. Lines right under each other with the same left
+  edge and size are now kept together.
 
 ## 1.1.0
 
