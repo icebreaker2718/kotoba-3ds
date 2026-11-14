@@ -201,72 +201,147 @@ the area.
 
 ## Make Anki cards on your PC
 
-This part is optional. You need a PC on the same Wi-Fi as the 3DS, with
-[Anki](https://apps.ankiweb.net) and Python 3. Cards go to the deck **Mining Deck** with the
-**Lapis** note type by default.
+This part is optional: the 3DS keeps your saved words until you're ready. When you are, a small
+program on your PC turns them into Anki cards. Each card gets the word, its reading, the
+sentence from the game, a screenshot, the dictionary definition, pitch accent, frequency and
+audio.
 
-### One-time setup
+**You need:**
+- a Windows, Mac or Linux PC on the same Wi-Fi network as the 3DS (the 3DS only uses 2.4 GHz);
+- [Anki](https://apps.ankiweb.net) (the desktop app);
+- [Python](https://www.python.org/downloads/) 3.9 or newer;
+- internet on the PC, for the word audio.
 
-1. **Get this project's `tools/` folder** onto your PC: download the repository
-   (**Code → Download ZIP**) and unzip it.
-2. **Anki:** install the **AnkiConnect** add-on (code `2055492159`) and restart Anki. You also
-   need the Lapis note type: if you don't mine into Lapis already, import the `.apkg` from
-   [Lapis' releases](https://github.com/donkuri/lapis/releases).
-3. **Python:** run `pip install pillow`.
-4. **Dictionaries:** make a folder `tools/dictionaries/` and put Yomitan `.zip` dictionaries in
-   it (don't unzip them; if you use Yomitan, they're the same files):
-   - definitions: `jitendex-yomitan.zip` from [jitendex.org](https://jitendex.org);
-   - pitch accent: for example **[Pitch] NHK2016** from
-     [MarvNC's dictionary collection](https://github.com/MarvNC/yomitan-dictionaries), or Kanjium;
-   - frequency (optional): for example JPDB from
-     [jpdb-freq-list](https://github.com/MarvNC/jpdb-freq-list/releases).
-5. **Run `python tools/mine.py setup`** with Anki open. It writes `tools/config.json`, checks
-   that Lapis and *Mining Deck* are there, and indexes the dictionaries (a minute or two the
-   first time). Its last lines list the dictionaries it found.
+### Set it up (once)
 
-### Make the cards (over Wi-Fi)
+**1. Install Python.** Download it from [python.org](https://www.python.org/downloads/) and
+install it. On Windows, tick **"Add python.exe to PATH"** on the installer's first screen.
 
-1. On the PC, with Anki open, run `py -3.12 tools\ocr_server.py` (on Windows; elsewhere
-   `python3 tools/ocr_server.py`). It says what the cards will get and warns if a dictionary is
-   missing.
-2. On the 3DS, choose **Select → Make Anki cards**. Every saved word is sent and becomes a card;
-   words that are cards already are skipped. Afterwards you can clear them from the list.
+**2. Download the PC tools.** On this page, click **Code → Download ZIP**, then unzip it
+somewhere you'll find again, like your Documents folder. You get a folder called
+`kotoba-3ds-main` with a `tools` folder inside.
 
-The plugin finds your PC on its own. If it doesn't, type the address `ocr_server.py` prints under
-**Select → PC**.
+**3. Open a terminal in that folder.** Every command below is typed there.
+- Windows: open the `kotoba-3ds-main` folder, click the address bar, type `cmd` and press Enter.
+- Mac: right-click the folder in Finder → **New Terminal at Folder**.
+- Linux: right-click in the folder → **Open in Terminal**.
 
-**Words in green:** with `ocr_server.py` running, choose **Select → Known words → Get them from
-my PC**. The words of all your Anki notes go to the 3DS and show in green from then on. Words
-that *Make Anki cards* turns into cards are added as it goes.
+**4. Install Pillow** (it makes the screenshot for each card):
 
-### Or without Wi-Fi: ftpd or a card reader
+```
+python -m pip install pillow
+```
 
-`tools/mine.py` reads the saved words straight from the SD card, over
-[ftpd](https://github.com/mtheall/ftpd) (install it from Universal-Updater) or with a card
-reader.
+On Windows, if `python` isn't found, type `py` instead of `python` here and in every command
+below.
 
-1. In `tools/config.json`, set `source.ftp_host` to the IP address ftpd shows on the 3DS, or
-   `source.sd_root` to the card's drive (for example `E:/`).
-2. Close the game, open ftpd (or put the card in the PC), keep Anki open, and run
-   `python tools/mine.py`. Add `--dry-run` to preview, or `--clear` to remove the imported words
-   from the 3DS afterwards. `python tools/mine.py known` copies your Anki words to the 3DS.
+**5. Set up Anki.**
+1. In Anki, go to **Tools → Add-ons → Get Add-ons**, enter `2055492159` (AnkiConnect), and
+   restart Anki. AnkiConnect is what lets the tools add cards.
+2. Get the **Lapis** note type, which lays out the cards: download the `.apkg` file from
+   [Lapis' releases](https://github.com/donkuri/lapis/releases) and open it with
+   **File → Import**. If you already make Lapis cards, skip this.
 
-It remembers what it imported (`tools/imported.json`), so running it twice never makes duplicate
-cards.
+**6. Add dictionaries.** Make a folder named `dictionaries` inside `tools`, and put Yomitan
+dictionary `.zip` files in it, without unzipping them. (If you use Yomitan, these are the same
+files.)
 
-### Game names on cards
+| Dictionary | Gives the card | Where to get it |
+|---|---|---|
+| **Jitendex** (recommended) | the definition | `jitendex-yomitan.zip` from [jitendex.org](https://jitendex.org) |
+| a pitch accent dictionary | the pitch accent graph | for example **[Pitch] NHK2016** from [MarvNC's collection](https://github.com/MarvNC/yomitan-dictionaries) |
+| a frequency dictionary (optional) | how common the word is | for example JPDB from [jpdb-freq-list](https://github.com/MarvNC/jpdb-freq-list/releases) |
+
+Without a definition dictionary, cards still get the short definition from the 3DS, tagged so
+you can fill them in later.
+
+**7. Run the setup check.** Open Anki, then type:
+
+```
+python tools/mine.py setup
+```
+
+It creates the settings file `tools/config.json`, checks that the Lapis note type is there,
+creates the deck **Mining Deck** if you don't have one, and reads your dictionaries (a minute or
+two the first time). When it's done, the last lines list the dictionaries it found. If it says
+the Lapis note type is missing, do step 5.2 and run it again.
+
+Setup is done. You don't need to repeat it.
+
+> To put the cards in another deck, open `tools/config.json` in a text editor and change
+> `"deck": "Mining Deck"` to your deck's name.
+
+### Make cards
+
+1. **On the PC:** open Anki, then in the terminal (step 3) type:
+
+   ```
+   python tools/ocr_server.py
+   ```
+
+   Leave this window open while you make cards. It prints the PC's address, for example
+   `192.168.1.20:7331`. The first time, if Windows asks whether Python may use the network, allow
+   it on **private networks**.
+2. **On the 3DS:** in a game, press **Select → Make Anki cards**. Each saved word is sent and
+   becomes a card in Anki. Words you already have cards for are skipped. At the end the 3DS says
+   how many cards were made, and offers to remove those words from *Saved words* (their
+   screenshots stay on the SD card).
+3. **When you're done**, close the terminal window (or press **Ctrl + C** in it).
+
+The 3DS finds the PC by itself. If it can't, go to **Select → PC → Type its address** and enter
+the address the PC printed.
+
+### Show your Anki words in green
+
+With `python tools/ocr_server.py` running, choose **Select → Known words → Get them from my PC**
+on the 3DS. The words of all your Anki notes are copied to the 3DS, and they show in green in
+lookups from then on. Do this again whenever you want the list brought up to date. Words that
+*Make Anki cards* turns into cards are added on their own.
+
+### Without Wi-Fi: ftpd or an SD card reader
+
+If the 3DS can't reach your PC over Wi-Fi, `mine.py` can read the saved words straight from the
+SD card instead. Do the setup above first (`ocr_server.py` isn't needed for this).
+
+- **With an SD card reader:** close the game, turn off the 3DS, put the card in the PC, open
+  Anki, and type (with your card's drive or folder instead of `E:/`):
+
+  ```
+  python tools/mine.py --sd E:/
+  ```
+
+- **Over Wi-Fi with ftpd** (install ftpd on the 3DS from Universal-Updater): close the game,
+  open ftpd, open Anki, and type the address ftpd shows on the 3DS's screen:
+
+  ```
+  python tools/mine.py --ftp 192.168.1.50:5000
+  ```
+
+To skip typing it each time, put the drive in `source.sd_root` or the address in
+`source.ftp_host` in `tools/config.json`, then just type `python tools/mine.py`.
+
+Add `--dry-run` to see what would be made without making cards, or `--clear` to remove the
+imported words from the 3DS afterwards. `mine.py` remembers what it imported
+(`tools/imported.json`), so running it twice never makes duplicate cards.
+`python tools/mine.py known` copies your Anki words to the 3DS, like *Known words* above.
+
+### Customize the cards
+
+Everything below is optional, and set in `tools/config.json`.
+
+#### Game names on cards
 
 In `tools/config.json`, `games` maps a title ID to a game name. The name goes into the card's
 `MiscInfo` field and becomes its tag. Your first card shows the game's title ID in `MiscInfo`.
 
-### Which words count as known
+#### Which words count as known
 
 *Known words* takes the word from each note's `Expression` field (or `Word`, `Vocab`,
 `Vocabulary`, `Term`, `Kanji`, `Japanese`, `Front`: the first one the note has), without
 furigana or HTML. To choose which notes and fields, set `known.query` (an Anki search, like
 `"deck:Mining Deck"`) and `known.fields` in `config.json`.
 
-### What goes in each Lapis field
+#### What goes in each Lapis field
 
 | Field | Filled with |
 |---|---|
@@ -287,7 +362,7 @@ placeholders: `{expression} {reading} {furigana} {audio} {definition_html} {defi
 {game_tag} {time} {inflection} {query} {title_id}`. For example, `"IsWordAndSentenceCard": "x"`
 makes every card a word + sentence card.
 
-### Cards to finish by hand
+#### Cards to finish by hand
 
 A card whose word isn't in any of your dictionaries (it gets the 3DS's short definition instead)
 is tagged `no_definition`; one with no audio is tagged `no_audio`. Both also get **flag 1
@@ -297,7 +372,7 @@ is tagged `no_definition`; one with no audio is tagged `no_audio`. Both also get
 off; 2 = orange, 3 = green, 4 = blue…). If Anki has the card open in an editor, the flag is set
 once the editor closes.
 
-### Word audio
+#### Word audio
 
 `audio.sources` in `config.json` is tried in order for each word, until one has a recording:
 
