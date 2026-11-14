@@ -16,6 +16,131 @@ void KnownWords::clear() {
     count_ = 0;
     truncated_ = false;
     extra_.clear();
+    file_ = nullptr;
+    fileSize_ = 0;
+    fileCount_ = 0;
+    std::vector<uint32_t>().swap(blockStart_);
+    std::vector<uint32_t>().swap(keyOff_);
+    std::string().swap(keys_);
+    std::vector<std::string>().swap(spill_);
+    spillDropped_ = 0;
+    std::vector<char>().swap(block_);
+    blockIdx_ = -1;
+}
+
+namespace {
+// A line's word: spaces and a '\r' trimmed; empty for a blank line or a '#' comment.
+void lineWord(const char *s, size_t n, const char *&w, size_t &wn) {
+    size_t a = 0, b = n;
+    while (a < b && (s[a] == ' ' || s[a] == '\t')) a++;
+    while (b > a && (s[b - 1] == '\r' || s[b - 1] == ' ' || s[b - 1] == '\t')) b--;
+    w = s + a;
+    wn = (b > a && s[a] != '#') ? b - a : 0;
+}
+// strcmp of (a, an) and the '\0'-ended b, by unsigned bytes
+int cmpWord(const char *a, size_t an, const char *b) {
+    size_t bn = strlen(b);
+    int c = memcmp(a, b, an < bn ? an : bn);
+    if (c) return c;
+    return an < bn ? -1 : an > bn ? 1 : 0;
+}
+}  // namespace
+
+bool KnownWords::openFile(Reader *r, size_t blockBytes) {
+    clear();
+    if (!r) return false;
+    const uint32_t size = r->size();
+    std::vector<char> chunk(4096);
+    std::string carry, prev;  // a line cut by the chunk's end; the last word in order
+    bool havePrev = false;
+    uint32_t lineStart = 0, maxBlock = 0;
+    auto line = [&](const char *s, size_t n, uint32_t at) {
+        const char *w;
+        size_t wn;
+        lineWord(s, n, w, wn);
+        if (!wn) return;
+        if (havePrev) {
+            const int c = cmpWord(w, wn, prev.c_str());
+            if (c == 0) return;  // the same word again
+            if (c < 0) {         // out of order: in memory
+                if (spill_.size() < kMaxSpill) spill_.emplace_back(w, wn);
+                else spillDropped_++;
+                return;
+            }
+        }
+        prev.assign(w, wn);
+        havePrev = true;
+        fileCount_++;
+        if (blockStart_.empty() || at - blockStart_.back() >= blockBytes) {
+            if (!blockStart_.empty()) maxBlock = std::max(maxBlock, at - blockStart_.back());
+            blockStart_.push_back(at);
+            keyOff_.push_back((uint32_t)keys_.size());
+            keys_.append(w, wn);
+            keys_.push_back('\0');
+        }
+    };
+    for (uint32_t off = 0; off < size;) {
+        const uint32_t n = std::min<uint32_t>((uint32_t)chunk.size(), size - off);
+        if (!r->read(off, chunk.data(), n)) { clear(); return false; }
+        size_t s = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (chunk[i] != '\n') continue;
+            if (!carry.empty()) {
+                carry.append(chunk.data() + s, i - s);
+                line(carry.data(), carry.size(), lineStart);
+                carry.clear();
+            } else {
+                line(chunk.data() + s, i - s, lineStart);
+            }
+            s = i + 1;
+            lineStart = off + (uint32_t)s;
+        }
+        carry.append(chunk.data() + s, n - s);
+        off += n;
+    }
+    if (!carry.empty()) line(carry.data(), carry.size(), lineStart);
+    if (!blockStart_.empty()) maxBlock = std::max(maxBlock, size - blockStart_.back());
+    std::sort(spill_.begin(), spill_.end());
+    spill_.erase(std::unique(spill_.begin(), spill_.end()), spill_.end());
+    blockStart_.shrink_to_fit();
+    keyOff_.shrink_to_fit();
+    keys_.shrink_to_fit();
+    spill_.shrink_to_fit();
+    block_.resize(maxBlock);
+    file_ = r;
+    fileSize_ = size;
+    return true;
+}
+
+bool KnownWords::hasInFile(const char *w) const {
+    if (!file_ || blockStart_.empty()) return false;
+    // the last block whose first word is <= w
+    size_t lo = 0, hi = blockStart_.size();
+    while (lo < hi) {
+        const size_t mid = (lo + hi) / 2;
+        if (strcmp(keys_.c_str() + keyOff_[mid], w) <= 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == 0) return false;
+    const size_t b = lo - 1;
+    const uint32_t start = blockStart_[b], end = b + 1 < blockStart_.size() ? blockStart_[b + 1] : fileSize_;
+    if (end - start > block_.size()) return false;
+    if (blockIdx_ != (int)b) {
+        blockIdx_ = -1;
+        if (!file_->read(start, block_.data(), end - start)) return false;
+        blockIdx_ = (int)b;
+    }
+    const char *p = block_.data(), *e = p + (end - start);
+    while (p < e) {
+        const char *nl = (const char *)memchr(p, '\n', e - p);
+        const char *le = nl ? nl : e;
+        const char *lw;
+        size_t ln;
+        lineWord(p, le - p, lw, ln);
+        if (ln && cmpWord(lw, ln, w) == 0) return true;
+        p = le + 1;
+    }
+    return false;
 }
 
 bool KnownWords::load(const char *text, size_t len, size_t maxBytes) {
@@ -74,9 +199,13 @@ void KnownWords::remove(const std::string &word) {
 bool KnownWords::has(const std::string &word) const {
     if (word.empty()) return false;
     const char *w = word.c_str(), *pool = pool_;
-    const uint32_t *it = std::lower_bound(offs_, offs_ + count_, w, [pool](uint32_t x, const char *v) { return strcmp(pool + x, v) < 0; });
-    if (it != offs_ + count_ && !strcmp(pool + *it, w)) return true;
-    return std::binary_search(extra_.begin(), extra_.end(), word);
+    if (count_) {
+        const uint32_t *it = std::lower_bound(offs_, offs_ + count_, w, [pool](uint32_t x, const char *v) { return strcmp(pool + x, v) < 0; });
+        if (it != offs_ + count_ && !strcmp(pool + *it, w)) return true;
+    }
+    if (std::binary_search(extra_.begin(), extra_.end(), word)) return true;
+    if (std::binary_search(spill_.begin(), spill_.end(), word)) return true;
+    return hasInFile(w);
 }
 
 }  // namespace kt

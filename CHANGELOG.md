@@ -1,10 +1,56 @@
 # Changelog
 
+## 1.2.0
+
+This release makes reading faster and fixes running out of memory in long sessions. You can
+download it from the [Releases page](https://github.com/icebreaker2718/kotoba-3ds/releases/latest);
+the version shows in Luma's plugin loader. To update, extract Kotoba3DS-SD.zip onto your SD card:
+see [UPDATING.md](UPDATING.md).
+
+### Install over Wi-Fi
+
+Each release now has **Kotoba3DS-SD.zip**: the plugin, the dictionary and the OCR models,
+already in their SD card folders. With [3dsDL](https://ankush.one/3dsDL/), scan its QR code,
+then extract the zip at the root of the card, and everything is in place. No SD card reader
+needed. The steps are in the [README](README.md#install-over-wi-fi-with-3dsdl).
+
+### Faster reading
+
+Reading the screen is faster, with the same text as before. On a New 3DS, a normal read
+(no reading area) went from about 425 ms to about 245 ms. Finding the lines of text now takes
+about 100 ms instead of 250 ms (in my testing, exact values may vary). Up to three of the console's cores now share the work: when a screen
+has only one or two lines, each line is split between them, and when it has several text
+boxes, they're read together instead of one after another.
+
+### "Fast mode" is now "Text boxes only"
+
+Normal reading is now nearly as fast as fast mode was, so the setting has a new name that says
+what it does: it reads only flat-colour text boxes (most dialogue boxes), so nothing else on the
+screen gets in. Your setting is kept. For the quickest reads, set a *Reading area*.
+
+### Fixes
+
+- **Running out of memory in a long session.** After many reads, especially *Read both screens*
+  over and over, reading could start failing with "not enough memory to look for text" or "not
+  enough memory for the picture", or show only one of the two screens. The plugin now sets aside
+  the memory it reads with once, at the first read, and reuses it for the rest of the session, so
+  the free memory no longer shrinks as you play.
+- **"Not enough memory for networking", or a crash, in *Make Anki cards* after a long
+  session.** *Make Anki cards* and *Get them from my PC* now use memory the plugin has already
+  set aside, so they work however long you've been playing.
+- **Long known-word lists.** A big `known.txt` used to take memory away from reading (a list of
+  about 40,000 words left none). The list is now looked up on the SD card instead of being
+  loaded, so it can be as long as you like. *Get them from my PC* writes the list straight to
+  the card as it arrives, and if the download is cut short, your old list is kept.
+- **A speech bubble's first line read as separate text.** A bubble's first row was sometimes
+  treated as its own piece of text, so a sentence came out split in two. Lines right under each other, lined up on the
+  left and about the same size, are now kept together.
+
 ## 1.1.0
 
-Thank you for using kotoba3ds! This is the changelog for the newest release, you can download it from the
-[Releases page](https://github.com/icebreaker2718/kotoba-3ds/releases/latest); the version shows
-in Luma's plugin loader. If you are updating from 1.0.0, check out [UPDATING.md](UPDATING.md).
+Released October 29, 2026. This version has been replaced by 1.2.0 (above), which is the one on
+the [Releases page](https://github.com/icebreaker2718/kotoba-3ds/releases/latest) now. To update
+from 1.1.0 or 1.0.0, see [UPDATING.md](UPDATING.md).
 
 This release makes use of the new OCR models from bee-san's vita-ocr project. Many thanks!! Check out the [Rubi for Vita](https://github.com/bee-san/Rubi_for_vita) project if you haven't already!
 
@@ -29,7 +75,8 @@ dialogue. If that gets in the way, use a *Reading area* (below).
 
 ### Fast mode
 
-**Select → Fast mode** switches between two ways of finding text:
+(Renamed *Text boxes only* in 1.2.0.) **Select → Fast mode** switches between two ways of
+finding text:
 
 - **Off (default):** vita-vn-ocr's line spotter finds every line on the screen.
 - **On:** only solid-coloured text boxes are read, as in earlier versions. This is quicker in
@@ -81,8 +128,8 @@ Press Start again to take it back. This is useful for reporting screens that wer
 - **Reading area:** about 30% faster per read than finding the text with the line spotter.
 
 The line spotter (fast mode off) costs a fixed amount of time per screen, so on a plain dialogue
-box it can be a little slower than fast mode. For the quickest reads, use fast mode or a reading
-area.
+box it can be a little slower than fast mode. (1.2.0 made the line spotter much faster, so the
+difference is now very small.)
 
 ### Fixes
 

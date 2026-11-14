@@ -117,16 +117,28 @@ static int is_gate_magic(const unsigned char *b)
 }
 static unsigned umin(unsigned a, unsigned b) { return a < b ? a : b; }
 
-static uint32_t crc32_ieee(const unsigned char *p, size_t n)
+/* Kotoba3DS: the same CRC-32 a byte at a time from a table (built on first use: 1 KB) instead of a bit at a
+ * time, ~7 instructions a byte where the bitwise loop took ~50 (the 1.2 MB model's check: ~60 M ARM
+ * instructions -> ~9 M). Also used by vocr_textspot6.c. */
+uint32_t vocr__crc32_ieee(const unsigned char *p, size_t n)
 {
+    static uint32_t tab[256];
+    static int ready = 0;
     uint32_t c = 0xFFFFFFFFu;
-    while (n--) {
+    if (!ready) {
+        unsigned i;
         int b;
-        c ^= *p++;
-        for (b = 0; b < 8; b++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+        for (i = 0; i < 256u; i++) {
+            uint32_t v = i;
+            for (b = 0; b < 8; b++) v = (v >> 1) ^ (0xEDB88320u & (0u - (v & 1u)));
+            tab[i] = v;
+        }
+        ready = 1;
     }
+    while (n--) c = (c >> 8) ^ tab[(c ^ *p++) & 0xFFu];
     return ~c;
 }
+#define crc32_ieee vocr__crc32_ieee
 
 #define TWO_HEADER_BYTES 128u
 static uint32_t find_trailer(const unsigned char *b, size_t bytes, uint32_t total, const char *magic);
@@ -711,7 +723,21 @@ int vocr_init(vocr_ctx *c, const vocr_model *m, const vocr_opts *o, void *arena,
     if (rc) return rc;
     if (bytes < c->arena_bytes) return VOCR_E_ARENA;
     c->arena = (unsigned char *)arena;
+    c->par = NULL;
     return VOCR_OK;
+}
+
+void vocr_set_par(vocr_ctx *c, const vocr_par *par)
+{
+    if (c) c->par = par && par->for_each && par->workers > 1u ? par : NULL;
+}
+
+/* Kotoba3DS: a job worth sharing out (by its multiply-accumulates, roughly): below this a sync costs more than it
+ * saves */
+#define VOCR_PAR_MIN_WORK 6000u
+static int par_on(const vocr_ctx *c, unsigned n_items, unsigned long work)
+{
+    return c->par && n_items > 1u && work >= VOCR_PAR_MIN_WORK;
 }
 
 /* ---------------------------------------------------------------- preprocessing
@@ -2178,6 +2204,39 @@ static float topk_conf(const float *v, unsigned k)
 }
 
 /* PW over P positions of x (row stride K) into y (row stride cout). */
+/* Kotoba3DS: a pointwise layer's work for a team (W8I) */
+typedef struct {
+    const vocr_ctx *c;
+    const vocr_op *op;
+    unsigned K, N, P, chunk;
+    int relu, pairs;
+    int16_t *qx;
+    float *sx;
+    const float *x;
+    float *y;
+    const float *res;
+} PwJob;
+
+static void pw_quant_item(void *ctx, unsigned i, unsigned worker)
+{
+    const PwJob *j = (const PwJob *)ctx;
+    const unsigned p0 = i * j->chunk, n = umin(j->chunk, j->P - p0);
+    (void)worker;
+    quant16(j->x + (size_t)p0 * j->K, j->K, j->K, n, j->qx + (size_t)p0 * j->K, j->sx + p0, j->pairs);
+}
+
+static void pw_block_item(void *ctx, unsigned nb, unsigned worker)
+{
+    const PwJob *j = (const PwJob *)ctx;
+    const vocr_op *op = j->op;
+    const unsigned K = j->K, N = j->N;
+    const float *b = op->bias ? op->bias + nb * 8 : NULL;
+    const float *rb = j->res ? j->res + nb * 8 : NULL;
+    (void)worker;
+    VOCR_MM_I16P(j->c->model, j->pairs, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, j->qx, j->sx, K, j->P,
+                 j->y + nb * 8, N, rb, N, j->relu);
+}
+
 static void run_pw(const vocr_ctx *c, unsigned i, const float *x, unsigned P, float *y, const float *res)
 {
     const vocr_op *op = &c->model->op[i];
@@ -2190,6 +2249,37 @@ static void run_pw(const vocr_ctx *c, unsigned i, const float *x, unsigned P, fl
     unsigned nb;
     if (!P) return;
     const int pairs = c->mode == VOCR_MODE_W8I && VOCR_PAIRS(c->model, K);
+    if (c->mode == VOCR_MODE_W8I && c->par) {
+        /* Kotoba3DS: shared out by a team: the positions' quantisation in chunks of an even number of positions
+         * (a pair's layout depends only on its own two), then the output blocks; the same numbers either way */
+        PwJob j;
+        const unsigned W = c->par->workers;
+        j.c = c;
+        j.op = op;
+        j.K = K;
+        j.N = N;
+        j.relu = relu;
+        j.pairs = pairs;
+        j.qx = qx;
+        j.sx = sx;
+        j.x = x;
+        j.P = P;
+        j.y = y;
+        j.res = res;
+        j.chunk = ((P + 2u * W - 1u) / (2u * W) + 1u) & ~1u;
+        if (j.chunk < 2u) j.chunk = 2u;
+        {
+            const unsigned nq = (P + j.chunk - 1u) / j.chunk;
+            if (par_on(c, nq, (unsigned long)P * K * 4u)) c->par->for_each(c->par->team, nq, pw_quant_item, &j);
+            else quant16(x, K, K, P, qx, sx, pairs);
+        }
+        if (par_on(c, N / 8u, (unsigned long)P * K * N)) {
+            c->par->for_each(c->par->team, N / 8u, pw_block_item, &j);
+            return;
+        }
+        for (nb = 0; nb < N / 8; nb++) pw_block_item(&j, nb, 0);
+        return;
+    }
     if (c->mode == VOCR_MODE_W8I) quant16(x, K, K, P, qx, sx, pairs);
     for (nb = 0; nb < N / 8; nb++) {
         const float *b = op->bias ? op->bias + nb * 8 : NULL;
@@ -2632,6 +2722,84 @@ static void h2_update(const float *v, unsigned cls0, unsigned N, float *bestv, u
     }
 }
 
+/* Kotoba3DS: the two-level head's passes for a team (W8I), by chunks of H2_STEP frames: each frame's state is
+ * updated block by block in class order within its chunk, as the loops below do it (blocks outside, chunks inside:
+ * a frame sees the same blocks in the same order) */
+typedef struct {
+    const vocr_ctx *c;
+    const vocr_op *op;
+    const vocr_2level *tw;
+    unsigned K, B1, NB, N, H, n, frame0;
+    int pairs;
+    int16_t *qx;
+    float *sx, *hid, *bestv, *nbv, *b0v;
+    uint32_t *besti, *fm;
+    vocr_extra *ex;
+    unsigned TK;
+    const uint16_t *fx;
+} H2Job;
+#define H2J_FRAME(J, I) ((J)->fx ? (unsigned)(J)->fx[I] : (J)->frame0 + (I))
+
+static void h2_l1_item(void *ctx, unsigned i, unsigned worker)
+{
+    const H2Job *J = (const H2Job *)ctx;
+    const vocr_op *op = J->op;
+    const unsigned K = J->K, f0 = i * H2_STEP, pn = umin(H2_STEP, J->n - f0), TK = J->TK;
+    vocr_extra *ex = J->ex;
+    float tmp[H2_STEP * 8];
+    unsigned nb, q;
+    (void)worker;
+    for (nb = 0; nb < J->B1; nb++) {
+        const float *b = op->bias ? op->bias + nb * 8 : NULL;
+        VOCR_MM_I16P(J->c->model, J->pairs, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, J->qx + (size_t)f0 * K,
+                     J->sx + f0, K, pn, tmp, 8, NULL, 0, 0);
+        for (q = 0; q < pn; q++) {
+            const unsigned fr = f0 + q, frame = H2J_FRAME(J, fr);
+            float *tv = TK ? ex->topk_logit + (size_t)frame * TK : NULL;
+            uint16_t *tc = TK ? ex->topk_class + (size_t)frame * TK : NULL;
+            if (!nb) {
+                J->b0v[fr] = tmp[q * 8];
+                if (TK && ex->blank_logit) ex->blank_logit[frame] = tmp[q * 8];
+            }
+            h2_update(tmp + q * 8, nb * 8, J->N, J->bestv + fr, J->besti + fr, J->nbv + fr, tv, tc, TK);
+        }
+    }
+}
+
+static void h2_esc_item(void *ctx, unsigned i, unsigned worker)
+{
+    const H2Job *J = (const H2Job *)ctx;
+    const vocr_2level *tw = J->tw;
+    const unsigned K = J->K, H = J->H, f0 = i * H2_STEP, pn = umin(H2_STEP, J->n - f0);
+    unsigned nb;
+    (void)worker;
+    for (nb = 0; nb < H / 8u; nb++)
+        mm_i16(tw->e_q + (size_t)nb * K * 8, tw->e_scale + nb * 8, tw->e_bias + nb * 8, J->qx + (size_t)f0 * K, J->sx + f0,
+               K, pn, J->hid + (size_t)f0 * H + nb * 8, H, NULL, 0, 0);
+}
+
+static void h2_l2_item(void *ctx, unsigned i, unsigned worker)
+{
+    const H2Job *J = (const H2Job *)ctx;
+    const vocr_op *op = J->op;
+    const unsigned K = J->K, f0 = i * H2_STEP, pn = umin(H2_STEP, J->n - f0), TK = J->TK;
+    vocr_extra *ex = J->ex;
+    float tmp[H2_STEP * 8];
+    unsigned nb, q;
+    (void)worker;
+    for (nb = J->B1; nb < J->NB; nb++) {
+        const float *b = op->bias ? op->bias + nb * 8 : NULL;
+        VOCR_MM_I16P(J->c->model, J->pairs, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, J->qx + (size_t)f0 * K,
+                     J->sx + f0, K, pn, tmp, 8, NULL, 0, 0);
+        for (q = 0; q < pn; q++) {
+            const unsigned fr = J->fm[f0 + q], frame = H2J_FRAME(J, fr);
+            h2_update(tmp + q * 8, nb * 8, J->N, J->bestv + fr, J->besti + fr, NULL,
+                      TK ? ex->topk_logit + (size_t)frame * TK : NULL, TK ? ex->topk_class + (size_t)frame * TK : NULL,
+                      TK);
+        }
+    }
+}
+
 static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
 {
     const vocr_model *m = c->model;
@@ -2673,8 +2841,39 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
                 tc[j] = 0;
             }
         }
-    quant16(x, K, K, nf, qx, sx, 0);
+    /* Kotoba3DS: level 1 through the two-positions kernel (mm_i16_pairs: the same sums and float steps as
+     * VOCR_MM_I16), on the input quantised in its pair-interleaved layout (H2_STEP is even, so each step's frames
+     * start a pair); quantised again in the plain layout for the escape and level 2 (the same numbers) */
+    const int p1 = !fl && VOCR_PAIRS(c->model, K);
+    H2Job J;
+    const unsigned nch = (nf + H2_STEP - 1u) / H2_STEP;
+    J.c = c;
+    J.op = op;
+    J.tw = tw;
+    J.K = K;
+    J.B1 = B1;
+    J.NB = NB;
+    J.N = N;
+    J.H = H;
+    J.n = nf;
+    J.frame0 = o->frame;
+    J.pairs = p1;
+    J.qx = qx;
+    J.sx = sx;
+    J.hid = hid;
+    J.bestv = bestv;
+    J.nbv = nbv;
+    J.b0v = b0v;
+    J.besti = besti;
+    J.fm = fm;
+    J.ex = ex;
+    J.TK = TK;
+    J.fx = fx;
+    quant16(x, K, K, nf, qx, sx, p1);
     /* level 1: every frame */
+    if (!fl && par_on(c, nch, (unsigned long)nf * K * B1 * 8u))
+        c->par->for_each(c->par->team, nch, h2_l1_item, &J);
+    else
     for (nb = 0; nb < B1; nb++) {
         const float *b = op->bias ? op->bias + nb * 8 : NULL;
         if (fl) dequant8(op->q + (size_t)nb * K * 8, op->scale + nb * 8, K, wf);
@@ -2683,8 +2882,8 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
             if (fl)
                 mm_f32(wf, b, x + (size_t)f0 * K, K, K, pn, tmp, 8, NULL, 0, 0);
             else
-                VOCR_MM_I16(c->model, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn, tmp, 8,
-                       NULL, 0, 0);
+                VOCR_MM_I16P(c->model, p1, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn,
+                             tmp, 8, NULL, 0, 0);
             for (q = 0; q < pn; q++) {
                 const unsigned fr = f0 + q, frame = H2_FRAME(fr);
                 float *tv = TK ? ex->topk_logit + (size_t)frame * TK : NULL;
@@ -2697,7 +2896,11 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
             }
         }
     }
+    if (p1) quant16(x, K, K, nf, qx, sx, 0);
     /* the escape: layer 1 through the head's integer kernel, then its two level-1 inputs, ReLU and layer 2 */
+    if (par_on(c, nch, (unsigned long)nf * K * H))
+        c->par->for_each(c->par->team, nch, h2_esc_item, &J);
+    else
     for (nb = 0; nb < H / 8u; nb++)
         mm_i16(tw->e_q + (size_t)nb * K * 8, tw->e_scale + nb * 8, tw->e_bias + nb * 8, qx, sx, K, nf, hid + nb * 8,
                H, NULL, 0, 0);
@@ -2717,15 +2920,25 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
     /* level 2: the fired frames, packed to the front of the quantised input (forwards: fm[j] >= j), or in W8F
      * of the float input */
     if (nfire) {
+        /* Kotoba3DS: with the two-positions kernel, the fired frames' float inputs go to the front (nothing reads
+         * the accumulator after the head) and are quantised there in its layout: a row's numbers depend on that
+         * row alone, so they are the ones moved below otherwise */
+        const int p2 = !fl && VOCR_PAIRS(c->model, K);
         for (j = 0; j < nfire; j++)
             if (fm[j] != j) {
-                if (fl) {
+                if (fl || p2) {
                     memcpy(x + (size_t)j * K, x + (size_t)fm[j] * K, K * sizeof(float));
                 } else {
                     memcpy(qx + (size_t)j * K, qx + (size_t)fm[j] * K, K * sizeof(int16_t));
                     sx[j] = sx[fm[j]];
                 }
             }
+        if (p2) quant16(x, K, K, nfire, qx, sx, 1);
+        J.n = nfire;
+        J.pairs = p2;
+        if (!fl && par_on(c, (nfire + H2_STEP - 1u) / H2_STEP, (unsigned long)nfire * K * (NB - B1) * 8u))
+            c->par->for_each(c->par->team, (nfire + H2_STEP - 1u) / H2_STEP, h2_l2_item, &J);
+        else
         for (nb = B1; nb < NB; nb++) {
             const float *b = op->bias ? op->bias + nb * 8 : NULL;
             if (fl) dequant8(op->q + (size_t)nb * K * 8, op->scale + nb * 8, K, wf);
@@ -2734,8 +2947,8 @@ static void run_head2(const vocr_ctx *c, unsigned nf, out_t *o)
                 if (fl)
                     mm_f32(wf, b, x + (size_t)f0 * K, K, K, pn, tmp, 8, NULL, 0, 0);
                 else
-                    VOCR_MM_I16(c->model, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0, K, pn,
-                           tmp, 8, NULL, 0, 0);
+                    VOCR_MM_I16P(c->model, p2, op->q + (size_t)nb * K * 8, op->scale + nb * 8, b, qx + (size_t)f0 * K, sx + f0,
+                                 K, pn, tmp, 8, NULL, 0, 0);
                 for (q = 0; q < pn; q++) {
                     const unsigned fr = fm[f0 + q], frame = H2_FRAME(fr);
                     h2_update(tmp + q * 8, nb * 8, N, bestv + fr, besti + fr, NULL,
@@ -2891,6 +3104,25 @@ static void ring_shift(float *ring, unsigned cap, unsigned halo, unsigned col)
     for (; i < n; i++) ring[i] = src[i];
 }
 
+/* Kotoba3DS: a convolution's or depthwise layer's columns for a team (k_conv1 / k_dw compute column t's outputs at
+ * out + (t - t0) * col from the input alone) */
+typedef struct {
+    const vocr_op *op;
+    const float *win;
+    float *out;
+    unsigned t0;
+    size_t col;
+} ColJob;
+
+static void col_item(void *ctx, unsigned i, unsigned worker)
+{
+    const ColJob *j = (const ColJob *)ctx;
+    const unsigned t = j->t0 + i;
+    (void)worker;
+    if (j->op->type == T_CONV) k_conv1(j->op, j->win, j->out + (size_t)i * j->col, t, t + 1u);
+    else k_dw(j->op, j->win, j->out + (size_t)i * j->col, t, t + 1u);
+}
+
 /* Compute output columns [j0, j0 + n) of op i (wout of them exist) into its
  * destination; u is the mini-tile index for the last front op, else 0. */
 static void step_op(const vocr_ctx *c, unsigned i, long j0, unsigned n, unsigned wout,
@@ -2921,7 +3153,17 @@ static void step_op(const vocr_ctx *c, unsigned i, long j0, unsigned n, unsigned
         out = dst + (size_t)t0 * oc;
     }
     if (t1 > t0) {
-        if (op->type == T_CONV) {
+        if ((op->type == T_CONV || op->type == T_DW) &&
+            par_on(c, t1 - t0, (unsigned long)(t1 - t0) * op->h_out * op->cout * op->kh * op->kw)) {
+            /* Kotoba3DS: a team computes the columns (each column's outputs from the input alone) */
+            ColJob j;
+            j.op = op;
+            j.win = at(c, p->in_off);
+            j.out = out;
+            j.t0 = t0;
+            j.col = (size_t)op->h_out * op->cout;
+            c->par->for_each(c->par->team, t1 - t0, col_item, &j);
+        } else if (op->type == T_CONV) {
             k_conv1(op, at(c, p->in_off), out, t0, t1);
         } else if (op->type == T_DW) {
             k_dw(op, at(c, p->in_off), out, t0, t1);

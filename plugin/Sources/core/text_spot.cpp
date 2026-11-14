@@ -1,19 +1,85 @@
 #include "core/text_spot.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
+#include "core/team.hpp"
 #include "vocr_textspot6.h"
 
 namespace kt {
 
-TextSpotter::~TextSpotter() { unload(); }
+TextSpotter::~TextSpotter() {
+    unload();
+    releaseMemory();
+    free(scratch_);
+}
+
+bool TextSpotter::lendMemory(void *p, size_t bytes, unsigned w, unsigned h) {
+    const size_t need = arenaBytes(w, h);
+    if (!need || !p || bytes < need) return false;
+    releaseMemory();
+    keptSet_ = malloc(sizeof(VocrTextspot6Set));
+    if (!keptSet_) return false;
+    kept_ = p;
+    keptBytes_ = bytes;
+    keptLent_ = true;
+    return true;
+}
+
+bool TextSpotter::keepMemory(unsigned w, unsigned h) {
+    const size_t need = arenaBytes(w, h);
+    if (!need) return false;
+    if (kept_ && keptBytes_ >= need && keptSet_) return true;
+    releaseMemory();
+    kept_ = malloc(need);
+    keptSet_ = malloc(sizeof(VocrTextspot6Set));
+    if (!kept_ || !keptSet_) {
+        releaseMemory();
+        return false;
+    }
+    keptBytes_ = need;
+    return true;
+}
+
+void TextSpotter::releaseMemory() {
+    if (!keptLent_) free(kept_);
+    free(keptSet_);
+    kept_ = keptSet_ = nullptr;
+    keptBytes_ = 0;
+    keptLent_ = false;
+}
 
 void TextSpotter::unload() {
     free(model_);
     free(blob_);
     model_ = blob_ = nullptr;
 }
+
+namespace {
+// The spotter's call for a team (core/team.hpp): member 0 runs it, publishing each row's blocks as a job.
+struct SpotTeam : Team {
+    const vocr_textspot6 *m = nullptr;
+    const VocrLinesImage *im = nullptr;
+    void *arena = nullptr;
+    size_t need = 0;
+    VocrTextspot6Set *set = nullptr;
+    vocr_textspot6_par par;
+    int rc = VOCR_LINES_E_ARG;
+};
+
+void teamMember(void *arg) {
+    SpotTeam *t = (SpotTeam *)arg;
+    const unsigned w = t->join();
+    if (w == 0) {
+        t->rc = vocr_textspot6_find_par(t->m, t->im, 0, t->arena, t->need, t->set, &t->par);
+        t->finish();
+        return;
+    }
+    t->help(w);
+}
+}  // namespace
 
 bool TextSpotter::load(Reader &file, std::string &error) {
     if (model_) return true;
@@ -54,8 +120,10 @@ bool TextSpotter::find(const uint8_t *grey, unsigned w, unsigned h, std::vector<
     if (!model_) { error = "no text spotter loaded"; return false; }
     const vocr_textspot6 *m = (const vocr_textspot6 *)model_;
     const size_t need = vocr_textspot6_frame_arena_bytes(m, w, h);
-    void *arena = need ? malloc(need) : nullptr;
-    VocrTextspot6Set *set = (VocrTextspot6Set *)malloc(sizeof(VocrTextspot6Set));
+    // the kept working memory when it is big enough (the arena's size for this screen is passed, as before)
+    const bool useKept = need && kept_ && keptSet_ && keptBytes_ >= need;
+    void *arena = useKept ? kept_ : need ? malloc(need) : nullptr;
+    VocrTextspot6Set *set = useKept ? (VocrTextspot6Set *)keptSet_ : (VocrTextspot6Set *)malloc(sizeof(VocrTextspot6Set));
     if (!arena || !set) {
         free(arena);
         free(set);
@@ -68,7 +136,32 @@ bool TextSpotter::find(const uint8_t *grey, unsigned w, unsigned h, std::vector<
     im.height = h;
     im.stride = w;
     im.bpp = VOCR_LINES_GREY;
-    const int r = vocr_textspot6_find(m, &im, 0, arena, need, set);
+    unsigned workers = runner_ ? std::min<unsigned>(workers_, VOCR_TEXTSPOT6_PAR_MAX) : 1u;
+    if (workers > 1 && scratchFor_ < workers) {  // kept for the session: 1.5 KB a worker
+        free(scratch_);
+        scratch_ = (signed char *)malloc((size_t)(workers - 1) * VOCR_TEXTSPOT6_PAR_TMP);
+        scratchFor_ = scratch_ ? workers : 0;
+    }
+    if (!scratch_) workers = 1;
+    int r;
+    if (workers > 1) {
+        SpotTeam team;
+        team.m = m;
+        team.im = &im;
+        team.arena = arena;
+        team.need = need;
+        team.set = set;
+        memset(&team.par, 0, sizeof team.par);
+        team.workers = workers;
+        team.par.for_each = Team::forEachC;
+        team.par.team = (Team *)&team;
+        team.par.workers = workers;
+        for (unsigned k = 1; k < workers; k++) team.par.tmp[k] = scratch_ + (size_t)(k - 1) * VOCR_TEXTSPOT6_PAR_TMP;
+        runner_(workers, teamMember, &team);
+        r = team.rc;
+    } else {
+        r = vocr_textspot6_find(m, &im, 0, arena, need, set);
+    }
     if (r == VOCR_LINES_OK) {
         for (unsigned i = 0; i < set->count; i++) {
             const VocrTextspot6Box &b = set->boxes[i];
@@ -87,8 +180,10 @@ bool TextSpotter::find(const uint8_t *grey, unsigned w, unsigned h, std::vector<
     } else {
         error = "the text spotter failed";
     }
-    free(arena);
-    free(set);
+    if (!useKept) {
+        free(arena);
+        free(set);
+    }
     return r == VOCR_LINES_OK;
 }
 

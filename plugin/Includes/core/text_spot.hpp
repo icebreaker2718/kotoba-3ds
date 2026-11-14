@@ -37,10 +37,35 @@ public:
     bool find(const uint8_t *grey, unsigned w, unsigned h, std::vector<SpotBox> &boxes, std::string &error) const;
     // Working memory a find() on a w x h screen needs.
     size_t arenaBytes(unsigned w, unsigned h) const;
+    // Keeps the working memory for a w x h screen (and its results) from now on, for every find() on a screen that
+    // size or smaller: taken once while the heap is in one piece instead of ~210 KB found again each read (the
+    // console's malloc sometimes misses a free block that big). False if it couldn't be taken (find() then takes
+    // its memory each call, as before). releaseMemory() gives it back.
+    bool keepMemory(unsigned w, unsigned h);
+    // Or works in memory someone else owns (bytes long; not freed here): the recognizer's workers' block, idle while
+    // the spotter runs. Used by every find() it is big enough for. False if bytes is too small for a w x h screen or
+    // no memory for the results (1.7 KB).
+    bool lendMemory(void *p, size_t bytes, unsigned w, unsigned h);
+    bool memoryLent() const { return keptLent_; }
+    void releaseMemory();
+    size_t keptBytes() const { return keptBytes_; }
+    // Its rows computed by `workers` threads at once (the same boxes): runner(n, job, arg) must run job(arg) on
+    // n threads at the same time and return when all have finished (LocalOcr's runner). The threads wait for
+    // each row's blocks by spinning (a row's block is ~50 us of work: a wake-up would cost as much).
+    typedef void (*Runner)(unsigned n, void (*job)(void *), void *arg);
+    void setParallel(unsigned workers, Runner runner) { workers_ = workers ? workers : 1; runner_ = runner; }
 
 private:
     void *blob_ = nullptr;
     void *model_ = nullptr;
+    unsigned workers_ = 1;
+    Runner runner_ = nullptr;
+    void *kept_ = nullptr;      // keepMemory()'s working memory, keptBytes_ long
+    size_t keptBytes_ = 0;
+    void *keptSet_ = nullptr;   // and its results
+    bool keptLent_ = false;     // kept_ is lendMemory()'s (not ours to free)
+    mutable signed char *scratch_ = nullptr;  // the extra workers' scratch, taken at the first parallel find
+    mutable unsigned scratchFor_ = 0;
 };
 
 }  // namespace kt

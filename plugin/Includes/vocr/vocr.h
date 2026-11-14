@@ -221,6 +221,16 @@ typedef struct {             /* per-op plan; private */
     uint32_t n_tile, n_step, cap, halo, in_col, out_col, in_off, scr_off, dst;
 } vocr_plan_op;
 
+/* Kotoba3DS: one line's work shared out over several threads (vocr_set_par). for_each(team, n, item, ctx) must run
+ * item(ctx, i, worker) once for every i < n (each on any of the team's threads, worker < workers) and return when
+ * all have finished. The items of a job are independent (a layer's output blocks or columns, a head's frames), so the
+ * text is the same as one thread's. */
+typedef struct {
+    void (*for_each)(void *team, unsigned n, void (*item)(void *ctx, unsigned i, unsigned worker), void *ctx);
+    void *team;
+    unsigned workers;
+} vocr_par;
+
 typedef struct {             /* a planned arena; private apart from the first fields */
     const vocr_model *model;
     unsigned char *arena;
@@ -237,6 +247,7 @@ typedef struct {             /* a planned arena; private apart from the first fi
     uint32_t line_off;       /* attention: every frame's bottleneck output (max_width / stride x d floats) */
     uint32_t kp_off, vp_off, qc_off, ac_off, sc_off, as_off, att_tp;   /* its working set; att_tp: frames, x8 */
     vocr_plan_op op[VOCR_MAX_OPS];
+    const vocr_par *par;     /* Kotoba3DS: a team for this context's runs, or NULL (vocr_set_par) */
 } vocr_ctx;
 
 /* Parse and validate a blob already in memory. Nothing is copied. A head gate section
@@ -260,6 +271,9 @@ size_t vocr_arena_bytes(const vocr_model *m, const vocr_opts *o);
 int vocr_init(vocr_ctx *c, const vocr_model *m, const vocr_opts *o, void *arena, size_t bytes);
 /* Recognise one line crop. text gets NUL-terminated UTF-8; extra may be NULL. */
 int vocr_run(vocr_ctx *c, const vocr_image *img, char *text, size_t text_cap, vocr_extra *extra);
+/* Kotoba3DS: the next runs' layers shared out by par (NULL or one worker: one thread). The team's other threads read
+ * this context's arena while it runs: nothing else may use the context meanwhile. */
+void vocr_set_par(vocr_ctx *c, const vocr_par *par);
 /* Resized width (before padding) the runtime uses for a w x h crop. */
 unsigned vocr_resized_width(const vocr_model *m, unsigned w, unsigned h);
 /* The preprocessed grey line, height x padded width bytes, row-major, exactly as

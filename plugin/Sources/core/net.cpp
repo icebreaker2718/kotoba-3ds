@@ -21,34 +21,135 @@
 namespace kt {
 
 #ifdef __3DS__
-static u32 *g_socBuf = nullptr;  // allocated by netStart, freed by netStop (never at exit)
+static u32 *g_socBuf = nullptr;  // the reserved block (netReserve), or allocated by netStart and freed by netStop
+static u32 g_socSize = 0;
 static bool g_socUp = false;
-static const u32 kSocBufSize = 0x80000;
+static bool g_socReserved = false;  // g_socBuf is netReserve's: kept for the whole session
+static u32 *g_lentBuf = nullptr;     // netLend's memory, page-aligned
+static u32 g_lentSize = 0;
+static bool g_socLent = false;       // the running service is in the lent memory
+static u32 g_curSize = 0;            // the running service's buffer
+// Largest first. After a long session the plugin's heap is in pieces: ~1 MB free but no single
+// 512 KB page-aligned block, which made every "Make Anki cards" fail until the game restarted.
+// One connection at a time needs far less than 512 KB, so smaller blocks are tried before giving up.
+// Only when the reserved block (netReserve) couldn't be had at game start.
+static const u32 kSocBufSizes[] = {0x80000, 0x40000, 0x20000};
+// After a read, the model and the reader's buffers leave ~600 KB of the plugin's heap; a 512 KB block taken then
+// left too little to send a card (owner, 2026-11-03: the 16 KB reply buffer failed, the plugin aborted). So a
+// 128 KB block is taken at game start, while the heap is still in one piece, and kept for the whole session.
+static const u32 kSocReserveBytes = 0x20000;
 static int closeSock(int s) { return closesocket(s); }
 #else
 static int closeSock(int s) { return close(s); }
 #endif
 
+void netLend(void *p, uint32_t bytes) {
+#ifdef __3DS__
+    if (g_socUp && g_socLent) return;  // can't take it back while the service has it
+    g_lentBuf = nullptr;
+    g_lentSize = 0;
+    if (!p) return;
+    const uintptr_t a = ((uintptr_t)p + 0xFFF) & ~(uintptr_t)0xFFF, end = (uintptr_t)p + bytes;
+    for (u32 size : kSocBufSizes)
+        if (a + size <= end) {
+            g_lentBuf = (u32 *)a;
+            g_lentSize = size;
+            break;
+        }
+#else
+    (void)p;
+    (void)bytes;
+#endif
+}
+
+bool netUp() {
+#ifdef __3DS__
+    return g_socUp;
+#else
+    return false;
+#endif
+}
+
+bool netInLentMemory() {
+#ifdef __3DS__
+    return g_socUp && g_socLent;
+#else
+    return false;
+#endif
+}
+
+uint32_t netBufferSize() {
+#ifdef __3DS__
+    if (g_socUp) return g_curSize;
+    if (g_lentBuf) return g_lentSize;
+    return g_socReserved ? g_socSize : 0;
+#else
+    return 0;
+#endif
+}
+
+bool netReserve() {
+#ifdef __3DS__
+    if (g_socReserved) return true;
+    if (g_socUp || g_socBuf) return false;
+    if (!(g_socBuf = (u32 *)memalign(0x1000, kSocReserveBytes))) return false;
+    g_socSize = kSocReserveBytes;
+    g_socReserved = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool netReserved() {
+#ifdef __3DS__
+    return g_socReserved;
+#else
+    return false;
+#endif
+}
+
 bool netStart(std::string &error) {
 #ifdef __3DS__
     if (g_socUp) return true;
-    if (!g_socBuf) g_socBuf = (u32 *)memalign(0x1000, kSocBufSize);
-    if (!g_socBuf) { error = "not enough memory for networking"; return false; }
-    Result r = socInit(g_socBuf, kSocBufSize);
+    u32 *buf = g_socBuf;
+    u32 bufSize = g_socSize;
+    g_socLent = false;
+    if (g_lentBuf) {  // lent memory first: nothing taken from the heap
+        buf = g_lentBuf;
+        bufSize = g_lentSize;
+        g_socLent = true;
+    }
+    if (!g_socLent && !g_socBuf)
+        for (u32 size : kSocBufSizes)
+            if ((g_socBuf = (u32 *)memalign(0x1000, size))) { g_socSize = size; break; }
+    if (!g_socLent) {
+        buf = g_socBuf;
+        bufSize = g_socSize;
+    }
+    if (!buf) {
+        error = "not enough memory for networking.\nRestart the game to free it; your saved words are kept.";
+        return false;
+    }
+    Result r = socInit(buf, bufSize);
     if (R_FAILED(r)) {
-        char buf[200];
+        char msg[200];
         if ((u32)r == 0xE0A01BF5)  // kernel: invalid address -> plugin memory isn't PRIVATE
-            snprintf(buf, sizeof(buf),
+            snprintf(msg, sizeof(msg),
                      "networking needs Luma3DS v13.2 or newer (socInit %08lX).\n"
                      "Update Luma, then try again.", (unsigned long)r);
         else
-            snprintf(buf, sizeof(buf), "network unavailable in this game (socInit %08lX)", (unsigned long)r);
-        error = buf;
-        free(g_socBuf);
-        g_socBuf = nullptr;
+            snprintf(msg, sizeof(msg), "network unavailable in this game (socInit %08lX)", (unsigned long)r);
+        error = msg;
+        if (!g_socReserved && !g_socLent) {
+            free(g_socBuf);
+            g_socBuf = nullptr;
+            g_socSize = 0;
+        }
         return false;
     }
     g_socUp = true;
+    g_curSize = bufSize;
 #else
     (void)error;
 #endif
@@ -60,9 +161,11 @@ void netStop() {
     if (g_socUp) {
         socExit();
         g_socUp = false;
-        // give the 512 KB back: CTRPF's screenshots need room in the plugin's memory
-        free(g_socBuf);
-        g_socBuf = nullptr;
+        if (!g_socReserved && !g_socLent) {  // a block of the moment goes back (reserved / lent memory stays)
+            free(g_socBuf);
+            g_socBuf = nullptr;
+            g_socSize = 0;
+        }
     }
 #endif
 }
@@ -215,6 +318,69 @@ static bool readReply(int s, int timeoutMs, std::string &body, std::string &erro
     return true;
 }
 
+// readReply for netPostToSink: the header in memory (at most 16 KB), the body to the sink as it comes.
+static bool readReplyTo(int s, int timeoutMs, ReplySink &sink, std::string &error, uint64_t maxBytes) {
+    std::string head;  // the header, then (status != 200) the error text
+    char buf[2048];
+    size_t headerEnd = std::string::npos;
+    long long contentLength = -1;
+    uint64_t body = 0;
+    int status = 0;
+    while (true) {
+        if (contentLength >= 0 && headerEnd != std::string::npos && body >= (uint64_t)contentLength) break;
+        if (!waitFor(s, POLLIN, timeoutMs)) { error = "the PC took too long to answer"; return false; }
+        ssize_t n = recv(s, buf, sizeof(buf), 0);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (n < 0) { error = "connection error while reading the answer" + errStr("recv", errno); return false; }
+        if (n == 0) break;
+        const char *p = buf;
+        size_t len = (size_t)n;
+        if (headerEnd == std::string::npos) {
+            head.append(p, len);
+            headerEnd = head.find("\r\n\r\n");
+            if (headerEnd == std::string::npos) {
+                if (head.size() > 16 * 1024) { error = "the PC sent an unexpected answer"; return false; }
+                continue;
+            }
+            if (head.compare(0, 5, "HTTP/") == 0) {
+                size_t sp = head.find(' ');
+                if (sp != std::string::npos) status = atoi(head.c_str() + sp + 1);
+            }
+            size_t cl = head.find("Content-Length:");
+            if (cl == std::string::npos) cl = head.find("content-length:");
+            if (cl != std::string::npos && cl < headerEnd) contentLength = atoll(head.c_str() + cl + 15);
+            std::string rest = head.substr(headerEnd + 4);  // the body's first bytes
+            head.erase(headerEnd);
+            if (status != 200) {
+                head = rest;
+            } else if (!rest.empty()) {
+                size_t take = rest.size();
+                if (contentLength >= 0 && (uint64_t)take > (uint64_t)contentLength) take = (size_t)contentLength;
+                body += take;
+                if (!sink.write(rest.data(), take)) return false;
+            }
+            continue;
+        }
+        if (status != 200) {
+            if (head.size() < 1024) head.append(p, len);
+            continue;
+        }
+        if (contentLength >= 0 && body + len > (uint64_t)contentLength) len = (size_t)((uint64_t)contentLength - body);
+        body += len;
+        if (body > maxBytes) { error = "answer too large"; return false; }
+        if (len && !sink.write(p, len)) return false;
+    }
+    if (headerEnd == std::string::npos) { error = "the PC sent an unexpected answer"; return false; }
+    if (status != 200) {
+        size_t nl = head.find('\n');
+        error = "OCR server error: " + (nl != std::string::npos ? head.substr(nl + 1) : head);
+        while (!error.empty() && (error.back() == '\n' || error.back() == '\r')) error.pop_back();
+        return false;
+    }
+    if (contentLength >= 0 && body < (uint64_t)contentLength) { error = "the answer was cut short"; return false; }
+    return true;
+}
+
 int netConnect(const std::string &host, int port, int timeoutMs, std::string &error) {
     return connectTo(host, port, timeoutMs, error);
 }
@@ -260,6 +426,36 @@ bool netPost(const std::string &host, int port, const std::string &path,
         off += n;
     }
     if (ok) ok = readReply(s, replyTimeoutMs, responseBody, error, maxReply);
+    closeSock(s);
+    return ok;
+}
+
+bool netPostToSink(const std::string &host, int port, const std::string &path,
+                   const std::vector<std::string> &headers, Reader &src, int connectTimeoutMs, int replyTimeoutMs,
+                   ReplySink &sink, std::string &error, uint64_t maxReply) {
+    int s = connectTo(host, port, connectTimeoutMs, error);
+    if (s < 0) return false;
+    uint32_t size = src.size();
+    char lenbuf[32];
+    snprintf(lenbuf, sizeof(lenbuf), "%lu", (unsigned long)size);
+    std::string req = "POST " + path + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n" +
+                      "Content-Type: application/octet-stream\r\nContent-Length: " + lenbuf + "\r\n";
+    for (const std::string &h : headers) req += h + "\r\n";
+    req += "\r\n";
+    bool ok = sendAll(s, req.data(), req.size(), connectTimeoutMs);
+    if (!ok) error = "could not talk to the PC at " + host + errStr("send", g_lastSendErr);
+    char chunk[2048];
+    for (uint32_t off = 0; ok && off < size;) {
+        uint32_t n = size - off < sizeof(chunk) ? size - off : (uint32_t)sizeof(chunk);
+        if (!src.read(off, chunk, n)) { error = "could not read what to send"; ok = false; break; }
+        if (!sendAll(s, chunk, n, connectTimeoutMs * 2)) {
+            error = "upload to the PC failed" + errStr("send", g_lastSendErr);
+            ok = false;
+            break;
+        }
+        off += n;
+    }
+    if (ok) ok = readReplyTo(s, replyTimeoutMs, sink, error, maxReply);
     closeSock(s);
     return ok;
 }

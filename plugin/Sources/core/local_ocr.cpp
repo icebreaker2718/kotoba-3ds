@@ -1,4 +1,5 @@
 #include "core/local_ocr.hpp"
+#include "core/team.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -55,7 +56,8 @@ void *LocalOcr::alignedAlloc(size_t bytes) {  // 16-byte aligned; freed by the d
 void LocalOcr::unload() {
     for (void *p : raw_) free(p);
     std::vector<void *>().swap(raw_);
-    blob_ = arena_ = nullptr;
+    blob_ = arena_ = workBlock_ = nullptr;
+    workSlots_ = 0;
     model_ = ctx_ = nullptr;
     ctxs_.clear();
     arenas_.clear();
@@ -153,9 +155,16 @@ bool LocalOcr::setUp(uint32_t n, std::string &error) {
     o.two_level = twoLevel_ ? 1 : 0;
     const size_t need = vocr_arena_bytes(m, &o);
     if (!need) { error = "could not start the OCR"; return false; }
-    if (!arena_) {  // the first load: the main context's arena, with room for another model
-        arenaBytes_ = need + kArenaSpare;
-        arena_ = (unsigned char *)alignedAlloc(arenaBytes_);
+    if (!arena_) {  // the first load: every worker's arena in one block, with room for another model
+        arenaBytes_ = (need + kArenaSpare + 15) & ~(size_t)15;
+        const unsigned slots = runner_ && workers_ > 1 ? workers_ : 1;
+        workBlock_ = (unsigned char *)alignedAlloc(arenaBytes_ * slots);
+        if (workBlock_) {
+            workSlots_ = slots;
+            arena_ = workBlock_;
+        } else {  // not in one piece: the main context's arena alone (the others are tried one by one)
+            arena_ = (unsigned char *)alignedAlloc(arenaBytes_);
+        }
         if (!arena_) { error = "not enough memory for the OCR"; return false; }
         arenas_.assign(1, arena_);
     }
@@ -184,7 +193,9 @@ void LocalOcr::ensureWorkers(unsigned n) {
     if (!m) return;
     while (ctxs_.size() < n) {
         vocr_ctx *c2 = (vocr_ctx *)alignedAlloc(sizeof(vocr_ctx));
-        unsigned char *a2 = c2 ? (unsigned char *)alignedAlloc(arenaBytes_) : nullptr;
+        unsigned char *a2 = !c2 ? nullptr
+                            : ctxs_.size() < workSlots_ ? workBlock_ + ctxs_.size() * arenaBytes_  // its place in the block
+                                                        : (unsigned char *)alignedAlloc(arenaBytes_);
         vocr_opts o;
         memset(&o, 0, sizeof(o));
         o.mode = mode_;
@@ -300,6 +311,32 @@ struct LineJob {
     std::atomic<unsigned> next{0}, worker{0};
 };
 
+// Fewer lines than workers: the lines one after another, each by the whole team (vocr_set_par: a layer's
+// blocks, columns and frames shared out), instead of a worker per line and the rest idle.
+struct LineTeam : Team {
+    LineJob *job = nullptr;
+    vocr_par par;
+};
+
+void lineTeamMember(void *arg) {
+    LineTeam *t = (LineTeam *)arg;
+    LineJob *j = t->job;
+    const unsigned w = t->join();
+    if (w == 0) {
+        vocr_ctx *c = (vocr_ctx *)j->ctxs[0];
+        vocr_set_par(c, &t->par);
+        for (unsigned k = 0; k < j->count; k++) {
+            const unsigned i = j->order[k];
+            j->rc[i] = runLine(c, j->model, j->grey, j->stride, j->lines[i], j->text + (size_t)i * kLineCap, kLineCap,
+                               j->tk ? &j->tk[0] : nullptr, j->alts + (size_t)i * kMaxAlts, &j->nAlts[i], &j->conf[i]);
+        }
+        vocr_set_par(c, nullptr);
+        t->finish();
+    } else {
+        t->help(w);
+    }
+}
+
 void lineWorker(void *arg) {
     LineJob *j = (LineJob *)arg;
     unsigned w = j->worker.fetch_add(1);
@@ -316,6 +353,16 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
                     void (*progress)(unsigned, unsigned), unsigned rx, unsigned ry, unsigned rw, unsigned rh) {
     lines.clear();
     if (!blob_) { error = "no OCR model loaded"; return false; }
+    std::vector<VocrLine> todoLines;
+    if (!regionLines(grey, w, h, rx, ry, rw, rh, &todoLines, error)) return false;
+    return recognize(grey, w, h, todoLines.data(), (unsigned)todoLines.size(), lines, error, progress);
+}
+
+// The lines read() recognizes in region (rx, ry, rw, rh): found, small print left out, in screen pixels.
+bool LocalOcr::regionLines(const uint8_t *grey, unsigned w, unsigned h, unsigned rx, unsigned ry, unsigned rw,
+                           unsigned rh, void *todoOut, std::string &error) {
+    std::vector<VocrLine> &todoLines = *(std::vector<VocrLine> *)todoOut;
+    todoLines.clear();
     if (!rw || !rh || rx + rw > w || ry + rh > h) { rx = ry = 0; rw = w; rh = h; }
     VocrLinesImage im;
     im.pixels = grey + (size_t)ry * w + rx;
@@ -344,14 +391,49 @@ bool LocalOcr::read(const uint8_t *grey, unsigned w, unsigned h, std::vector<Tex
 #ifndef __3DS__
     if (getenv("LO_DEBUG")) for (unsigned i = 0; i < set.count; i++) fprintf(stderr, "found %u,%u %ux%u dark=%u\n", set.lines[i].x, set.lines[i].y, set.lines[i].w, set.lines[i].h, set.lines[i].dark);
 #endif
-    std::vector<VocrLine> todoLines;
     for (unsigned i : todo) {
         VocrLine L = set.lines[i];
         L.x += rx;  // region -> whole image
         L.y += ry;
         todoLines.push_back(L);
     }
-    return recognize(grey, w, h, todoLines.data(), (unsigned)todoLines.size(), lines, error, progress);
+    return true;
+}
+
+bool LocalOcr::readRegions(const uint8_t *grey, unsigned w, unsigned h, const std::vector<Region> &regions,
+                           std::vector<std::vector<TextLine>> &lines, std::vector<char> &ok,
+                           void (*progress)(unsigned, unsigned)) {
+    const size_t R = regions.size();
+    lines.assign(R, std::vector<TextLine>());
+    ok.assign(R, 0);
+    if (!blob_) return false;
+    // every region's lines in one list (each region's in its order), recognized together
+    std::vector<VocrLine> all, mine;
+    std::vector<unsigned> start(R + 1, 0);
+    std::vector<char> found(R, 0);
+    std::string e;
+    for (size_t r = 0; r < R; r++) {
+        start[r] = (unsigned)all.size();
+        const Region &g = regions[r];
+        if (regionLines(grey, w, h, g.x, g.y, g.w, g.h, &mine, e)) {
+            found[r] = 1;
+            all.insert(all.end(), mine.begin(), mine.end());
+        }
+    }
+    start[R] = (unsigned)all.size();
+    std::vector<TextLine> got;
+    if (!all.empty()) recognize(grey, w, h, all.data(), (unsigned)all.size(), got, e, progress);
+    // back to their regions, numbered within each as read() numbers them (TextLine::paragraph = the
+    // line's index in its region's list); a region read() would have failed on (nothing recognized) stays !ok
+    size_t r = 0;
+    for (TextLine &l : got) {
+        const unsigned k = (unsigned)l.paragraph;
+        while (r + 1 < R && k >= start[r + 1]) r++;
+        l.paragraph = (int)(k - start[r]);
+        lines[r].push_back(l);
+    }
+    for (size_t q = 0; q < R; q++) ok[q] = found[q] && !lines[q].empty();
+    return true;
 }
 
 bool LocalOcr::findLines(const uint8_t *grey, unsigned w, unsigned h, unsigned rx, unsigned ry, unsigned rw,
@@ -408,12 +490,15 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
     lines.clear();
     const vocr_model *m = (const vocr_model *)model_;
     const VocrLine *todoLines = (const VocrLine *)linesIn;
-    // workers: one per line up to workers_, each with its own context (made at the load)
+    // workers: one per line up to workers_, each with its own context (made at the load); with fewer lines than
+    // workers, the whole team on each line in turn (lineTeamMember)
+    const bool team = runner_ && workers_ > 1 && n >= 1 && n < workers_;
     unsigned workers = runner_ ? std::min<unsigned>(workers_, n) : 1;
+    if (team) workers = 1;  // one context: the team shares it
     ensureWorkers(workers);
     if (workers > ctxs_.size()) workers = (unsigned)ctxs_.size();
     if (workers < 1) workers = 1;
-    lastWorkers_ = workers;
+    lastWorkers_ = team ? workers_ : workers;
     std::vector<char> text((size_t)std::max(n, 1u) * kLineCap, 0);
     std::vector<int> rc(std::max(n, 1u), VOCR_E_ARG);
     std::vector<RawAlt> rawAlts(fixer_ ? (size_t)std::max(n, 1u) * kMaxAlts : 1);
@@ -441,7 +526,16 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
     std::stable_sort(order.begin(), order.begin() + n,
                      [&](unsigned a, unsigned b) { return todoLines[a].w * todoLines[b].h > todoLines[b].w * todoLines[a].h; });
     job.order = order.data();
-    if (workers > 1) {
+    if (team) {
+        if (progress) progress(0, 1);
+        LineTeam lt;
+        lt.job = &job;
+        lt.workers = workers_;
+        lt.par.for_each = Team::forEachC;
+        lt.par.team = (Team *)&lt;
+        lt.par.workers = workers_;
+        runner_(workers_, lineTeamMember, &lt);
+    } else if (workers > 1) {
         if (progress) progress(0, 1);
         runner_(workers, lineWorker, &job);
     } else {
@@ -497,11 +591,17 @@ bool LocalOcr::recognize(const uint8_t *grey, unsigned w, unsigned h, const void
     return true;
 }
 
-uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
-    uint8_t *grey = (uint8_t *)malloc((size_t)w * h);
-    if (!grey) return nullptr;
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O2")))  // every read, every pixel: built for speed (the file is built for size)
+#endif
+void greyFromRGBInto(const uint8_t *rgb, unsigned w, unsigned h, uint8_t *grey) {
     for (size_t i = 0; i < (size_t)w * h; i++)
         grey[i] = (uint8_t)((77u * rgb[i * 3] + 150u * rgb[i * 3 + 1] + 29u * rgb[i * 3 + 2]) >> 8);
+}
+
+uint8_t *greyFromRGB(const uint8_t *rgb, unsigned w, unsigned h) {
+    uint8_t *grey = (uint8_t *)malloc((size_t)w * h);
+    if (grey) greyFromRGBInto(rgb, w, h, grey);
     return grey;
 }
 
@@ -573,31 +673,62 @@ struct BoxRead {
 void readBoxLines(LocalOcr &ocr, const uint8_t *grey, unsigned w, unsigned h, const std::vector<TextBox> &boxes,
                   void (*progress)(unsigned, unsigned), std::vector<BoxRead> &reads) {
     typedef BoxRead Read;
-    std::vector<TextLine> lines;
     reads.clear();
-    for (size_t bi = 0; bi < boxes.size(); bi++) {
-        const TextBox &b = boxes[bi];
-        bool inside = false;  // mostly within a box read already (a box inside a box)
-        for (const Read &g : reads) {
-            const TextBox &o = *g.box;
-            unsigned ix = std::min(b.x + b.w, o.x + o.w) > std::max(b.x, o.x) ? std::min(b.x + b.w, o.x + o.w) - std::max(b.x, o.x) : 0;
-            unsigned iy = std::min(b.y + b.h, o.y + o.h) > std::max(b.y, o.y) ? std::min(b.y + b.h, o.y + o.h) - std::max(b.y, o.y) : 0;
-            if ((uint64_t)ix * iy * 2 > (uint64_t)std::min(b.w * b.h, o.w * o.h)) inside = true;
+    // A box mostly within a box read before it (a box inside a box) is skipped. Box by box, that is
+    // decided once its earlier overlapping boxes have been read (or skipped); the boxes it is decided for
+    // are read together, so their lines are recognized in parallel. Usually one round reads them all.
+    const size_t n = boxes.size();
+    auto overlaps = [](const TextBox &b, const TextBox &o) {
+        unsigned ix = std::min(b.x + b.w, o.x + o.w) > std::max(b.x, o.x) ? std::min(b.x + b.w, o.x + o.w) - std::max(b.x, o.x) : 0;
+        unsigned iy = std::min(b.y + b.h, o.y + o.h) > std::max(b.y, o.y) ? std::min(b.y + b.h, o.y + o.h) - std::max(b.y, o.y) : 0;
+        return (uint64_t)ix * iy * 2 > (uint64_t)std::min(b.w * b.h, o.w * o.h);
+    };
+    enum { kOpen, kRound, kRead, kNotRead };  // kNotRead: skipped, or read with nothing in it
+    std::vector<char> state(n, kOpen);
+    std::vector<std::vector<TextLine>> got(n);
+    for (;;) {
+        std::vector<LocalOcr::Region> regions;
+        std::vector<size_t> which;
+        for (size_t bi = 0; bi < n; bi++) {
+            if (state[bi] != kOpen) continue;
+            const TextBox &b = boxes[bi];
+            bool inside = false, waits = false;
+            for (size_t oi = 0; oi < bi; oi++) {
+                if (!overlaps(b, boxes[oi])) continue;
+                if (state[oi] == kRead) inside = true;
+                else if (state[oi] == kOpen || state[oi] == kRound) waits = true;
+            }
+            if (inside) { state[bi] = kNotRead; continue; }
+            if (waits) continue;  // depends on how an earlier box reads: the next round
+            unsigned x0 = b.x > 2 ? b.x - 2 : 0, y0 = b.y > 2 ? b.y - 2 : 0;
+            unsigned x1 = b.x + b.w + 2 < w ? b.x + b.w + 2 : w, y1 = b.y + b.h + 2 < h ? b.y + b.h + 2 : h;
+            if (b.shaded && b.inkW && b.inkH) {  // a rounded shaded box: just around the letters, not its frame
+                const unsigned m = 6;
+                x0 = std::max(x0, b.inkX > m ? b.inkX - m : 0);
+                y0 = std::max(y0, b.inkY > m ? b.inkY - m : 0);
+                x1 = std::min(x1, b.inkX + b.inkW + m);
+                y1 = std::min(y1, b.inkY + b.inkH + m);
+            }
+            LocalOcr::Region g;
+            g.x = x0;
+            g.y = y0;
+            g.w = x1 - x0;
+            g.h = y1 - y0;
+            regions.push_back(g);
+            which.push_back(bi);
+            state[bi] = kRound;
         }
-        if (inside) continue;
-        unsigned x0 = b.x > 2 ? b.x - 2 : 0, y0 = b.y > 2 ? b.y - 2 : 0;
-        unsigned x1 = b.x + b.w + 2 < w ? b.x + b.w + 2 : w, y1 = b.y + b.h + 2 < h ? b.y + b.h + 2 : h;
-        if (b.shaded && b.inkW && b.inkH) {  // a rounded shaded box: just around the letters, not its frame
-            const unsigned m = 6;
-            x0 = std::max(x0, b.inkX > m ? b.inkX - m : 0);
-            y0 = std::max(y0, b.inkY > m ? b.inkY - m : 0);
-            x1 = std::min(x1, b.inkX + b.inkW + m);
-            y1 = std::min(y1, b.inkY + b.inkH + m);
+        if (regions.empty()) break;
+        std::vector<std::vector<TextLine>> lines;
+        std::vector<char> ok;
+        ocr.readRegions(grey, w, h, regions, lines, ok, progress);
+        for (size_t r = 0; r < which.size(); r++) {
+            state[which[r]] = r < ok.size() && ok[r] ? kRead : kNotRead;
+            if (state[which[r]] == kRead) got[which[r]].swap(lines[r]);
         }
-        std::string e;
-        if (!ocr.read(grey, w, h, lines, e, progress, x0, y0, x1 - x0, y1 - y0)) continue;
-        reads.push_back({&b, (int)bi, lines});
     }
+    for (size_t bi = 0; bi < n; bi++)
+        if (state[bi] == kRead) reads.push_back({&boxes[bi], (int)bi, got[bi]});
     // Boxes can overlap (a speech bubble and the light ground behind it can come out as two), so
     // a line can be read twice: once whole, once cut at the edge of the other box (「たえられる」
     // for 「きたえられる」). Each line goes to the box that read the most of it.
@@ -1049,6 +1180,7 @@ static unsigned kanaIn(const std::string &t) {
 // faint glyph at a line's end (ー, …, ！), which the recognizer then loses (35%: best on the labelled
 // screens). A variable for the tests.
 unsigned g_spotGrowPct = 35;
+int g_spotJoinGapPct = 100, g_spotJoinLeftPct = 30;  // block joining (readScreenSpot), percent of the taller line
 
 // Kana and the marks around them only (a line of furigana), at least one kana.
 static bool kanaOnly(const std::string &t) {
@@ -1123,7 +1255,7 @@ bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, co
                 break;
             }
         }
-    struct Kept { unsigned block; TextLine line; };
+    struct Kept { unsigned block; TextLine line; const SpotBox *box; };
     std::vector<Kept> kept;
     const uint32_t dict0 = st.dictMs;
     ScoredReadStats sst;
@@ -1136,7 +1268,39 @@ bool readScreenSpot(LocalOcr &ocr, const TextSpotter &spot, Dictionary *dict, co
         // as a line found out in the scene: the recognizer sure of it, or words in it (judged as a text
         // box's line, the spotter's dialogue kept sprites and decorations read as text: 「ーロエロー」)
         if (!keepLine(*l, dict, false, &sst)) continue;
-        kept.push_back({boxes[i].block, *l});
+        kept.push_back({boxes[i].block, *l, &boxes[i]});
+    }
+    // The spotter joins lines into a block only when it gave them the same kind, so a speech bubble's first row
+    // tagged as scene text or a name over the rest tagged as dialogue came out as two blocks. Two blocks next to
+    // each other in reading order join (whatever their kinds) when the first's last line and the second's first
+    // line are one text's rows: the second right below (a gap of at most the taller line's height, the spotter's
+    // own rule), heights within 3:2, and the left edges together (within 30% of the line's height, ~7 px: a
+    // speaker's name stands 20-30 px right of the text's edge, Mario & Luigi's "あらすじ" heading 8 px). A block of fewer than 3 Japanese characters (a scrap, dropped
+    // below) joins nothing.
+    for (size_t i = 0; i < kept.size();) {
+        size_t j = i;
+        while (j < kept.size() && kept[j].block == kept[i].block) j++;
+        if (j >= kept.size()) break;
+        size_t k = j;
+        while (k < kept.size() && kept[k].block == kept[j].block) k++;
+        const SpotBox &a = *kept[j - 1].box, &b = *kept[j].box;
+        const int top = (int)std::max(a.h, b.h), low = (int)std::min(a.h, b.h);
+        const int gap = (int)b.y - (int)(a.y + a.h), dx = (int)b.x - (int)a.x;
+        bool join = b.y > a.y && gap <= g_spotJoinGapPct * top / 100 && 2 * top <= 3 * low &&
+                    std::abs(dx) * 100 <= g_spotJoinLeftPct * top;
+        if (join) {
+            unsigned ja = 0, jb = 0;
+            for (size_t m = i; m < j; m++) ja += japaneseIn(kept[m].line.text);
+            for (size_t m = j; m < k; m++) jb += japaneseIn(kept[m].line.text);
+            join = ja >= 3 && jb >= 3;
+        }
+        if (join) {
+            const unsigned into = kept[i].block;
+            for (size_t m = j; m < k; m++) kept[m].block = into;
+            st.joined++;
+            continue;  // the joined block may take the next one too
+        }
+        i = j;
     }
     st.dictChecks = sst.dictChecks;
     st.dictMs = dict0 + sst.dictMs;

@@ -33,6 +33,7 @@
 #include "core/textbox.hpp"
 #include "core/textlines.hpp"
 #include "screen_ui.hpp"
+#include <new>
 
 extern "C" u32 __ctru_heap_size;  // libctru: the plugin's heap (what Luma gave it, minus code and CTRPF's own)
 
@@ -63,7 +64,7 @@ enum ReadMode { kReadTop = 0, kReadBottom = 1, kReadBoth = 2, kModes = 3 };
 static const char *const kModeNames[kModes] = {"Read the top screen", "Read the touchscreen", "Read both screens"};
 static u32 g_combo[kModes] = {Key::ZL | Key::ZR, 0, 0};
 static bool g_kanjiForm = true;  // saved words in their kanji form (or as the game wrote them)
-static bool g_fastMode = false;  // fast mode: flat-colour text boxes only, no text spotter
+static bool g_fastMode = false;  // "Text boxes only" (was "Fast mode"; settings key fast=): flat-colour boxes, no spotter
 static bool g_textOnTop = false;  // the touchscreen was read: show its text on the top screen
 enum HideMode { kHideSeeThrough = 0, kHideHidden = 1, kHideCycle = 2 };
 static int g_hideMode = kHideHidden;  // what X does to the screen(s) that were read
@@ -159,17 +160,25 @@ static void LoadSettings() {
 class SdReader : public kt::Reader {
 public:
     bool open(const std::string &path) {
+        close();
         if (File::Open(file_, path, File::READ) != File::SUCCESS) return false;
         size_ = (u32)file_.GetSize();
+        open_ = true;
         return true;
     }
     bool read(uint32_t off, void *dst, uint32_t len) override {
         return file_.Seek(off, File::SET) == File::SUCCESS && file_.Read(dst, len) == File::SUCCESS;
     }
     uint32_t size() override { return size_; }
+    void close() {
+        if (open_) file_.Close();
+        open_ = false;
+        size_ = 0;
+    }
 private:
     File file_;
     u32 size_ = 0;
+    bool open_ = false;
 };
 
 static SdReader *g_readerPtr = nullptr;
@@ -211,13 +220,42 @@ static std::string TitleIdHex() {
     return tid;
 }
 
-static void LogOcr(const std::string &line) {  // each read's timing, for troubleshooting
+// While a read runs (button to lookup), log lines wait here and are written in one go once the lookup is on
+// screen: each line written at once was its own open/write/close of the SD card, in the time you wait for the
+// lookup. A static buffer: nothing allocated among the read's buffers.
+static char g_logHeld[2048];
+static size_t g_logHeldLen = 0;
+static bool g_logHold = false;
+
+static void WriteLog(const char *text, size_t len) {
     File f;
     if (File::Open(f, "/3ds/kotoba3ds/ocr_log.txt", File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
-        f.Write(line.c_str(), line.size());
-        f.Write("\n", 1);
+        f.Write(text, len);
         f.Close();
     }
+}
+
+static void FlushLog() {  // the held lines, and lines are written at once again
+    g_logHold = false;
+    if (g_logHeldLen) WriteLog(g_logHeld, g_logHeldLen);
+    g_logHeldLen = 0;
+}
+
+static void LogOcr(const std::string &line) {  // each read's timing, for troubleshooting
+    if (g_logHold) {
+        if (g_logHeldLen + line.size() + 1 > sizeof(g_logHeld)) {  // full: out with what's there
+            WriteLog(g_logHeld, g_logHeldLen);
+            g_logHeldLen = 0;
+        }
+        if (line.size() + 1 <= sizeof(g_logHeld)) {
+            memcpy(g_logHeld + g_logHeldLen, line.data(), line.size());
+            g_logHeldLen += line.size();
+            g_logHeld[g_logHeldLen++] = '\n';
+            return;
+        }
+    }
+    std::string l = line + "\n";
+    WriteLog(l.data(), l.size());
 }
 
 // Free heap: what malloc has free inside the heap plus what it hasn't claimed yet (nothing is
@@ -341,6 +379,25 @@ static void ReservePictures() {
     if (!g_picPool)
         LogOcr(Utils::Format("pictures: no %u KB block to keep for them (heap free %lu KB): taken each read instead",
                              (unsigned)(kPicPoolBytes / 1024), (unsigned long)(HeapFree() / 1024)));
+}
+
+// The OCR's grey copies of the screens (top 400x240, touchscreen 320x240), kept for the session from the first read
+// on, beside the pictures: a both-screens read took 94 KB + 75 KB each time, and after ~25 reads in one session the
+// heap (~93% in use, its free memory in hundreds of small pieces) no longer had the second one (alpha log
+// 2026-11-07). Short of memory at the first read, they are taken each read as before.
+static const size_t kGreyTopBytes = (size_t)400 * 240;
+static const size_t kGreyPoolBytes = kGreyTopBytes + (size_t)320 * 240;  // 172,800
+static u8 *g_greyPool = nullptr;
+
+static void ReserveGreys() {
+    static bool tried = false;
+    if (g_greyPool || tried) return;
+    tried = true;
+    g_greyPool = (u8 *)malloc(kGreyPoolBytes);
+    LogOcr(g_greyPool ? Utils::Format("grey copies: %u KB kept for them, heap free %lu KB", (unsigned)(kGreyPoolBytes / 1024),
+                                      (unsigned long)(HeapFree() / 1024))
+                      : Utils::Format("grey copies: no %u KB block to keep for them (heap free %lu KB): taken each read instead",
+                                      (unsigned)(kGreyPoolBytes / 1024), (unsigned long)(HeapFree() / 1024)));
 }
 
 static void ReleasePicture(Picture &p) {
@@ -579,9 +636,12 @@ static int CountSaved() {
 }
 
 // The words the player has already, green in lookups: known.txt (the words of their Anki cards,
-// from the PC) and the words saved here. Loaded once, kept (reloaded after it changes).
+// from the PC), searched on the SD card (a few KB of index whatever its size), and the words saved
+// and marked here. Opened once, kept (opened again after it changes; CloseKnown() before writing it).
 static kt::KnownWords *g_knownPtr = nullptr;
 #define g_known Leaky(g_knownPtr)
+static SdReader *g_knownFilePtr = nullptr;
+#define g_knownFile Leaky(g_knownFilePtr)
 static bool g_knownLoaded = false;
 static size_t g_knownFromAnki = 0;  // words in known.txt
 static std::vector<std::string> *g_markedPtr = nullptr;  // marked.txt's words
@@ -601,26 +661,90 @@ static std::vector<std::string> FileLines(const char *path) {
     }
     return lines;
 }
-static const u32 kKnownMax = 1024 * 1024;
+static const u32 kKnownMax = 1024 * 1024;  // (unused since the list is written to the card as it comes)
+static const char *kKnownTmpPath = "/3ds/kotoba3ds/known.tmp";
+
+// "Get them from my PC": the PC's answer ("KNOWN1\n" + the list) written to known.tmp as it arrives, through a
+// 16 KB buffer: nothing the size of the list in memory (a big Anki collection's list used to be held whole first).
+struct KnownFileSink : kt::ReplySink {
+    File f;
+    bool opened = false, oldServer = false, failed = false;
+    char head[8] = {0};
+    size_t headLen = 0, used = 0;
+    uint64_t written = 0;
+    char buf[16 * 1024];
+    bool flush() {
+        if (used && f.Write(buf, used) != File::SUCCESS) failed = true;
+        written += used;
+        used = 0;
+        return !failed;
+    }
+    bool write(const char *p, size_t n) override {
+        while (headLen < 7 && n) {  // the answer's first line
+            head[headLen++] = *p++;
+            n--;
+            if (headLen == 7 && memcmp(head, "KNOWN1\n", 7) != 0) {
+                oldServer = true;
+                return false;
+            }
+        }
+        if (!n) return true;
+        if (!opened) {
+            if (File::Open(f, kKnownTmpPath, File::WRITE | File::CREATE | File::TRUNCATE) != File::SUCCESS) {
+                failed = true;
+                return false;
+            }
+            opened = true;
+        }
+        while (n) {
+            const size_t k = std::min(n, sizeof(buf) - used);
+            memcpy(buf + used, p, k);
+            used += k;
+            p += k;
+            n -= k;
+            if (used == sizeof(buf) && !flush()) return false;
+        }
+        return true;
+    }
+    bool finish() {  // the rest out and the file closed
+        if (!opened) {  // an empty list: an empty file
+            if (File::Open(f, kKnownTmpPath, File::WRITE | File::CREATE | File::TRUNCATE) != File::SUCCESS) return false;
+            opened = true;
+        }
+        const bool ok = flush();
+        f.Close();
+        opened = false;
+        return ok && !failed;
+    }
+};
+
+static void CloseKnown() {  // before known.txt is written or removed
+    g_known.clear();
+    g_knownFile.close();
+    g_knownLoaded = false;
+}
 
 static void LoadKnown() {
     if (g_knownLoaded) return;
     g_knownLoaded = true;
     g_known.clear();
+    g_knownFile.close();
     g_knownFromAnki = 0;
-    File f;
-    if (File::Open(f, kKnownPath, File::READ) == File::SUCCESS) {
-        const u64 size = f.GetSize();
-        const u32 len = (u32)std::min<u64>(size, kKnownMax);
-        char *buf = (char *)malloc(len + 1);
-        if (buf && f.Read(buf, len) == File::SUCCESS) {
-            g_known.adopt(buf, len, (size_t)size);  // keeps buf
+    if (g_knownFile.open(kKnownPath)) {
+        const u64 t = osGetTime();
+        if (g_known.openFile(&g_knownFile)) {
             g_knownFromAnki = g_known.size();
+            LogOcr(Utils::Format("known.txt: %u words (%lu KB), searched on the SD card: %u blocks indexed in %lu ms, "
+                                 "%u out of order kept in memory%s, heap free %lu KB",
+                                 (unsigned)g_knownFromAnki, (unsigned long)(g_knownFile.size() / 1024),
+                                 (unsigned)g_known.fileBlocks(), (unsigned long)(osGetTime() - t),
+                                 (unsigned)(g_knownFromAnki - g_known.fileWords()),
+                                 g_known.spillDropped() ? Utils::Format(" (%u more left out)", (unsigned)g_known.spillDropped()).c_str() : "",
+                                 (unsigned long)(HeapFree() / 1024)));
         } else {
-            free(buf);
-            LogOcr(Utils::Format("known.txt (%lu KB) not loaded: not enough memory", (unsigned long)(size / 1024)));
+            g_knownFile.close();
+            LogOcr("known.txt not used: couldn't read it, or no memory for its index");
         }
-        f.Close();
     }
     std::vector<std::string> cols, saved;
     for (const std::string &l : SavedLines()) {
@@ -995,6 +1119,7 @@ static void RunLookupView(kt::LookupView &v) {
     g_hide = 0;
     OSD::SwapBuffers();  // let CTRPF finish any pending redraw of its own first
     DrawLookup(v);
+    FlushLog();  // the read's log lines, now that the lookup is on screen
     u64 openMs = g_viewOpenedAt ? osGetTime() - g_viewOpenedAt : 0;
     g_viewOpenedAt = 0;
     u32 moves = 0, draws = 0;
@@ -1322,37 +1447,93 @@ static s32 CoreTask(void *a) {
     return 0;
 }
 // A third worker can go on the New 3DS's core 3, when the kernel lets this process start a thread
-// there (it may refuse: then 2 workers do all the lines, as they share them out as they go).
+// there (it may refuse: then 2 workers do all the lines, as they share them out as they go). The thread
+// is made once, at the first read, and then waits for each read's lines: not made and freed each read
+// (with its 16 KB stack from the plugin's heap, in the middle of the read's buffers).
 static int g_core3 = -1;  // -1 not tried yet, 0 refused, 1 works
+static Thread g_core3Thread = nullptr;
+static LightEvent g_core3Go, g_core3Done;
+static void (*volatile g_core3Job)(void *) = nullptr;
+static void *volatile g_core3Arg = nullptr;
+static void Core3Loop(void *) {
+    for (;;) {
+        LightEvent_Wait(&g_core3Go);
+        void (*job)(void *) = g_core3Job;
+        if (job) job(g_core3Arg);
+        LightEvent_Signal(&g_core3Done);
+    }
+}
 static void RunOnCores(unsigned n, void (*job)(void *), void *arg) {
     static const s32 kAffinity[] = {Task::NewAppCore, Task::AppCore};
     CoreJob cj = {job, arg};
-    Thread third = nullptr;
-    if (n >= 3 && g_core3 != 0) {
-        third = threadCreate(job, arg, 16 * 1024, 0x18, 3, false);
-        g_core3 = third ? 1 : 0;
+    const bool third = n >= 3 && g_core3Thread;
+    if (third) {
+        g_core3Job = job;
+        g_core3Arg = arg;
+        LightEvent_Signal(&g_core3Go);
     }
     std::vector<Task> tasks;
     for (unsigned i = 0; i < n && i < 2; i++) tasks.emplace_back(CoreTask, &cj, kAffinity[i]);
     for (Task &t : tasks) t.Start();
     for (Task &t : tasks) t.Wait();
-    if (third) {
-        threadJoin(third, U64_MAX);
-        threadFree(third);
-    }
+    if (third) LightEvent_Wait(&g_core3Done);
 }
-static void Nothing(void *) {}
 static unsigned OcrWorkers() {  // as many as this console has: New 3DS 2 or 3, Old 1
     if (!System::IsNew3DS()) return 1;
-    if (g_core3 < 0) {  // once: may this process run a thread on core 3?
-        Thread t = threadCreate(Nothing, nullptr, 4096, 0x18, 3, false);
-        g_core3 = t ? 1 : 0;
-        if (t) {
-            threadJoin(t, U64_MAX);
-            threadFree(t);
-        }
+    if (g_core3 < 0) {  // once: may this process run a thread on core 3? Then it stays, waiting.
+        LightEvent_Init(&g_core3Go, RESET_ONESHOT);
+        LightEvent_Init(&g_core3Done, RESET_ONESHOT);
+        g_core3Thread = threadCreate(Core3Loop, nullptr, 16 * 1024, 0x18, 3, true);
+        g_core3 = g_core3Thread ? 1 : 0;
     }
     return g_core3 ? 3 : 2;
+}
+
+// The spotter's working memory (~208 KB: the top screen's, enough for the touchscreen's too), kept from the first
+// read on, beside the model and the pictures, whatever the mode (Text boxes only and reading areas need ~10-20 KB of
+// their own): taken each read, or again after being given back, it was often no longer to be had in one piece
+// ("not enough memory to look for text", alpha logs 2026-11-07/08).
+static void KeepSpotterMemory(bool wanted) {
+    static int logged = 0;  // 1 kept, -1 couldn't: logged once per change
+    if (!wanted || g_spotter.keptBytes()) return;
+    // first choice: the recognizer's workers' memory (the spotter is done before they start on the lines)
+    void *block;
+    size_t blockBytes;
+    if (g_localOcr.scratch(block, blockBytes) && g_spotter.lendMemory(block, blockBytes, 400, 240)) {
+        LogOcr(Utils::Format("spotter: works in the recognizer's memory (%lu KB, needs %lu KB), heap free %lu KB",
+                             (unsigned long)(blockBytes / 1024), (unsigned long)(g_spotter.arenaBytes(400, 240) / 1024),
+                             (unsigned long)(HeapFree() / 1024)));
+        logged = 1;
+        return;
+    }
+    const bool ok = g_spotter.keepMemory(400, 240);
+    if (ok && logged != 1)
+        LogOcr(Utils::Format("spotter: %lu KB kept for its working memory, heap free %lu KB",
+                             (unsigned long)(g_spotter.keptBytes() / 1024), (unsigned long)(HeapFree() / 1024)));
+    else if (!ok && logged != -1)
+        LogOcr(Utils::Format("spotter: no %lu KB block to keep for its working memory (heap free %lu KB, largest %lu KB): "
+                             "taken each read instead",
+                             (unsigned long)(g_spotter.arenaBytes(400, 240) / 1024), (unsigned long)(HeapFree() / 1024),
+                             (unsigned long)LargestFreeKB()));
+    logged = ok ? 1 : -1;
+}
+
+// The recognizer's workers' memory (one block, idle between reads) lent to the socket service for Make Anki cards /
+// Get known words, instead of a networking block kept for the session (128 KB). Before the first read loads the
+// model there is none: netStart then takes a block of the moment and gives it back.
+static void LendReaderMemory() {
+    static bool lent = false;
+    if (lent) return;
+    void *block;
+    size_t bytes;
+    if (!g_localOcr.scratch(block, bytes)) {
+        LogOcr("net: the recognizer's memory isn't in one piece: networking takes a block when needed");
+        lent = true;
+        return;
+    }
+    kt::netLend(block, (u32)bytes);
+    lent = true;
+    LogOcr(Utils::Format("net: will use %lu KB of the recognizer's memory", (unsigned long)(kt::netBufferSize() / 1024)));
 }
 
 static bool LoadSpotter() {
@@ -1397,10 +1578,12 @@ static bool LoadModel(const std::string &name, std::string &error) {
 }
 
 // The OCR's input for screen i, straight from its framebuffer (call before anything is drawn on
-// it): the text boxes found by their colour, and the grey picture (malloc'd; nullptr on failure).
+// it): the text boxes found by their colour, and the grey picture (in g_greyPool, or malloc'd with owned set;
+// nullptr on failure).
 static u64 g_boxSearchMs[2] = {0, 0};  // the last ScreenGrey's text-box search, per screen
 
-static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxes = true) {
+static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool &owned, bool wantBoxes = true) {
+    owned = false;
     const Screen &s = ScreenOf(i);
     const u32 W = ScreenW(i), bpp = s.BytesPerPixel;
     if (bpp < 2 || bpp > 4) return nullptr;
@@ -1422,8 +1605,16 @@ static uint8_t *ScreenGrey(int i, std::vector<kt::TextBox> &boxes, bool wantBoxe
     boxes.clear();
     if (wantBoxes) boxes = kt::findTextBoxes(rgb, W, 240, 3, !g_fastMode);
     g_boxSearchMs[i] = osGetTime() - tb;
-    uint8_t *grey = kt::greyFromRGB(rgb, W, 240);
+    uint8_t *grey = nullptr;
+    if (g_greyPool && (size_t)W * 240 <= (i == 0 ? kGreyTopBytes : kGreyPoolBytes - kGreyTopBytes)) {
+        grey = g_greyPool + (i == 0 ? 0 : kGreyTopBytes);
+        kt::greyFromRGBInto(rgb, W, 240, grey);
+        if (!inPool) free(rgb);
+        return grey;
+    }
+    grey = kt::greyFromRGB(rgb, W, 240);
     if (!inPool) free(rgb);
+    owned = grey != nullptr;
     return grey;
 }
 
@@ -1454,9 +1645,9 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
         sst.clock = OsTimeMs;
         const bool ok = kt::readScreenSpot(g_localOcr, g_spotter, &g_dict, grey, ScreenW(s), 240, paras, err, LocalProgress, &sst);
         LogOcr(Utils::Format("spotter reader: %s %lu ms: spotter %lu ms (%u lines, %u furigana, %u vertical), "
-                             "read %u in %lu ms, kept %u, dictionary %u checks %lu ms",
+                             "read %u in %lu ms, kept %u, joined %u, dictionary %u checks %lu ms",
                              s == 0 ? "top" : "touchscreen", (unsigned long)(osGetTime() - tc0), (unsigned long)sst.spotMs,
-                             sst.boxes, sst.ruby, sst.vertical, sst.read, (unsigned long)sst.readMs, sst.kept, sst.dictChecks,
+                             sst.boxes, sst.ruby, sst.vertical, sst.read, (unsigned long)sst.readMs, sst.kept, sst.joined, sst.dictChecks,
                              (unsigned long)sst.dictMs));
         return ok;
     }
@@ -1472,7 +1663,8 @@ static bool ReadOneScreen(int s, const uint8_t *grey, const std::vector<kt::Text
 // nothing drawn yet.
 static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string &error) {
     u64 t0 = osGetTime();
-    std::string name = FindModel();
+    // the model loaded at the first read stays: no SD card check for it each read
+    std::string name = g_localOcr.loaded() && !g_modelName.empty() ? g_modelName : FindModel();
     if (name.empty()) {
         error = "No OCR model found.\nUnzip Kotoba3DS-ocr-model.zip to the root of the SD card (it goes to /3ds/kotoba3ds/ocr/).";
         return false;
@@ -1484,21 +1676,30 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
     Text().reserve();
     g_localOcr.setParallel(OcrWorkers(), RunOnCores);
     g_localOcr.setFixer(FixLine, nullptr);
+    if (kt::netUp()) kt::netStop();  // never: the socket service would own the workers' memory the read uses
     if ((!g_localOcr.loaded() || g_modelName != name) && !LoadModel(name, error)) return false;
+    LendReaderMemory();  // the workers' memory, idle between reads, to Make Anki cards' networking
     ReservePictures();  // kept from the first read on, beside the model
-    const bool spot = !g_fastMode && LoadSpotter();
+    ReserveGreys();     // and the grey copies, next to them
+    // the spotter (model and working memory) taken at the first read whatever the mode, and kept: given back while
+    // another mode read, its block was soon in pieces and couldn't be had again (alpha log 2026-11-08)
+    const bool spotterHere = LoadSpotter();
+    const bool spot = !g_fastMode && spotterHere;
+    if (spotterHere) g_spotter.setParallel(OcrWorkers(), RunOnCores);  // its rows on every core (the same boxes)
     LoadAreas();
+    KeepSpotterMemory(spotterHere);
     u64 t1 = osGetTime();
     const u32 largestBefore = LargestFreeKB();  // for the log: room for the read's buffers?
     const u64 tMem = osGetTime();
     // the screens' pictures for the OCR, before anything is drawn on them
     const bool screens[2] = {mode != kReadBottom, mode != kReadTop};
     uint8_t *grey[2] = {nullptr, nullptr};
+    bool greyOwned[2] = {false, false};
     std::vector<kt::TextBox> boxes[2];
     DropPictures();  // the last lookup's (written out by now): their memory is the colour copies' first
     for (int s = 0; s < 2; s++)
         if (screens[s])  // the spotter and an area need no boxes
-            grey[s] = ScreenGrey(s, boxes[s], !g_area[s].set && !spot);
+            grey[s] = ScreenGrey(s, boxes[s], greyOwned[s], !g_area[s].set && !spot);
     const u64 tBoxes = osGetTime();
     // then the game's screens as they are, for drawing under the lookup and the card's
     // screenshot (after the colour copies above are freed: the pictures take their place): the
@@ -1541,7 +1742,8 @@ static bool ReadScreens(int mode, std::vector<std::string> &blocks, std::string 
                          (unsigned long)(HeapFree() / 1024), (unsigned long)LargestFreeKB(), (unsigned long)largestBefore,
                          (unsigned)blocks.size(), blocks.size() == 1 ? "" : "s") +
            first);
-    for (int s = 0; s < 2; s++) free(grey[s]);
+    for (int s = 0; s < 2; s++)
+        if (greyOwned[s]) free(grey[s]);
     return any;
 }
 
@@ -1600,9 +1802,12 @@ static void ReadAndLookUp(int mode) {
     g_shotKept = false;
     std::vector<std::string> blocks;
     std::string error;
+    g_logHold = true;  // until the lookup is drawn (RunLookupView), or below
     if (!OpenDict()) {
+        FlushLog();
         Notice("Kotoba3DS", g_dictError);
     } else if (!ReadScreens(mode, blocks, error)) {
+        FlushLog();
         Notice("Couldn't read the screen", error + "\n\n(The screen is saved as shots/failed_*.qoi on the SD card.)");
         std::string ts = Timestamp(), name = "failed_";
         for (char c : ts) name += (c == ' ') ? '_' : (c == ':' ? '-' : c);
@@ -1611,6 +1816,7 @@ static void ReadAndLookUp(int mode) {
         g_viewOpenedAt = osGetTime();
         OpenLookup(blocks, g_readBottom && g_textOnTop);
     }
+    FlushLog();  // (written already when the lookup opened)
     RestoreScreens();
     WriteScreenshotLater();  // the game goes on while it is written
     g_lookupShot = "";
@@ -1623,6 +1829,23 @@ static void ReadAndLookUp(int mode) {
 // ---------------------------------------------------------------------------
 // Anki cards: saved words to tools/ocr_server.py on the PC, all at once from the menu
 // ---------------------------------------------------------------------------
+// kt::netStart, with what the heap looked like in the log: "not enough memory for networking"
+// after a long session came from a heap with room left but none of it in one piece.
+static bool NetStart(std::string &error) {
+    u32 freeKB = HeapFree() / 1024, largestKB = LargestFreeKB();
+    bool ok = kt::netStart(error);
+    if (ok)
+        LogOcr(Utils::Format("net: started with a %lu KB block%s (heap free %lu KB, largest %lu KB)",
+                             (unsigned long)(kt::netBufferSize() / 1024),
+                             kt::netInLentMemory() ? " in the recognizer's memory" : "",
+                             (unsigned long)freeKB,
+                             (unsigned long)largestKB));
+    else
+        LogOcr(Utils::Format("net: not started (heap free %lu KB, largest %lu KB): %s", (unsigned long)freeKB,
+                             (unsigned long)largestKB, error.c_str()));
+    return ok;
+}
+
 // Saved address first, then automatic search. Call between netStart()/netStop().
 static bool ResolveServer(std::string &host, int &port, std::string &error) {
     std::string pingErr;
@@ -1703,7 +1926,11 @@ static void MakeCards() {
     DrawMenu(m);
     std::string err, host;
     int port = kPcPort;
-    if (!kt::netStart(err) || !ResolveServer(host, port, err)) {
+    if (!NetStart(err)) {  // nothing to do with the PC: say so, not "start ocr_server.py"
+        Notice("Make Anki cards", "Couldn't start networking: " + err, kCardsHelp);
+        return;
+    }
+    if (!ResolveServer(host, port, err)) {
         kt::netStop();
         Notice("Make Anki cards",
                "Couldn't reach your PC:\n" + err +
@@ -1754,6 +1981,7 @@ static void MakeCards() {
     }
     WriteWholeFile(kLogPath, out);
     if (!cards.empty()) {
+        CloseKnown();  // it's searched where it is: closed while it grows
         File f;
         if (File::Open(f, kKnownPath, File::WRITE | File::CREATE | File::APPEND) == File::SUCCESS) {
             f.Write(cards.data(), cards.size());
@@ -1791,8 +2019,8 @@ static void KnownWordsMenu() {
         if (c == 1) {
             if (Ask("Known words", "Forget the words of your Anki cards? (Saved words stay green.)",
                     {"Forget them", "Keep them"}) == 0) {
+                CloseKnown();
                 File::Remove(kKnownPath);
-                g_knownLoaded = false;
                 LoadKnown();
             }
             continue;
@@ -1802,28 +2030,45 @@ static void KnownWordsMenu() {
         m.setHelp(kKnownHelp);
         m.setMessage("Looking for your PC...");
         DrawMenu(m);
-        g_known.clear();  // room for the new list
-        g_knownLoaded = false;
-        std::string err, host, reply;
+        CloseKnown();  // known.txt is replaced below
+        std::string err, host;
         int port = kPcPort;
-        bool ok = kt::netStart(err) && ResolveServer(host, port, err);
+        bool ok = NetStart(err) && ResolveServer(host, port, err);
+        uint64_t got = 0;
         if (ok) {
             m.setMessage("Getting the words of your Anki cards from " + g_server + "...\n\n(A big collection takes a moment.)");
             DrawMenu(m);
             kt::MemReader none("");
-            ok = kt::netPost(host, port, "/known", {}, none, 1500, 60000, reply, err, kKnownMax + 64);
+            KnownFileSink *sink = new (std::nothrow) KnownFileSink();  // 16 KB: not on the stack
+            if (!sink) {
+                ok = false;
+                err = "not enough memory";
+            } else {
+                ok = kt::netPostToSink(host, port, "/known", {}, none, 1500, 60000, *sink, err, 64ull << 20);
+                const bool written = sink->finish();
+                if (sink->oldServer) err = "the PC's ocr_server.py is too old: update it (it comes with this release)";
+                else if (sink->failed || (ok && !written)) err = "could not write " + std::string(kKnownTmpPath);
+                if (sink->oldServer || sink->failed || !written) ok = false;
+                if (ok && sink->headLen < 7) {
+                    ok = false;
+                    err = "the PC's ocr_server.py is too old: update it (it comes with this release)";
+                }
+                got = sink->written;
+                delete sink;
+            }
         }
         kt::netStop();
-        if (ok && reply.compare(0, 7, "KNOWN1\n") != 0) {
-            ok = false;
-            err = "the PC's ocr_server.py is too old: update it (it comes with this release)";
+        if (ok) {  // the whole list is in known.tmp: it takes known.txt's place
+            File::Remove(kKnownPath);
+            if (File::Rename(kKnownTmpPath, kKnownPath) != File::SUCCESS) {
+                ok = false;
+                err = "could not write " + std::string(kKnownPath);
+            }
+        } else {
+            File::Remove(kKnownTmpPath);  // a part of a list is no use: the old known.txt stays
         }
-        if (ok && !WriteWholeFile(kKnownPath, reply.substr(7))) {
-            ok = false;
-            err = "could not write " + std::string(kKnownPath);
-        }
-        reply.clear();
-        reply.shrink_to_fit();
+        LogOcr(Utils::Format("known: from the PC %s, %lu KB written to the card", ok ? "done" : "failed",
+                             (unsigned long)(got / 1024)) + (ok ? std::string() : ": " + err));
         LoadKnown();
         if (!ok) {
             Notice("Known words", "Couldn't get the list:\n" + err, kKnownHelp);
@@ -1831,7 +2076,7 @@ static void KnownWordsMenu() {
         }
         Notice("Known words",
                Utils::Format("%u words with Anki cards. They show in green in lookups.", (unsigned)g_knownFromAnki) +
-                   (g_known.truncated() ? "\n\n(The list is too long for the 3DS: only its first part is used.)" : ""),
+                   (g_known.spillDropped() ? "\n\n(Part of the list wasn't in order and is left out: get it from your PC again.)" : ""),
                kKnownHelp);
         return;
     }
@@ -1973,7 +2218,7 @@ static void ChoosePc() {
             DrawMenu(m);
             std::string host;
             int port = kPcPort;
-            bool ok = kt::netStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
+            bool ok = NetStart(err) && kt::netDiscover(kPcPort, 2000, host, port, err);
             kt::netStop();
             if (ok) {
                 g_server = host + Utils::Format(":%d", port);
@@ -1993,7 +2238,7 @@ static void ChoosePc() {
                 } else {
                     g_server = host + Utils::Format(":%d", port);
                     SaveSettings();
-                    bool ok = kt::netStart(err) && kt::netPing(host, port, 2000, err);
+                    bool ok = NetStart(err) && kt::netPing(host, port, 2000, err);
                     kt::netStop();
                     Notice("PC", ok ? "Connected to " + g_server : "Saved " + g_server + ", but it didn't answer:\n" + err);
                 }
@@ -2108,12 +2353,13 @@ static void Settings() {
             "even when the game wrote it in kana (ちょっと -> 一寸). As in the game: in kanji only when "
             "the game wrote it in kanji, else in kana (たべた -> たべる).\n\n"
             "A,  or : change.";
-        items[kFast].label = "Fast mode";
+        items[kFast].label = "Text boxes only";
         items[kFast].value = g_fastMode ? "on" : "off";
         items[kFast].help =
-            "On: looks only for text boxes of one flat colour (most games' dialogue boxes) and reads "
-            "their lines: quicker, but text out in the scene, menus and shaded bubbles may be missed or "
-            "read in part. Off: finds every line on the screen with the text spotter.\n\nA,  or : change.";
+            "On: reads only text boxes of one flat colour (most games' dialogue boxes), so nothing else "
+            "on the screen gets in, but text out in the scene, menus and shaded bubbles may be missed or "
+            "read in part. It may be slightly faster, but only by very little now. Off: finds every line "
+            "on the screen with the text spotter.\n\nA,  or : change.";
         items[kArea].label = "Reading area";
         items[kArea].value = AreaSummary();
         items[kArea].help =
@@ -2435,7 +2681,7 @@ void PatchProcess(FwkSettings &settings) {
 
 
 int main(void) {
-    PluginMenu *menu = new PluginMenu("Kotoba3DS", 1, 1, 0,  // the version: as in Kotoba3DS.plgInfo
+    PluginMenu *menu = new PluginMenu("Kotoba3DS", 1, 2, 0,  // the version: as in Kotoba3DS.plgInfo
                                       "In-game Japanese dictionary that reads the screen and saves words for Anki.");
     menu->SynchronizeWithFrame(true);
     menu->OnOpening = OnMenuOpening;  // Select: the plugin's own menu, not CTRPF's list
@@ -2445,6 +2691,8 @@ int main(void) {
     LoadSettings();
     LogOcr(Utils::Format("start: game %s, plugin heap %lu KB, heap free %lu KB", TitleIdHex().c_str(),
                          (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(HeapFree() / 1024)));
+    // no networking block kept any more: after the first read the socket service borrows the recognizer's memory
+    // (LendReaderMemory); before it, netStart takes a block of the moment while the heap is still in one piece
     {   // CTRPF's own screenshot hotkey stays off: the plugin makes its screenshots itself
         bool *enabled = nullptr;
         u32 *hotkey = nullptr;

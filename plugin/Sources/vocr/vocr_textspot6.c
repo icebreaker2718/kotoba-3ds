@@ -231,8 +231,21 @@ static int32_t ts_smlad(uint32_t a, uint32_t b, int32_t acc)
 #define ts_ror8(x) (((uint32_t)(x) >> 8) | ((uint32_t)(x) << 24))
 #if defined(__ARM_FEATURE_SAT) && !defined(VOCR_SIMD32_EMULATE)
 #define ts_ssat8(x) __ssat((x), 8)
+#define ts_usat7(x) ((int32_t)__usat((x), 7))
 #else
 static int32_t ts_ssat8(int32_t x) { return x < -128 ? -128 : x > 127 ? 127 : x; }
+static int32_t ts_usat7(int32_t x) { return x < 0 ? 0 : x > 127 ? 127 : x; }
+#endif
+/* Kotoba3DS: requant() in 32-bit steps for a channel whose shift is 33 or more and whose bias + sum fits int32
+ * (Chan.fast; every channel of the shipped spotter): floor((b m + 2^(sh-1) + a m) / 2^32) is
+ * floor((a + b) m / 2^32) + 2^(sh-33) (an integer added passes through the floor), the high word of one
+ * multiply, so the code is (hi + r) >> s, r = 2^(sh-33), s = sh - 32, then saturated: to int8, or with lo = 0
+ * (ReLU: max(0, ssat8(v)) is a saturation to 0..127) by one USAT. The same values as requant(). */
+#define TS_RQ32(A, B, M, R, S) (((int32_t)(((int64_t)((A) + (B)) * (M)) >> 32) + (R)) >> (S))
+#if defined(__GNUC__)
+typedef uint32_t ts_word __attribute__((may_alias));   /* a word read from int8 data */
+#else
+typedef uint32_t ts_word;
 #endif
 #else
 #define TS_SIMD32 0
@@ -279,16 +292,9 @@ static int32_t rds32(const unsigned char *p)
     return v < 0x80000000u ? (int32_t)v : -(int32_t)(0xFFFFFFFFu - v) - 1;
 }
 
-static uint32_t crc32_ieee(const unsigned char *p, size_t n)
-{
-    uint32_t c = 0xFFFFFFFFu;
-    while (n--) {
-        int b;
-        c ^= *p++;
-        for (b = 0; b < 8; b++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
-    }
-    return ~c;
-}
+/* Kotoba3DS: vocr.c's table-driven CRC-32 (the same values as the bitwise loop, several times faster) */
+uint32_t vocr__crc32_ieee(const unsigned char *p, size_t n);
+#define crc32_ieee vocr__crc32_ieee
 
 /* [off, off + size) inside the data part of the blob, off 4-byte aligned (twin: textdet_twin.Model). */
 static int section_ok(uint32_t off, uint32_t size, uint32_t data, uint32_t total)
@@ -1165,6 +1171,7 @@ typedef struct {
     unsigned ncand, ctrunc;
     unsigned char *grp;         /* the blocks' scratch (Group): the arena's base, or (a VTMS network) the stack's */
     /* a VTMS network */
+    const vocr_textspot6_par *par;   /* Kotoba3DS: a team for the 3x3 layers' rows, or NULL */
     unsigned char *stack;       /* the slots' stack */
     uint32_t *slot_off;         /* each slot's offset from it */
     int8_t *f8;                 /* map 0's slot */
@@ -1383,6 +1390,17 @@ static Acc acc_zero(void)
 static void store_acc(Acc a, const Chan *c, int32_t lo, int8_t *out, unsigned n)
 {
     unsigned p;
+#if TS_SIMD32 && defined(__GNUC__)
+    if (c->fast && c->sh >= 33) {
+        const int32_t b = c->b, m = c->m, r = (int32_t)1 << (c->sh - 33);
+        const unsigned s = (unsigned)(c->sh - 32);
+        if (lo == 0)
+            for (p = 0; p < n; p++) out[p] = (int8_t)ts_usat7(TS_RQ32(a.v[p], b, m, r, s));
+        else
+            for (p = 0; p < n; p++) out[p] = (int8_t)ts_ssat8(TS_RQ32(a.v[p], b, m, r, s));
+        return;
+    }
+#endif
     if (c->sh >= 32) {                        /* the usual case: the high word, then a 32-bit shift */
         int64_t bq = bq_of(c);
         int32_t m = c->m;
@@ -1433,6 +1451,121 @@ static void name(const int8_t *w, const Chan *ch, int32_t lo, unsigned cin, unsi
 }
 K3_BLOCK(k3_block_s1, 1u)
 K3_BLOCK(k3_block_s2, 2u)
+
+#if TS_SIMD32
+/* Kotoba3DS: one output channel's 8 sums of a 3x3 block with one input plane (a depthwise layer, or a layer of one
+ * input channel), out8[p] = sum over the valid rows ky and taps kx of w9[3 ky + kx] * rows3[ky][S p + kx d]
+ * (rows3[ky] NULL: the row is outside the input, its weights skipped). The scalar K3_BLOCK keeps its 8 sums in
+ * memory (spilled: ~4.5 instructions a multiply-accumulate); the ARM version keeps them in r4-r11, one LDRSB and one
+ * SMLABB each (the same exact integer products and sums). */
+#if defined(__ARM_FEATURE_SIMD32) && defined(__arm__) && !defined(__thumb__) && !defined(VOCR_SIMD32_EMULATE)
+void vocr__k3x8_s1(const int8_t *const *rows3, const int8_t *w9, unsigned d, int32_t *out8);
+void vocr__k3x8_s2(const int8_t *const *rows3, const int8_t *w9, unsigned d, int32_t *out8);
+/* r0 the tap's first byte, r1 its weight, r2 r3 bytes, r4-r11 the sums, r12 d, lr the next weight; [sp] out8,
+ * [sp, #4] rows3 */
+__asm__(".pushsection .text.vocr__k3x8,\"ax\",%progbits\n"
+        ".syntax unified\n"
+        ".arm\n"
+        ".macro VOCR_K3_TAP s\n"
+        "    ldrsb   r1, [lr], #1\n"
+        "    ldrsb   r2, [r0]\n"
+        "    ldrsb   r3, [r0, #(\\s)]\n"
+        "    smlabb  r4, r2, r1, r4\n"
+        "    ldrsb   r2, [r0, #(2 * \\s)]\n"
+        "    smlabb  r5, r3, r1, r5\n"
+        "    ldrsb   r3, [r0, #(3 * \\s)]\n"
+        "    smlabb  r6, r2, r1, r6\n"
+        "    ldrsb   r2, [r0, #(4 * \\s)]\n"
+        "    smlabb  r7, r3, r1, r7\n"
+        "    ldrsb   r3, [r0, #(5 * \\s)]\n"
+        "    smlabb  r8, r2, r1, r8\n"
+        "    ldrsb   r2, [r0, #(6 * \\s)]\n"
+        "    smlabb  r9, r3, r1, r9\n"
+        "    ldrsb   r3, [r0, #(7 * \\s)]\n"
+        "    smlabb  r10, r2, r1, r10\n"
+        "    add     r0, r0, r12\n"
+        "    smlabb  r11, r3, r1, r11\n"
+        ".endm\n"
+        ".macro VOCR_K3_ROW s, k\n"
+        "    ldr     r0, [sp, #4]\n"
+        "    ldr     r0, [r0, #(4 * \\k)]\n"
+        "    cmp     r0, #0\n"
+        "    addeq   lr, lr, #3\n"
+        "    beq     1f\n"
+        "    VOCR_K3_TAP \\s\n"
+        "    VOCR_K3_TAP \\s\n"
+        "    VOCR_K3_TAP \\s\n"
+        "1:\n"
+        ".endm\n"
+        ".macro VOCR_K3_FN name, s\n"
+        ".align 2\n"
+        ".global \\name\n"
+        ".type \\name, %function\n"
+        "\\name:\n"
+        "    push    {r4-r11, lr}\n"
+        "    sub     sp, sp, #8\n"
+        "    str     r3, [sp]\n"
+        "    str     r0, [sp, #4]\n"
+        "    mov     r12, r2\n"
+        "    mov     lr, r1\n"
+        "    mov     r4, #0\n"
+        "    mov     r5, #0\n"
+        "    mov     r6, #0\n"
+        "    mov     r7, #0\n"
+        "    mov     r8, #0\n"
+        "    mov     r9, #0\n"
+        "    mov     r10, #0\n"
+        "    mov     r11, #0\n"
+        "    VOCR_K3_ROW \\s, 0\n"
+        "    VOCR_K3_ROW \\s, 1\n"
+        "    VOCR_K3_ROW \\s, 2\n"
+        "    ldr     r3, [sp]\n"
+        "    stmia   r3, {r4-r11}\n"
+        "    add     sp, sp, #8\n"
+        "    pop     {r4-r11, pc}\n"
+        ".size \\name, .-\\name\n"
+        ".endm\n"
+        "    VOCR_K3_FN vocr__k3x8_s1, 1\n"
+        "    VOCR_K3_FN vocr__k3x8_s2, 2\n"
+        ".purgem VOCR_K3_TAP\n"
+        ".purgem VOCR_K3_ROW\n"
+        ".purgem VOCR_K3_FN\n"
+        ".popsection\n");
+#define ts_k3x8_s1 vocr__k3x8_s1
+#define ts_k3x8_s2 vocr__k3x8_s2
+#else
+static void ts_k3x8(const int8_t *const *rows3, const int8_t *w9, unsigned d, int32_t *out8, unsigned S)
+{
+    unsigned ky, kx, p;
+    for (p = 0; p < 8u; p++) out8[p] = 0;
+    for (ky = 0; ky < 3u; ky++) {
+        if (!rows3[ky]) continue;
+        for (kx = 0; kx < 3u; kx++)
+            for (p = 0; p < 8u; p++) out8[p] += (int32_t)w9[3u * ky + kx] * rows3[ky][S * p + kx * d];
+    }
+}
+static void ts_k3x8_s1(const int8_t *const *r, const int8_t *w, unsigned d, int32_t *o) { ts_k3x8(r, w, d, o, 1u); }
+static void ts_k3x8_s2(const int8_t *const *r, const int8_t *w, unsigned d, int32_t *o) { ts_k3x8(r, w, d, o, 2u); }
+#endif
+
+/* K3_BLOCK for one input plane per output channel (depthwise, or cin = 1), through ts_k3x8 */
+static void k3_block_one(const int8_t *w, const Chan *ch, int32_t lo, unsigned cin, unsigned cout, int depthwise,
+                         const int8_t *const *rows, const int *valid, size_t plane, unsigned d, unsigned j0,
+                         int8_t *out, size_t ostride, unsigned n, unsigned S)
+{
+    unsigned c, ky;
+    for (c = 0; c < cout; c++) {
+        const size_t first = (depthwise ? c : 0u) * plane + (size_t)j0 * S;
+        const int8_t *r3[3];
+        Acc a;
+        for (ky = 0; ky < 3u; ky++) r3[ky] = valid[ky] ? rows[ky] + first : NULL;
+        if (S == 1u) ts_k3x8_s1(r3, w + 9u * c, d, a.v);
+        else ts_k3x8_s2(r3, w + 9u * c, d, a.v);
+        store_acc(a, &ch[c], lo, out + c * ostride, n);
+    }
+    (void)cin;
+}
+#endif
 
 /* A block of a 1x1 layer: in[q * BLK + p] -> out[c * ostride + p] (p < n). */
 static void k1_block_c(const int8_t *w, const Chan *ch, int32_t lo, unsigned cin, unsigned cout, const int8_t *in,
@@ -1493,20 +1626,71 @@ static void k1_block(const int8_t *w, const Chan *ch, int32_t lo, unsigned cin, 
         k1_block_c(w, ch, lo, cin, cout, in, out, ostride, n);
         return;
     }
-    for (i = 0; i < BLK / 2u; i++) {
-        uint32_t *d = xq[i];
-        for (q = 0; q < cin; q += 2u, d += 2) {
-            const int8_t *r0 = in + (size_t)q * BLK + 2u * i, *r1 = r0 + BLK;
-            d[0] = (uint32_t)(uint16_t)(int16_t)r0[0] | (uint32_t)(int32_t)r1[0] << 16;
-            d[1] = (uint32_t)(uint16_t)(int16_t)r0[1] | (uint32_t)(int32_t)r1[1] << 16;
+    if (!((uintptr_t)in & 3u)) {
+        /* Kotoba3DS: a pair of input channels' 4 pixels at a time: words a = bytes (q: p0 p1 p2 p3) and b = (q + 1:
+         * p0 p1 p2 p3); PKHBT a, b << 16 = (q:p0, q:p1, q+1:p0, q+1:p1), whose SXTB16 is pixel p0's word and SXTB16
+         * of it ROR 8 pixel p1's (PKHTB b, a >> 16 the same for p2, p3). The same words as below. */
+        for (q = 0; q < cin; q += 2u) {
+            const ts_word *r0 = (const ts_word *)(const void *)(in + (size_t)q * BLK);
+            const ts_word *r1 = (const ts_word *)(const void *)(in + (size_t)(q + 1u) * BLK);
+            for (i = 0; i < BLK / 2u; i += 2u) {
+                const uint32_t a = r0[i / 2u], b = r1[i / 2u];
+                const uint32_t lo2 = (a & 0xFFFFu) | (b << 16), hi2 = (a >> 16) | (b & 0xFFFF0000u);
+                xq[i][q] = ts_sxtb16(lo2);
+                xq[i][q + 1u] = ts_sxtb16(ts_ror8(lo2));
+                xq[i + 1u][q] = ts_sxtb16(hi2);
+                xq[i + 1u][q + 1u] = ts_sxtb16(ts_ror8(hi2));
+            }
         }
-        d[0] = d[1] = 0;
+        for (i = 0; i < BLK / 2u; i++) xq[i][cin] = xq[i][cin + 1u] = 0;
+    } else {
+        for (i = 0; i < BLK / 2u; i++) {
+            uint32_t *d = xq[i];
+            for (q = 0; q < cin; q += 2u, d += 2) {
+                const int8_t *r0 = in + (size_t)q * BLK + 2u * i, *r1 = r0 + BLK;
+                d[0] = (uint32_t)(uint16_t)(int16_t)r0[0] | (uint32_t)(int32_t)r1[0] << 16;
+                d[1] = (uint32_t)(uint16_t)(int16_t)r0[1] | (uint32_t)(int32_t)r1[1] << 16;
+            }
+            d[0] = d[1] = 0;
+        }
     }
     for (nb = 0; nb < cout / 8u; nb++) {
         const int8_t *wb = w + (size_t)nb * 8u * cin;
         const Chan *cb = ch + nb * 8u;
         int64_t bq[8];
         int fast = n == BLK;   /* every channel's shift 32 or more (store_acc's usual case), a whole block */
+        int rq32 = 1;          /* every channel TS_RQ32's (shift 33 or more, bias + sum in int32) */
+        for (j = 0; j < 8u; j++) rq32 = rq32 && cb[j].sh >= 33 && cb[j].fast;
+        if (rq32) {
+            /* Kotoba3DS: the block's pixel pairs first, then channel by channel with its constants loaded once
+             * (its pixels are bytes in a row of out); only the n pixels there are written */
+            int32_t sb[BLK / 2u][16];
+            const unsigned np2 = (n + 1u) / 2u;
+            for (i = 0; i < np2; i++) ts_k2x8(wb, xq[i], np, sb[i]);
+            for (j = 0; j < 8u; j++) {
+                const int32_t b = cb[j].b, m = cb[j].m, r = (int32_t)1 << (cb[j].sh - 33);
+                const unsigned sh = (unsigned)(cb[j].sh - 32);
+                int8_t *oc = out + (size_t)(nb * 8u + j) * ostride;
+                if (n == BLK) {
+                    if (lo == 0)
+                        for (i = 0; i < BLK / 2u; i++) {
+                            oc[2u * i] = (int8_t)ts_usat7(TS_RQ32(sb[i][j], b, m, r, sh));
+                            oc[2u * i + 1u] = (int8_t)ts_usat7(TS_RQ32(sb[i][8u + j], b, m, r, sh));
+                        }
+                    else
+                        for (i = 0; i < BLK / 2u; i++) {
+                            oc[2u * i] = (int8_t)ts_ssat8(TS_RQ32(sb[i][j], b, m, r, sh));
+                            oc[2u * i + 1u] = (int8_t)ts_ssat8(TS_RQ32(sb[i][8u + j], b, m, r, sh));
+                        }
+                } else {
+                    for (p = 0; p < n; p++) {
+                        const int32_t v = TS_RQ32(sb[p / 2u][8u * (p & 1u) + j], b, m, r, sh);
+                        oc[p] = (int8_t)(lo == 0 ? ts_usat7(v) : ts_ssat8(v));
+                    }
+                }
+            }
+            continue;
+        }
         for (j = 0; j < 8u; j++) {
             bq[j] = bq_of(&cb[j]);
             fast = fast && cb[j].sh >= 32;
@@ -1929,26 +2113,42 @@ static void delivered(Net *t, unsigned next, unsigned i)
     }
 }
 
-/* Output row next_out of the 3x3 layer l, through the 1x1 layers after it, BLK pixels at a time. */
-static void produce(Net *t, unsigned l)
-{
-    const vocr_textspot_layer *L = &t->m->layers[l];
-    Run *r = &t->run[l];
-    unsigned s = L->stride, d = L->dil, nx = r->next, i = r->next_out, ky, j0;
+/* One output row's work, shared by its blocks (Kotoba3DS: a block is a team's item) */
+typedef struct {
+    const Net *t;
+    const vocr_textspot_layer *L;
+    const Run *r;
+    unsigned l, s, d, nx;
     const int8_t *rows[3];
     int valid[3];
-    const Chan *ch = t->chan + r->chan;
-    int32_t lo = L->relu ? 0 : -128;
-    int8_t *dst = dest_row(t, nx), *blk = t->tmp;
-    size_t ds = dest_stride(t, nx), bs = (size_t)BLK * t->maxch;
-    for (ky = 0; ky < 3u; ky++) {             /* input row i s + (ky - 1) d; the centre one always exists */
-        unsigned y = i * s + ky * d;
-        valid[ky] = y >= d && y - d < r->h_in;
-        rows[ky] = ring_row(t, l, valid[ky] ? y - d : i * s);
-    }
-    for (j0 = 0; j0 < r->w_out; j0 += BLK) {
+    const Chan *ch;
+    int32_t lo;
+    int8_t *dst;
+    size_t ds, bs;
+} RowJob;
+
+/* Block j0 of the row into its columns of dst, blk: BLK x maxch x 3 bytes of scratch */
+static void row_block(const RowJob *jb, unsigned j0, int8_t *blk)
+{
+    const Net *t = jb->t;
+    const vocr_textspot_layer *L = jb->L;
+    const Run *r = jb->r;
+    const unsigned l = jb->l, s = jb->s, d = jb->d, nx = jb->nx;
+    const int8_t *const *rows = jb->rows;
+    const int *valid = jb->valid;
+    const Chan *ch = jb->ch;
+    const int32_t lo = jb->lo;
+    int8_t *dst = jb->dst;
+    const size_t ds = jb->ds, bs = jb->bs;
+    {
         unsigned n = min_u(BLK, r->w_out - j0);
         int8_t *o = nx == l + 1u ? dst + j0 : blk;
+#if TS_SIMD32
+        if ((L->kind == 1u || L->cin == 1u) && (s == 1u || s == 2u))  /* one input plane per output channel */
+            k3_block_one(weights(L), ch, lo, L->cin, L->cout, L->kind == 1u, rows, valid, r->plane, d, j0, o,
+                         nx == l + 1u ? ds : BLK, nx == l + 1u ? n : BLK, s);
+        else
+#endif
         if (s == 1u)
             k3_block_s1(weights(L), ch, lo, L->cin, L->cout, L->kind == 1u, rows, valid, r->plane, d, j0, o,
                         nx == l + 1u ? ds : BLK, nx == l + 1u ? n : BLK);
@@ -1957,8 +2157,48 @@ static void produce(Net *t, unsigned l)
                         nx == l + 1u ? ds : BLK, nx == l + 1u ? n : BLK);
         if (nx != l + 1u) chain(t, l + 1u, nx, blk, blk + bs, blk + 2u * bs, dst + j0, ds, n);
     }
+}
+
+static void row_item(void *ctx, unsigned i, unsigned worker)
+{
+    const RowJob *jb = (const RowJob *)ctx;
+    const vocr_textspot6_par *par = jb->t->par;
+    int8_t *blk = worker && par && worker < par->workers && par->tmp[worker] ? (int8_t *)par->tmp[worker] : jb->t->tmp;
+    row_block(jb, i * BLK, blk);
+}
+
+/* Output row next_out of the 3x3 layer l, through the 1x1 layers after it, BLK pixels at a time (with a team,
+ * its blocks shared out). */
+static void produce(Net *t, unsigned l)
+{
+    const vocr_textspot_layer *L = &t->m->layers[l];
+    Run *r = &t->run[l];
+    unsigned i = r->next_out, ky, j0, nb;
+    RowJob jb;
+    jb.t = t;
+    jb.L = L;
+    jb.r = r;
+    jb.l = l;
+    jb.s = L->stride;
+    jb.d = L->dil;
+    jb.nx = r->next;
+    jb.ch = t->chan + r->chan;
+    jb.lo = L->relu ? 0 : -128;
+    jb.dst = dest_row(t, jb.nx);
+    jb.ds = dest_stride(t, jb.nx);
+    jb.bs = (size_t)BLK * t->maxch;
+    for (ky = 0; ky < 3u; ky++) {             /* input row i s + (ky - 1) d; the centre one always exists */
+        unsigned y = i * jb.s + ky * jb.d;
+        jb.valid[ky] = y >= jb.d && y - jb.d < r->h_in;
+        jb.rows[ky] = ring_row(t, l, jb.valid[ky] ? y - jb.d : i * jb.s);
+    }
+    nb = (r->w_out + BLK - 1u) / BLK;
+    if (t->par && t->par->workers > 1u && t->par->for_each && nb > 1u && t->maxch <= 64u)
+        t->par->for_each(t->par->team, nb, row_item, &jb);
+    else
+        for (j0 = 0; j0 < r->w_out; j0 += BLK) row_block(&jb, j0, t->tmp);
     r->next_out++;
-    delivered(t, nx, i);
+    delivered(t, jb.nx, i);
 }
 
 static int producible(const Net *t, unsigned l)
@@ -3128,13 +3368,15 @@ static void clear(VocrTextspot6Set *out)
 }
 
 static int spot(const vocr_textspot6 *m, const Src *s, unsigned fw, unsigned fh, unsigned bpp, unsigned flags,
-                void *arena, size_t arena_bytes, VocrTextspot6Set *out, vocr_textspot_map_row hook, void *user)
+                void *arena, size_t arena_bytes, VocrTextspot6Set *out, vocr_textspot_map_row hook, void *user,
+                const vocr_textspot6_par *par)
 {
     Plan p;
     Net t;
     unsigned y, k, force = forced(flags);
     int rc;
     clear(out);
+    t.par = NULL;
     if (!loaded(m) || !side_ok(fw, fh) || (bpp != VOCR_LINES_GREY && bpp != VOCR_LINES_RGBA) || !arena ||
         (flags & ~VOCR_TEXTSPOT6_FLAGS) || force == 3u)
         return VOCR_LINES_E_ARG;
@@ -3161,6 +3403,7 @@ static int spot(const vocr_textspot6 *m, const Src *s, unsigned fw, unsigned fh,
         t.height = p.f == 2u ? (fh + 1u) / 2u : fh;
         t.hook = hook;
         t.user = user;
+        t.par = par;
         setup(&t, &p);
         for (y = 0; y < fh; y++) {
             rc = feed(&t, s, y, bpp);
@@ -3200,7 +3443,22 @@ int vocr_textspot6_find(const vocr_textspot6 *m, const VocrLinesImage *im, unsig
     }
     s.im = im;
     s.rows = NULL;
-    return spot(m, &s, im->width, im->height, im->bpp, flags, arena, arena_bytes, out, NULL, NULL);
+    return spot(m, &s, im->width, im->height, im->bpp, flags, arena, arena_bytes, out, NULL, NULL, NULL);
+}
+
+int vocr_textspot6_find_par(const vocr_textspot6 *m, const VocrLinesImage *im, unsigned flags, void *arena,
+                            size_t arena_bytes, VocrTextspot6Set *out, const vocr_textspot6_par *par)
+{
+    Src s;
+    if (!out) return VOCR_LINES_E_ARG;
+    if (!image_ok(im)) {
+        clear(out);
+        return VOCR_LINES_E_ARG;
+    }
+    s.im = im;
+    s.rows = NULL;
+    if (par && (par->workers < 2u || par->workers > VOCR_TEXTSPOT6_PAR_MAX || !par->for_each)) par = NULL;
+    return spot(m, &s, im->width, im->height, im->bpp, flags, arena, arena_bytes, out, NULL, NULL, par);
 }
 
 int vocr_textspot6_find_rows(const vocr_textspot6 *m, const VocrLinesRows *src, unsigned flags, void *arena,
@@ -3214,7 +3472,7 @@ int vocr_textspot6_find_rows(const vocr_textspot6 *m, const VocrLinesRows *src, 
     }
     s.im = NULL;
     s.rows = src;
-    return spot(m, &s, src->width, src->height, src->bpp, flags, arena, arena_bytes, out, NULL, NULL);
+    return spot(m, &s, src->width, src->height, src->bpp, flags, arena, arena_bytes, out, NULL, NULL, NULL);
 }
 
 int vocr_textspot6_maps(const vocr_textspot6 *m, const VocrLinesImage *im, unsigned flags, void *arena,
@@ -3226,5 +3484,5 @@ int vocr_textspot6_maps(const vocr_textspot6 *m, const VocrLinesImage *im, unsig
     s.im = im;
     s.rows = NULL;
     return spot(m, &s, im->width, im->height, im->bpp, flags | VOCR_TEXTSPOT_NO_DARK, arena, arena_bytes, &out, row,
-                user);
+                user, NULL);
 }
