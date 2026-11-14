@@ -2,7 +2,7 @@ Author: Kotoba3DS
 
 Version: # Plugin version
     Major: 1
-    Minor: 1
+    Minor: 2
     Revision: 0
 
 Targets: # Low TitleId of games which are compatibles with this plugin (0 for all)
@@ -12,9 +12,10 @@ Title: Kotoba3DS
 Summary: In-game Japanese dictionary that saves words for Anki
 
 Description: |
-  Look up Japanese words while you play (romaji input, conjugated
-  forms, kanji by components) and save them with a screenshot.
-  tools/mine.py on your PC turns the saved words into Anki cards.
+  Reads the game's text on the console, looks words up in an
+  on-SD dictionary, and saves them with the sentence and a
+  screenshot. tools/ocr_server.py on your PC turns the saved
+  words into Anki cards.
 
 Compatibility: Any
 
