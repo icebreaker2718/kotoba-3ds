@@ -5,7 +5,7 @@ reads the text on the screen, you tap a word to look it up, and you can save it.
 script on your PC turns the saved words into Anki cards, each with the sentence and a
 screenshot of the game.
 
-It runs on a modded New 3DS / 2DS (or original 3DS) with Luma3DS, in any game. Reading and
+It runs on a modded New 3DS, New 3DS XL or New 2DS XL with Luma3DS, in any game. Reading and
 looking up happen on the console itself: no PC or internet needed while you play.
 
 **Latest version: 1.2.0.** Faster reading, installing over Wi-Fi with one zip, and no more
@@ -28,9 +28,9 @@ Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-
 ## What it does
 
 **On the 3DS**
-- **Reads the screen for you.** Press **ZL + ZR** (or any buttons you choose; an original 3DS,
-  which has no ZL / ZR, needs another hotkey set in the menu) and the game pauses while the 3DS reads the text, in about a quarter of a second on a New 3DS. The
-  touchscreen, or both screens, can be read too, each with its own hotkey.
+- **Reads the screen for you.** Press **ZL + ZR** (or any buttons you choose) and the game
+  pauses while the 3DS reads the text, in about a quarter of a second. The touchscreen, or both
+  screens, can be read too, each with its own hotkey.
 - **Finds text anywhere.** Dialogue boxes, speech bubbles, menus and subtitles over the game are
   all found. Furigana and the "next" arrow are left out, and the dictionary fixes kanji the
   reader wasn't sure of (造跡 → 遺跡).
@@ -56,15 +56,14 @@ Massive thanks go to bee-san and the [vita-ocr](https://github.com/bee-san/vita-
 2. **Turn on Luma's plugin loader:** open the Rosalina menu (**L + D-Pad Down + Select**) and set
    **Plugin loader: [Enabled]**.
 3. **Start a game**, wait a few seconds, and press **ZL + ZR** when there's text on the top
-   screen. (On an original 3DS, which has no ZL / ZR, press **Select** first and set another
-   hotkey for *Read the top screen*.) Tap a word to look it up, **A** to save it, **B** to go back to the game.
+   screen. Tap a word to look it up, **A** to save it, **B** to go back to the game.
 4. **Press Select** in a game for the plugin's menu: other hotkeys, reading modes, your saved
    words, and *Make Anki cards*.
 
 ## Install on the 3DS
 
-You need a 3DS with [Luma3DS](https://github.com/LumaTeam/Luma3DS) (custom firmware). Making
-Anki cards over Wi-Fi needs Luma v13.2 or newer.
+You need a New 3DS, New 3DS XL or New 2DS XL with [Luma3DS](https://github.com/LumaTeam/Luma3DS)
+(custom firmware). Making Anki cards over Wi-Fi needs Luma v13.2 or newer.
 
 Everything comes in one zip, **Kotoba3DS-SD.zip**, with the files already in their folders:
 the plugin, the dictionary (`dict.bin`, ~55 MB) and the OCR models.
@@ -191,7 +190,7 @@ the area.
 
 ### Good to know
 
-- **Speed:** while a lookup is open, a New 3DS / 2DS runs at full speed and uses all its CPU
+- **Speed:** while a lookup is open, the console runs at full speed and uses all its CPU
   cores to read; the game's own setting comes back when you close it.
 - **The OCR** is VOCR6 from bee-san's [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr),
   the same reader [Rubi](https://github.com/bee-san/Rubi_for_vita) uses on the PS Vita, trained
