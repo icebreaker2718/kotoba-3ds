@@ -44,7 +44,7 @@ fi
 # plugin has run on (CTRPF_COMMIT); if it is empty, the newest commit that still has the line, and its hash is
 # printed so it can be pinned.
 CTRPF_URL=https://gitlab.com/thepixellizeross/ctrpluginframework.git
-CTRPF_COMMIT=""
+CTRPF_COMMIT=96fd3d940be85f014fad21dc16c4fd305fa798ce  # 2026-10-26: what 1.1.0 and the 2026-11-09 test build (run on the console) were built on
 if [ ! -f "$DKP/libctrpf/lib/libctrpf.a" ]; then
   rm -rf ctrpf-src
   ok=0
