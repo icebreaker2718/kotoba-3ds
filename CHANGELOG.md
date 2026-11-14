@@ -4,8 +4,8 @@
 
 This release makes reading faster and fixes running out of memory in long sessions. You can
 download it from the [Releases page](https://github.com/icebreaker2718/kotoba-3ds/releases/latest);
-the version shows in Luma's plugin loader. Updating from 1.1.0 only needs the new plugin: see
-[UPDATING.md](UPDATING.md).
+the version shows in Luma's plugin loader. To update, extract Kotoba3DS-SD.zip onto your SD card:
+see [UPDATING.md](UPDATING.md).
 
 ### Install over Wi-Fi
 
