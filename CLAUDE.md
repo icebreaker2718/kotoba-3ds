@@ -420,6 +420,13 @@ works on the code.
   lines. OCR output identical on the 180 saved screens x 4 modes after the removal; test_ui / test_core / test_ocr_core /
   test_wrap pass. CHANGELOG's next-release entry gained the memory fixes (long sessions, Make Anki cards, long known
   lists). So everything listed above as on `alpha` up to here is on `test` too.
+- **1.2.0** (2026-11-14, owner's request): version set (plgInfo 1.2.0 + PluginMenu), plgInfo description brought up to
+  date; README rewritten (quick start, SD zip install, reading modes, step-by-step Anki setup, New 3DS models only),
+  UPDATING.md reduced to "extract Kotoba3DS-SD.zip from any version", CHANGELOG 1.2.0 entry (owner's edits in
+  01d637b / 590b87a are theirs) and 1.1.0 marked as superseded. alpha -> test -> main (merge). Releases still all go
+  out under the one tag `latest`, so 1.1.0's files are replaced (offered: a tag per version, not decided). Found while
+  rewriting the README, not fixed: `mine.py setup` with note_type "Kotoba3DS" creates the note type but doesn't save
+  KOTOBA_FIELDS to config.json, so cards would then fail (offered a fix); ocr_log.txt has no size cap (offered).
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
