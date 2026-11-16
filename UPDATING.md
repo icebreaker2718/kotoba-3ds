@@ -20,9 +20,3 @@ models, so your saved words, screenshots, known words and settings are kept.
   the standard one.
 - **If you installed the plugin for one game only** (`SD:/luma/plugins/<TitleID>/Kotoba3DS.3gx`),
   delete that copy: the zip puts the new plugin at `SD:/luma/plugins/default.3gx`.
-
-## If something goes wrong
-
-Send `SD:/3ds/kotoba3ds/ocr_log.txt` and, for a screen that was read wrong, its screenshot from
-`SD:/3ds/kotoba3ds/shots/` (press **Start** on the lookup screen to keep it). See also
-[Troubleshooting](README.md#troubleshooting).
