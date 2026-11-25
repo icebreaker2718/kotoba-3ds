@@ -26,6 +26,14 @@ jobs:
             exit 1
           fi
           cat build.log
+          # The owner's Luma reads plugin format 2 only: a build in another format (a different 3gxtool) must not
+          # get anywhere ("update the Luma plugin loader" on the console, alpha c11c624)
+          magic=$(head -c 8 plugin/Kotoba3DS.3gx)
+          echo "plugin format: $magic, $(stat -c %s plugin/Kotoba3DS.3gx) bytes"
+          if [ "$magic" != '3GX$0002' ]; then
+            echo "::error title=plugin format::Kotoba3DS.3gx is $magic, not 3GX\$0002: 3gxtool changed (see install-ctrpf.sh)"
+            exit 1
+          fi
 
       - name: Symbolize crash addresses
         if: hashFiles('.github/crash-addresses.txt') != ''

@@ -92,7 +92,17 @@ if ! command -v 3gxtool >/dev/null 2>&1; then
   ok=0
   for url in https://gitlab.com/thepixellizeross/3gxtool.git; do
     rm -rf 3gx-src
-    if git clone -q --depth 1 --recursive "$url" 3gx-src >clone.log 2>&1; then
+    if git clone -q --recursive "$url" 3gx-src >clone.log 2>&1; then
+      # 3gxtool's newer source writes plugin format 3 ("3GX$0003"), which the Luma on the owner's console refuses
+      # ("update the Luma plugin loader"; alpha c11c624, 2026-11-25, built here when pacman's server failed).
+      # So the source is taken from before format 3 came in: the parent of the first commit that mentions 0003.
+      first3=$(git -C 3gx-src log --reverse --format=%H -S'0003' -- . | head -1)
+      if [ -n "$first3" ]; then
+        git -C 3gx-src checkout -q "$first3^" && git -C 3gx-src submodule update -q --init --recursive
+        echo "3gxtool source: $(git -C 3gx-src log -1 --date=short --format='%h %ad %s') (before $(git -C 3gx-src log -1 --date=short --format='%h %ad' $first3), format 3)"
+      else
+        echo "3gxtool source: $(git -C 3gx-src log -1 --date=short --format='%h %ad %s') (no format 3 in its history)"
+      fi
       (
         cd 3gx-src
         ls -la

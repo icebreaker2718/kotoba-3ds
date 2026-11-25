@@ -487,6 +487,11 @@ works on the code.
     as chips described by the zip's tag bank (`read_tags`), plain-text definitions numbered as Yomitan lists them.
   - Stage 3 (pitch accent) will be built with **NHK 2016** (owner, 2026-11-25).
   - Unknown until the console: how long a switch takes (fences ~85 KB read from the SD card).
+  - **c11c624's plugin didn't load** ("update the Luma plugin loader", owner, 2026-11-25): devkitPro's pacman server
+    failed in that run, install-ctrpf.sh built 3gxtool from GitLab's newest source, which writes plugin format
+    `3GX$0003` (779053b, from pacman's 3gxtool: `3GX$0002`). The card was put back on 779053b. Fix: the source build
+    checks out the parent of the first commit that mentions 0003, and the plugin job fails unless the 3gx starts with
+    `3GX$0002` ("plugin format:" in its log). Same lesson as CTRPF: check the toolchain lines before a build goes out.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
