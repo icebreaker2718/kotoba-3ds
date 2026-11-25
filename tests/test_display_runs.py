@@ -82,6 +82,13 @@ gp = y.display_paragraphs(PLAIN)
 check([p.plain() for p in gp] == ["1. 一つ目強", "2. 二つ目", "and a plain line"], f"other dictionaries: lists numbered ({[p.plain() for p in gp]})")
 check(("text", y.S_KEYWORD, "強") in gp[0].items, "bold kept")
 
+# other dictionaries: definition tags as chips (described by the tag bank), plain definitions numbered
+names = y.rows_paragraphs([("surname", ["いちのせ", "いつえ"]), ("place", ["たなか"]), ("place", ["たなか"])],
+                          {"surname": ("name", "family or surname")})
+check([p.kind for p in names] == [y.P_GROUP, y.P_SENSE, y.P_SENSE, y.P_PLAIN], f"rows: tags, numbered, one-line, duplicate dropped ({names})")
+check(names[0].items[0] == ("chip", (y.TAG_OTHER, "surname", "surname", "family or surname")), "a tag's description from the tag bank")
+check(names[1].plain() == "1. いちのせ" and names[3].items[0][0] == "chip", "a single definition gets its tag on its line")
+
 # --- encoding
 tags = b.TagTable()
 runs = b.encode_runs(paras, tags)

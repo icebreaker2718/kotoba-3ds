@@ -62,8 +62,11 @@ bool Dictionary::open(Reader *r, std::string &error) {
     memoPool_.clear();
     memoOff_.clear();
     memoLen_.clear();
-    std::string().swap(fencePool_);
-    std::vector<uint32_t>().swap(fenceAt_);
+    // emptied, their memory kept: opening another dictionary file (Select on the lookup screen) reuses it
+    fencePool_.clear();
+    fenceAt_.clear();
+    radicals_.clear();
+    radicalsLoaded_ = false;
     if (!exactArena_.base) {  // the caches' blocks, once, while the heap is still in one piece
         exactArena_.base = (char *)malloc(kExactArenaBytes);
         exactArena_.cap = exactArena_.base ? kExactArenaBytes : 0;
@@ -105,25 +108,32 @@ bool Dictionary::open(Reader *r, std::string &error) {
         const uint32_t count = le32(h + 44), off = le32(h + 48);
         const uint32_t bytes = off > keyIdxOff_ && off < size_ ? size_ - off : 0;  // the last section
         bool ok = fenceStep_ > 0 && count > 0 && count == (keyCount_ + fenceStep_ - 1) / fenceStep_ && bytes >= count * 2u;
-        std::string raw;
-        if (ok) {
-            raw.resize(std::min<uint32_t>(bytes, count * 258u));
-            ok = r->read(off, &raw[0], (uint32_t)raw.size());
+        // read through the block cache, straight into the pool (no copy of the section in memory); first a pass for
+        // the sizes, so the pool is taken once, with room for a somewhat bigger dictionary file opened later
+        uint32_t text = 0;
+        for (uint32_t i = 0, p = off; i < count && ok; i++) {
+            uint8_t l[2];
+            ok = p + 2 <= size_ && readAt(p, l, 2);
+            const uint32_t len = le16(l);
+            ok = ok && p + 2 + len <= size_;
+            text += len;
+            p += 2 + len;
         }
         if (ok) {
-            fenceAt_.reserve(count + 1);
-            fencePool_.reserve(raw.size() - count * 2u);
-            size_t p = 0;
+            if (fenceAt_.capacity() < count + 1) fenceAt_.reserve(count + 1 + count / 4);
+            if (fencePool_.capacity() < text) fencePool_.reserve(text + text / 4);
+            fencePool_.resize(text);
+            uint32_t p = off, at = 0;
             for (uint32_t i = 0; i < count && ok; i++) {
-                if (p + 2 > raw.size()) { ok = false; break; }
-                const uint32_t len = le16((const uint8_t *)raw.data() + p);
-                p += 2;
-                if (p + len > raw.size()) { ok = false; break; }
-                fenceAt_.push_back((uint32_t)fencePool_.size());
-                fencePool_.append(raw, p, len);
-                p += len;
+                uint8_t l[2];
+                ok = readAt(p, l, 2);
+                const uint32_t len = le16(l);
+                fenceAt_.push_back(at);
+                ok = ok && (len == 0 || readAt(p + 2, &fencePool_[at], len));
+                at += len;
+                p += 2 + len;
             }
-            fenceAt_.push_back((uint32_t)fencePool_.size());
+            fenceAt_.push_back(at);
         }
         if (!ok) {
             error = "dict.bin is damaged (copy it again)";
@@ -133,29 +143,27 @@ bool Dictionary::open(Reader *r, std::string &error) {
     } else {
         memoPool_.reserve(64 * 1024);  // grows as the search visits the tree: reserved once, so it never moves
     }
-    std::string().swap(tagPool_);
-    std::vector<Tag>().swap(tags_);
+    tagPool_.clear();
+    tags_.clear();
     title_.clear();
     if (version_ >= 3) {  // the tag table, whole (its rows run from the first row's offset to the offset table)
         const uint32_t tagOff = le32(h + 52), tagCount = le32(h + 56), titleOff = le32(h + 60);
         bool ok = tagCount < 65025 && (uint64_t)tagOff + tagCount * 4ull <= titleOff && titleOff < size_;
-        std::vector<uint32_t> offs(ok ? tagCount : 0);
-        if (ok && tagCount) {
-            ok = r->read(tagOff, offs.data(), tagCount * 4);
-            for (uint32_t &o : offs) o = le32((const uint8_t *)&o);
-        }
-        const uint32_t first = tagCount ? offs[0] : tagOff;
+        const uint32_t first = ok && tagCount ? u32At(tagOff) : tagOff;
         ok = ok && first <= tagOff && tagOff - first < (1u << 20);
         if (ok) {
+            if (tagPool_.capacity() < tagOff - first + 1) tagPool_.reserve(std::max<uint32_t>(16 * 1024, tagOff - first + 1));
             tagPool_.resize(tagOff - first + 1);
-            ok = tagPool_.size() == 1 || r->read(first, &tagPool_[0], tagOff - first);
+            ok = tagPool_.size() == 1 || readAt(first, &tagPool_[0], tagOff - first);
             tagPool_.back() = '\0';
         }
         if (ok) {
+            if (tags_.capacity() < tagCount) tags_.reserve(std::max<uint32_t>(1024, tagCount));
             tags_.resize(tagCount);
             for (uint32_t i = 0; i < tagCount && ok; i++) {
-                if (offs[i] < first || offs[i] + 1 >= tagOff) { ok = false; break; }
-                const char *p = tagPool_.data() + (offs[i] - first), *end = tagPool_.data() + tagPool_.size() - 1;
+                const uint32_t o = u32At(tagOff + i * 4);
+                if (o < first || o + 1 >= tagOff) { ok = false; break; }
+                const char *p = tagPool_.data() + (o - first), *end = tagPool_.data() + tagPool_.size() - 1;
                 Tag &t = tags_[i];
                 t.category = (uint8_t)*p++;
                 const char **field[3] = {&t.code, &t.label, &t.description};
@@ -168,7 +176,7 @@ bool Dictionary::open(Reader *r, std::string &error) {
         }
         char name[128];
         uint32_t n = std::min<uint32_t>(sizeof(name) - 1, size_ - titleOff);
-        if (ok && r->read(titleOff, name, n)) {
+        if (ok && readAt(titleOff, name, n)) {
             name[n] = '\0';
             title_ = name;
         }

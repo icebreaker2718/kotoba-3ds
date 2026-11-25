@@ -415,6 +415,7 @@ def load_yomitan(path, freq=None, keep_display=False):
     (expression, reading)."""
     import yomitan
     title = yomitan.read_index(path).get("title", os.path.basename(path))
+    tags = yomitan.read_tags(path) if keep_display else {}
     groups = {}
     order = []
     for expr, reading, def_tags, rules, score, glossary, seq, term_tags in yomitan.iter_terms(path):
@@ -450,7 +451,10 @@ def load_yomitan(path, freq=None, keep_display=False):
         glossary, rules = main[5], main[3]
         rule_codes = rules.split()
         if keep_display:
-            e.paras = yomitan.display_paragraphs(glossary)
+            if yomitan.is_jitendex_like(glossary):
+                e.paras = yomitan.display_paragraphs(glossary)
+            else:  # every definition row, its tags as chips
+                e.paras = yomitan.rows_paragraphs([(r[2], r[5]) for r in content_rows], tags)
         if yomitan.is_jitendex_like(glossary):
             e.senses = yomitan.jitendex_senses(glossary)
             if e.senses and rule_codes and not pos_mask(c for s in e.senses for c in s[0]):

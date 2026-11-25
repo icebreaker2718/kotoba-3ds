@@ -471,6 +471,22 @@ works on the code.
     ms (mean 90; the previous 1.2.0 session 92), draw avg 19-23 ms (21.6 before); free before a read 380 KB, flat (1.2.0:
     400 KB, the ~20 KB difference is the layout's memory taken once); no errors in the log. A long session and saving
     words on this build are still to be seen.
+- On `alpha` (2026-11-25, owner's choices): **stage 2, several definition dictionaries**: (b) the switch changes which
+  dictionary is searched; **Select** on the lookup screen; the choice lasts **for that lookup only** (closing it goes back
+  to the first .ktd by name, which reads, OCR corrections and known-word splits use); test dictionary **JMnedict**
+  (yomidevs/jmdict-yomitan `JMnedict.zip`; CI builds `dicts/jmnedict.ktd` (65.8 MB) and alpha-dev carries it).
+  - One dictionary open at a time: `NextDictionary` (main.cpp) reopens `g_dict` on the next file that opens, wrapping
+    round (a second one kept open would cost its 96 KB block cache + 144 KB recent answers). `Dictionary::open` no longer
+    frees on reopen: fences, tag table and radicals are emptied and refilled in the same storage (first open reserves
+    +25%), the fences are read through the block cache (no temporary copy). `tests/test_switch.cpp`: 198 reopens
+    Jitendex <-> JMnedict with lookups in between: same answers as fresh opens, 0 allocations.
+  - `LookupView::dictionaryChanged()` looks the selected character up again (lookup cache emptied); word starts and
+    known-word marks stay as the first dictionary split them. The name line shows "N/M · SELECT"; "Nothing in <name>
+    starts at ..." when the other dictionary has nothing there. Log: "dictionary: Select -> dicts/... in N ms, heap free".
+  - Other dictionaries than Jitendex (yomitan.rows_paragraphs): every definition row of the entry, its definition tags
+    as chips described by the zip's tag bank (`read_tags`), plain-text definitions numbered as Yomitan lists them.
+  - Stage 3 (pitch accent) will be built with **NHK 2016** (owner, 2026-11-25).
+  - Unknown until the console: how long a switch takes (fences ~85 KB read from the SD card).
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

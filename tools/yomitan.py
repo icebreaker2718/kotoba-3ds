@@ -54,6 +54,18 @@ def iter_terms(path):
                 yield row[:8]
 
 
+def read_tags(path):
+    """The dictionary's tag banks: {name: (category, notes)}."""
+    out = {}
+    with zipfile.ZipFile(path) as z:
+        for name in _banks(z, "tag_bank_"):
+            for row in json.loads(_read(z, name)):
+                if isinstance(row, list) and row and isinstance(row[0], str):
+                    row = row + [""] * (3 - len(row))
+                    out[row[0]] = (str(row[1] or ""), str(row[3] if len(row) > 3 and row[3] else ""))
+    return out
+
+
 def iter_meta(path):
     """Yields term meta rows: (expression, mode, data)."""
     with zipfile.ZipFile(path) as z:
@@ -439,9 +451,61 @@ def generic_paragraphs(glossary, max_paras=200):
     return [p for p in out if p.items and p.plain().strip() or any(i[0] == "chip" for i in p.items)][:max_paras]
 
 
+# Yomitan tag categories -> chip colours (yomitan.TAG_*): partOfSpeech blue, name types and the rest grey, ...
+_TAG_CATEGORY = {"partOfSpeech": TAG_POS, "pos": TAG_POS, "name": TAG_OTHER, "archaism": TAG_MISC, "popular": TAG_MISC,
+                 "frequent": TAG_MISC, "expression": TAG_MISC, "dictionary": TAG_OTHER, "field": TAG_FIELD,
+                 "dialect": TAG_DIALECT}
+
+
+def tag_chips(names, tags):
+    """A row's definition tags (space-separated names) as chips, described by the tag bank."""
+    out = []
+    for name in (names or "").replace("\u00a0", " ").split():
+        cat, notes = tags.get(name, ("", ""))
+        if name == "\u2605":
+            continue
+        out.append(("chip", (_TAG_CATEGORY.get(cat, TAG_OTHER), _clean(name), _clean(name), _clean(notes))))
+    return out
+
+
+def rows_paragraphs(rows, tags):
+    """Several term rows of one entry (other dictionaries than Jitendex: a row per definition), each with its
+    definition tags as chips over its content. rows: [(def_tags, glossary)]."""
+    out, seen = [], set()
+    for def_tags, glossary in rows:
+        key = json.dumps(glossary, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        chips = tag_chips(def_tags, tags)
+        paras = display_paragraphs(glossary)
+        if chips:
+            if paras and paras[0].kind in (P_PLAIN, P_SENSE) and not any(i[0] == "hang" for i in paras[0].items):
+                paras[0].items[:0] = chips  # on the definition's first line
+            else:
+                g = Para(P_GROUP)
+                g.items = chips
+                out.append(g)
+        out += paras
+    return out
+
+
 def display_paragraphs(glossary):
-    """-> [Para]: what the 3DS shows for one entry's glossary."""
-    return jitendex_paragraphs(glossary) if is_jitendex_like(glossary) else generic_paragraphs(glossary)
+    """-> [Para]: what the 3DS shows for one entry's glossary. Several definitions of plain text are numbered, as
+    Yomitan lists them."""
+    if is_jitendex_like(glossary):
+        return jitendex_paragraphs(glossary)
+    items = _items(glossary)
+    if len(items) > 1 and all(isinstance(i, str) and "\n" not in i for i in items):
+        out = []
+        for n, text in enumerate(items, 1):
+            p = Para(P_SENSE)
+            p.text(S_DIM, f"{n}. ")
+            p.items.append(("hang",))
+            p.text(S_TEXT, text)
+            out.append(p)
+        return out
+    return generic_paragraphs(glossary)
 
 
 _BLOCK = {"div", "li", "ol", "ul", "p", "tr", "table", "details", "summary", "br"}

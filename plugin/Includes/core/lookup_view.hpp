@@ -74,6 +74,11 @@ public:
     // The known words changed: every word checked already is shown again as known or not.
     void refreshKnown();
     void setStatus(const std::string &s, Rgb c) { status_ = s; statusColor_ = c; }
+    // Another dictionary file is open (Select): the lookups are done again in it, from the same character.
+    // Where words start, and the known-word marks, stay as the first dictionary split the text.
+    void dictionaryChanged();
+    // Shown after the dictionary's name: "2/3 · Select" when there are others to switch to (count > 1).
+    void setDictionaryPlace(int index, int count);
 
     // ---- drawing ----
     // How a screen's panel is shown: normally; see-through (the text panel without its
@@ -142,6 +147,7 @@ private:
     struct Saved { int block; size_t byte, len; std::string tag; };
     std::vector<Saved> saved_;
     std::string status_;
+    int dictIndex_ = 0, dictCount_ = 1;
     Rgb statusColor_;
 
     struct Cached { int block; size_t byte; SearchOutput so; };

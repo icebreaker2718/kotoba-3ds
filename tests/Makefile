@@ -37,6 +37,10 @@ test_ui: test_ui.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
 test_display: test_display.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
 	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_display.cpp $(CORE) $(LDLIBS)
 
+# switching dictionaries: ./test_switch jitendex.ktd jmnedict.ktd
+test_switch: test_switch.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
+	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_switch.cpp $(CORE) $(LDLIBS)
+
 test_memshare: test_memshare.cpp ../plugin/Sources/core/mem_share.cpp ../plugin/Includes/core/mem_share.hpp
 	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_memshare.cpp ../plugin/Sources/core/mem_share.cpp
 
@@ -48,6 +52,6 @@ run: test_wrap test_core test_ocr_core test_ui test_memshare
 	./test_ui $(DICT)
 
 clean:
-	rm -f test_display test_memshare test_core test_net bmp_tool test_wrap test_ocr_core test_ui libvocr.a vocr_*.o
+	rm -f test_switch test_display test_memshare test_core test_net bmp_tool test_wrap test_ocr_core test_ui libvocr.a vocr_*.o
 
 .PHONY: run clean

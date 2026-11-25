@@ -208,6 +208,25 @@ void LookupView::setText(const std::vector<std::string> &blocks) {
     if (!hasResult() && first >= 0) selectAt(cells_[first].block, cells_[first].byte);
 }
 
+void LookupView::setDictionaryPlace(int index, int count) {
+    if (index == dictIndex_ && count == dictCount_) return;
+    dictIndex_ = index;
+    dictCount_ = count;
+    if (selBlock_ >= 0) buildEntry();  // the name line shows it
+}
+
+void LookupView::dictionaryChanged() {
+    cache_.clear();
+    status_.clear();
+    if (selBlock_ >= 0) {
+        const int b = selBlock_;
+        const size_t byte = selByte_;
+        selectAt(b, byte);
+    } else {
+        buildEntry();
+    }
+}
+
 // Where words start in block b (greedy longest dictionary match, as chunkText splits it).
 const std::vector<size_t> &LookupView::stops(size_t b) const {
     if (!stopsReady_[b]) {
@@ -311,8 +330,14 @@ void LookupView::buildEntry() {
         layout_.addWrapped(text.data(), text.size(), kSmall, kSmall + 5, c);
     };
     if (so_.results.empty()) {
-        const std::string none = "Nothing in the dictionary starts at「" + t.substr(selByte_, selLen_) + "」";
+        const std::string where = dict_.title().empty() ? "the dictionary" : dict_.title();
+        const std::string none = "Nothing in " + where + " starts at「" + t.substr(selByte_, selLen_) + "」";
         layout_.addWrapped(none.data(), none.size(), kSenseSize, kSenseLine, EntryLayout::C_DIM);
+        if (dictCount_ > 1) {
+            const std::string next = std::to_string(dictIndex_ + 1) + "/" + std::to_string(dictCount_) +
+                                     " \u00b7 SELECT for the next dictionary";
+            small(next, EntryLayout::C_DIM);
+        }
         return;
     }
     const Result &r = so_.results[resultIdx_];
@@ -364,7 +389,11 @@ void LookupView::buildEntry() {
         if (k != expr && others.size() < 60) others += (others.empty() ? "" : "・") + k;
     if (!others.empty()) small("Also written " + others, EntryLayout::C_DIM);
     // the dictionary's name, then its entry as the PC laid it out (dict.bin: the sense lines)
-    if (!dict_.title().empty()) small(dict_.title(), EntryLayout::C_DIM);
+    if (!dict_.title().empty()) {
+        std::string name = dict_.title();
+        if (dictCount_ > 1) name += "   " + std::to_string(dictIndex_ + 1) + "/" + std::to_string(dictCount_) + " \u00b7 SELECT";
+        small(name, EntryLayout::C_DIM);
+    }
     if (!layout_.addEntry(dict_, r.entryId) && layout_.truncated()) small("(the rest of this entry doesn't fit)", EntryLayout::C_DIM);
 }
 

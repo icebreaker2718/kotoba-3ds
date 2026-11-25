@@ -26,3 +26,4 @@ tests/test_memhooks_arm
 tests/test_display
 tests/bench_entry
 *.ktd
+tests/test_switch

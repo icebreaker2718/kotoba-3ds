@@ -193,29 +193,50 @@ static std::vector<std::string> *g_lastBlocksPtr = nullptr;  // the text of the 
 static bool g_lastTextOnTop = false;  // how the last lookup was laid out
 
 static void LogOcr(const std::string &line);
+static u32 HeapFree();
 
-// The dictionary: the first .ktd file in dicts/ by name that opens (full entries); without one, dict.bin.
+// The dictionaries: the .ktd files in dicts/ (full entries), by name; the first that opens is the one reads and
+// lookups use, Select on the lookup screen opens the next for that lookup (one file open at a time: a second
+// dictionary kept open would cost its block cache and recent answers, ~240 KB). Without one, dict.bin.
+static std::vector<std::string> *g_dictFilesPtr = nullptr;
+#define g_dictFiles Leaky(g_dictFilesPtr)
+static int g_dictHome = -1;  // the file reads use (-1: dict.bin)
+static int g_dictNow = -1;   // the file open now
+
+static bool OpenDictFile(int i, std::string &error) {
+    const std::string path = std::string(kDictsDir) + "/" + g_dictFiles[i];
+    error.clear();
+    if (g_reader.open(path) && g_dict.open(&g_reader, error)) {
+        g_dictNow = i;
+        return true;
+    }
+    g_reader.close();
+    if (error.empty()) error = "can't be opened";
+    return false;
+}
+
 static bool OpenDict() {
     if (g_dict.isOpen()) return true;
-    std::vector<std::string> files;
     {
+        g_dictFiles.clear();
         Directory dir(kDictsDir);
-        dir.ListFiles(files, ".ktd");
+        dir.ListFiles(g_dictFiles, ".ktd");
     }
-    std::sort(files.begin(), files.end());
+    std::sort(g_dictFiles.begin(), g_dictFiles.end());
     std::string firstError;
-    for (const std::string &f : files) {
-        const std::string path = std::string(kDictsDir) + "/" + f;
+    for (int i = 0; i < (int)g_dictFiles.size(); i++) {
         std::string error;
-        if (g_reader.open(path) && g_dict.open(&g_reader, error)) {
-            LogOcr(Utils::Format("dictionary: dicts/%s (%s, version %lu, %lu entries, %lu tags)", f.c_str(),
-                                 g_dict.title().c_str(), (unsigned long)g_dict.version(),
-                                 (unsigned long)g_dict.entryCount(), (unsigned long)g_dict.tagCount()));
+        if (OpenDictFile(i, error)) {
+            g_dictHome = i;
+            LogOcr(Utils::Format("dictionary: dicts/%s (%s, version %lu, %lu entries, %lu tags; %lu file(s) in dicts/)",
+                                 g_dictFiles[i].c_str(), g_dict.title().c_str(), (unsigned long)g_dict.version(),
+                                 (unsigned long)g_dict.entryCount(), (unsigned long)g_dict.tagCount(),
+                                 (unsigned long)g_dictFiles.size()));
             return true;
         }
-        g_reader.close();
-        if (firstError.empty()) firstError = "dicts/" + f + ": " + (error.empty() ? "can't be opened" : error);
+        if (firstError.empty()) firstError = "dicts/" + g_dictFiles[i] + ": " + error;
     }
+    g_dictHome = g_dictNow = -1;
     if (!g_reader.open(kDictPath)) {
         g_dictError = firstError.empty() ? std::string("The dictionary isn't on the SD card: ") + kDictPath +
                                                "\n\nDownload dict.bin from the Kotoba3DS release and copy it there."
@@ -227,6 +248,50 @@ static bool OpenDict() {
                              (unsigned long)g_dict.entryCount(), firstError.empty() ? "" : (", " + firstError).c_str()));
     }
     return g_dict.isOpen();
+}
+
+// How many dictionaries Select goes through, and where the open one is among them.
+static int DictCount() { return g_dictHome >= 0 ? (int)g_dictFiles.size() : 1; }
+static int DictPlace() { return g_dictNow >= 0 ? g_dictNow : 0; }
+
+// Select: the next dictionary file that opens (wrapping round). The one open stays when none other does.
+static void NextDictionary(kt::LookupView &v) {
+    if (DictCount() < 2) {
+        v.setStatus("Only one dictionary: add .ktd files to /3ds/kotoba3ds/dicts/", kt::Rgb(232, 178, 112));
+        return;
+    }
+    const u64 t0 = osGetTime();
+    const int from = g_dictNow, n = (int)g_dictFiles.size();
+    std::string error, failed;
+    for (int k = 1; k < n; k++) {
+        const int i = (from + k) % n;
+        if (OpenDictFile(i, error)) break;
+        if (failed.empty()) failed = g_dictFiles[i] + ": " + error;
+    }
+    if (g_dictNow == from || !g_dict.isOpen()) {  // none other opened (OpenDictFile closed the one open): back to it
+        if (!OpenDictFile(from, error)) {
+            LogOcr("dictionary: couldn't open " + g_dictFiles[from] + " again: " + error);
+            g_dictHome = g_dictNow = -1;
+        }
+    }
+    const u64 ms = osGetTime() - t0;
+    LogOcr(Utils::Format("dictionary: Select -> dicts/%s (%s) in %lu ms, heap free %lu KB%s",
+                         g_dictNow >= 0 ? g_dictFiles[g_dictNow].c_str() : "?", g_dict.title().c_str(), (unsigned long)ms,
+                         (unsigned long)(HeapFree() / 1024), failed.empty() ? "" : (", " + failed).c_str()));
+    v.setDictionaryPlace(DictPlace(), DictCount());
+    v.dictionaryChanged();
+    if (!failed.empty()) v.setStatus("Couldn't open " + failed, kt::Rgb(232, 120, 112));
+}
+
+// After a lookup: back to the first dictionary (Select lasts for one lookup; reads use the first).
+static void HomeDictionary() {
+    if (g_dictHome < 0 || g_dictNow == g_dictHome) return;
+    std::string error;
+    if (!OpenDictFile(g_dictHome, error)) {
+        LogOcr("dictionary: couldn't open " + g_dictFiles[g_dictHome] + " again: " + error);
+        g_dictHome = g_dictNow = -1;
+        OpenDict();  // the next in dicts/, or dict.bin
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,10 +1205,11 @@ static void KeepScreenshot(kt::LookupView &v) {
 // Runs the lookup screens until B / Close. Tap a character (text on the touchscreen); Circle Pad:
 // words and rows; D-pad up/down (or C-stick): scroll the entry; D-pad left/right or L/R: the other
 // matches; A save (again on a word just saved: undo), X hide, Y mark known, Start keep the
-// screenshot without saving a word.
+// screenshot without saving a word, Select the next dictionary in dicts/ (for this lookup).
 static u64 g_viewOpenedAt = 0;  // when the read finished, for the log
 static void RunLookupView(kt::LookupView &v) {
     g_hide = 0;
+    v.setDictionaryPlace(DictPlace(), DictCount());
     OSD::SwapBuffers();  // let CTRPF finish any pending redraw of its own first
     DrawLookup(v);
     FlushLog();  // the read's log lines, now that the lookup is on screen
@@ -1168,6 +1234,7 @@ static void RunLookupView(kt::LookupView &v) {
         if (down & Key::X) { ToggleHide(v); changed = true; }
         if (down & Key::Y) { MarkKnown(v); changed = true; }
         if (down & Key::Start) { KeepScreenshot(v); changed = true; }
+        if (down & Key::Select) { NextDictionary(v); changed = true; }
         if (down & (Key::L | Key::DPadLeft)) moved |= v.page(-1);
         if (down & (Key::R | Key::DPadRight)) moved |= v.page(1);
         // moving: on the press, then repeating while held
@@ -1223,6 +1290,7 @@ static void RunLookupView(kt::LookupView &v) {
         Sleep(Milliseconds(10));
     }
     RestoreScreens();
+    HomeDictionary();
     static const char *kFormats[5] = {"RGBA8", "BGR8", "RGB565", "RGB5A1", "RGBA4"};
     const int f0 = (int)ScreenOf(0).Format, f1 = (int)ScreenOf(1).Format;
     LogOcr(Utils::Format("view: opened in %lu ms, %lu moves, draw avg %lu ms (screens %s / %s)", (unsigned long)openMs,
@@ -2293,7 +2361,8 @@ static void HowToUse() {
          "broken into lines as in the game. Tap a word, or move with the Circle Pad; its entry shows "
          "on the other screen.\n\n"
          "D-pad up / down (or C-stick): scroll a long entry. D-pad left / right (or L / R): other "
-         "meanings of the same spot. B: back to the game."},
+         "meanings of the same spot. Select: the same spot in the next dictionary of dicts/ (for "
+         "this lookup). B: back to the game."},
         {"Seeing the game",
          "X (or Hide) uncovers the screen that was read: see-through (the text over the game) or "
          "hidden (the game alone), as set under \"Hide (X)\". X again brings the lookup back; so "
@@ -2310,7 +2379,8 @@ static void HowToUse() {
          "Y in a lookup marks the word known without saving it (grammar, words you know already); "
          "Y again takes it back."},
         {"Files",
-         "The dictionary: SD:/3ds/kotoba3ds/dicts/ (full entries; the first .ktd file by name), else "
+         "The dictionaries: SD:/3ds/kotoba3ds/dicts/*.ktd (full entries; the first by name is used, Select "
+         "on a lookup goes through the others), else "
          "SD:/3ds/kotoba3ds/dict.bin. The OCR model: SD:/3ds/kotoba3ds/ocr/ "
          "(from Kotoba3DS-ocr-model.zip). Both come with the Kotoba3DS release."},
     };
