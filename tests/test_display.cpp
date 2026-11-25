@@ -33,7 +33,13 @@ struct FileReader : Reader {
 // "1. (v1,vt) to eat" -> "(v1,vt) to eat"
 static std::string gloss(const std::string &s) {
     size_t p = s.find(". ");
-    return p != std::string::npos && p < 4 ? s.substr(p + 2) : s;
+    std::string g = p != std::string::npos && p < 4 ? s.substr(p + 2) : s;
+    // the .ktd writes vowels with a macron plain (Shintō -> Shinto: not in the 3DS font); dict.bin keeps them
+    static const char *kMacron[][2] = {{"ā", "a"}, {"ē", "e"}, {"ī", "i"}, {"ō", "o"}, {"ū", "u"},
+                                       {"Ā", "A"}, {"Ē", "E"}, {"Ī", "I"}, {"Ō", "O"}, {"Ū", "U"}};
+    for (auto &m : kMacron)
+        for (size_t q; (q = g.find(m[0])) != std::string::npos;) g.replace(q, strlen(m[0]), m[1]);
+    return g;
 }
 
 // 24x30 cells like the 3DS font (as test_ui's): full-width characters 24 wide, ASCII 12
@@ -53,6 +59,24 @@ struct BoxFont : GlyphSource {
         memset(out, 0, 24 * 30);
         for (int y = 4; y < 26; y++)
             for (int x = 0; x < gi.width; x++) out[y * 24 + x] = 255;
+        return true;
+    }
+};
+
+// The console's widths as the owner's screenshot shows them (2026-11-25): a Japanese character as wide as the cell
+// is tall (17 px at the entry's 17 px size), Latin letters about half that
+struct ConsoleFont : GlyphSource {
+    int cellWidth() const override { return 30; }
+    int cellHeight() const override { return 30; }
+    bool metrics(uint32_t cp, GlyphInfo &gi) override {
+        bool wide = cp >= 0x2E80;
+        gi.left = 1;
+        gi.width = wide ? 28 : 13;
+        gi.advance = wide ? 30 : 15;
+        return true;
+    }
+    bool pixels(uint32_t, uint8_t *out) override {
+        memset(out, 0, 30 * 30);
         return true;
     }
 };
@@ -207,9 +231,47 @@ int main(int argc, char **argv) {
                "mean %.1f us, slowest %.0f us (entry %u)\n", d3.entryCount(), rows, maxRows, maxSpans, maxPool,
                total / (2.0 * d3.entryCount()), worst, worstId);
         check(cut == 0, "every entry fits the layout's memory (" + std::to_string(cut) + " cut short)");
-        // closing punctuation right after furigana can't start a row and may run over the edge (6 spans, all
-        // in example sentences, Jitendex 2026-11-23)
-        check(outside * 100000 < rows, "spans inside the panel (" + std::to_string(outside) + " outside)");
+        check(outside == 0, "every span inside the panel (" + std::to_string(outside) + " outside)");
+    }
+
+    // the owner's screenshot (2026-11-25): in 祝詞's example, 「祝詞？」 ran over the right edge: ？」 can't start a row
+    // and 祝詞 with its furigana was already placed at the row's end. Built by hand so it happens at some width
+    // whatever the font: the furigana word must go down with the punctuation, at every width.
+    {
+        ConsoleFont font;
+        TextRenderer tr(font);
+        EntryLayout lay(tr);
+        lay.reserve();
+        std::string runs;
+        runs += {(char)RUN_PARA, (char)P_EX_JA, 2, (char)RUN_STYLE, (char)S_EXAMPLE};
+        runs += "「なんて言ってるの？」「";
+        runs += {(char)RUN_RUBY};
+        runs += "祝詞";
+        runs += {(char)RUN_RUBY_MID};
+        runs += "のりと";
+        runs += {(char)RUN_RUBY_END};
+        runs += "？」「神道の呪文のようなもん」";
+        bool ok = true;
+        for (int w = 200; w <= 376 && ok; w++) {
+            lay.clear(12, w);
+            lay.addRuns(runs.data(), runs.size(), d3);
+            for (int r = 0; r < lay.rowCount() && ok; r++) {
+                const EntryLayout::Row &row = lay.row(r);
+                for (int k = row.first; k < row.first + row.count; k++) {
+                    const EntryLayout::Span &sp = lay.span(k);
+                    int sw = 0;
+                    for (size_t i = 0; i < sp.len;) sw += tr.advance(utf8Next(lay.text(sp), sp.len, i), sp.size);
+                    const bool over = sp.x + sw > 12 + w && row.count > 1;
+                    const bool starts = k == row.first && (!memcmp(lay.text(sp), "？", 3) || !memcmp(lay.text(sp), "」", 3));
+                    if (over || starts) {
+                        printf("     width %d row %d: \"%.*s\" %s\n", w, r, (int)sp.len, lay.text(sp), over ? "over the edge" : "starts the row");
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        check(ok, "「祝詞？」 with furigana: never over the edge, ？」 never starts a row (every width 200-376)");
     }
 
     // search: the same answers for every 7th key

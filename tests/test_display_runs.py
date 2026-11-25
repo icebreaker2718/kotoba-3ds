@@ -77,6 +77,7 @@ check(("ruby", y.S_EXAMPLE, "果", "くだ") in ex and ("ruby", y.S_KEYWORD, "�
       "example: furigana kept, the keyword marked")
 check(paras[3].plain() == "Eat fruit.", "the translation without its footnote")
 check(paras[4].plain() == "Note: a note with a tab", "a note with its label, control characters gone")
+check(y._clean("Shintō Tōkyō") == "Shinto Tokyo", "vowels with a macron made plain (not in the 3DS font)")
 check(paras[6].plain() == "See also 喰う · 1. to eat" and paras[6].items[1][1] == y.S_LINK, "a cross-reference, its word a link")
 gp = y.display_paragraphs(PLAIN)
 check([p.plain() for p in gp] == ["1. 一つ目強", "2. 二つ目", "and a plain line"], f"other dictionaries: lists numbered ({[p.plain() for p in gp]})")

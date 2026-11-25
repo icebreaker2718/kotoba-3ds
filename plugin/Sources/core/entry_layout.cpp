@@ -86,6 +86,48 @@ void EntryLayout::openRow(int x) {
     x_ = rowStartX_ = x;
     rowFirst_ = spanCount_;
     rowFixedHeight_ = 0;
+    brkValid_ = false;
+}
+
+// Where the row could last have broken: at span `span`, `cut` bytes into it (0: at its start), at x_ now.
+void EntryLayout::markBreak(uint32_t span, uint32_t cut) {
+    brkSpan_ = span;
+    brkCut_ = cut;
+    brkX_ = x_;
+    brkValid_ = x_ > rowStartX_;
+}
+
+// Something that can't start a row doesn't fit at its end: the row ends where it last could, and what came after
+// that point (the word the punctuation belongs to) starts the next row. Nothing to do when there was no such point
+// (a word longer than the row): then it runs over, as before.
+void EntryLayout::breakAtLast() {
+    if (!brkValid_ || brkSpan_ < rowFirst_ || brkSpan_ > spanCount_) return;
+    uint32_t m = brkSpan_;
+    if (brkCut_ > 0) {  // the break is inside a text span: split it
+        if (m >= spanCount_ || brkCut_ >= spans_[m].len) return;
+        if (!newSpan()) return;
+        memmove(&spans_[m + 2], &spans_[m + 1], sizeof(Span) * (spanCount_ - 1 - (m + 1)));
+        Span b = spans_[m];
+        b.off += brkCut_;
+        b.len = (uint16_t)(b.len - brkCut_);
+        b.x = (int16_t)brkX_;
+        spans_[m].len = (uint16_t)brkCut_;
+        spans_[m + 1] = b;
+        m++;
+    }
+    const uint32_t end = spanCount_;
+    const int dx = hangX_ - brkX_;
+    spanCount_ = m;
+    closeRow();
+    if (truncated_) return;
+    spanCount_ = end;
+    open_ = true;
+    rowFirst_ = m;
+    rowStartX_ = hangX_;
+    rowFixedHeight_ = 0;
+    brkValid_ = false;
+    for (uint32_t k = m; k < end; k++) spans_[k].x = (int16_t)(spans_[k].x + dx);
+    x_ += dx;
 }
 
 // The row's height and each span's height in it: text on a common baseline (a smaller span sits on the line's
@@ -194,13 +236,20 @@ void EntryLayout::placeText(uint32_t off, size_t len, int size, uint8_t color) {
         prev_ = space ? ' ' : cp;
         i = j;
         if (!open_) openRow(hangX_);
-        if (canBreak && x_ + w > left_ + width_ && x_ > rowStartX_) {
-            closeRow();
-            openRow(hangX_);
+        if (x_ + w > left_ + width_ && x_ > rowStartX_) {
+            if (canBreak) {
+                closeRow();
+                openRow(hangX_);
+            } else if (!space) {
+                breakAtLast();  // closing punctuation after a word that is already placed: the word goes down too
+            }
         }
         if (space && x_ == rowStartX_ && rowCount_ > 0 && spanCount_ == rowFirst_) continue;  // no space opening a row
         Span *last = spanCount_ > rowFirst_ ? &spans_[spanCount_ - 1] : nullptr;
-        if (last && last->kind == K_TEXT && last->color == color && last->size == size && last->off + last->len == off + start) {
+        const bool merge = last && last->kind == K_TEXT && last->color == color && last->size == size &&
+                           last->off + last->len == off + start;
+        if (canBreak) markBreak(merge ? spanCount_ - 1 : spanCount_, merge ? last->len : 0);
+        if (merge) {
             last->len = (uint16_t)(last->len + (j - start));
         } else {
             Span *s = newSpan();
@@ -291,6 +340,7 @@ void EntryLayout::layoutPool(uint32_t off, size_t len, const Dictionary &d) {
                     closeRow();
                     openRow(hangX_);
                 }
+                markBreak(spanCount_, 0);
                 const uint32_t lo = copy(t->label, n);
                 Span *s = lo == ~0u ? nullptr : newSpan();
                 if (s) {
@@ -318,10 +368,16 @@ void EntryLayout::layoutPool(uint32_t off, size_t len, const Dictionary &d) {
                 for (size_t k = 0; k < rLen;) rw += tr_.advance(next(mid + 1, rLen, k), kRuby);
                 const int w = std::max(bw, rw);
                 if (!open_) openRow(hangX_);
+                const bool canBreak = prev_ == 0 || !noRowEnd(prev_);  // not right after an opening bracket
                 if (x_ + w > left_ + width_ && x_ > rowStartX_) {
-                    closeRow();
-                    openRow(hangX_);
+                    if (canBreak) {
+                        closeRow();
+                        openRow(hangX_);
+                    } else {
+                        breakAtLast();
+                    }
                 }
+                if (canBreak) markBreak(spanCount_, 0);
                 Span *b = newSpan();
                 Span *rd = b ? newSpan() : nullptr;
                 if (b && rd) {

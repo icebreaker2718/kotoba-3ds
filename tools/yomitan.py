@@ -220,8 +220,12 @@ _CTRL = re.compile(r"[\x00-\x1f]+")
 _CIRCLED = re.compile("[\u2460-\u2473]")
 
 
+# Vowels with a macron (Shintō, Tōkyō) as plain vowels: the 3DS's system font has no glyph for them (it drew "Shint?")
+_MACRON = str.maketrans("āēīōūĀĒĪŌŪ", "aeiouAEIOU")
+
+
 def _clean(s):
-    return _CIRCLED.sub(lambda m: f"{ord(m.group(0)) - 0x245F}.", _CTRL.sub(" ", s))
+    return _CIRCLED.sub(lambda m: f"{ord(m.group(0)) - 0x245F}.", _CTRL.sub(" ", s)).translate(_MACRON)
 
 
 class Para:

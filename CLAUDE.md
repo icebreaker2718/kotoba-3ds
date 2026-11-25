@@ -456,8 +456,9 @@ works on the code.
     read; dict.bin's sense lines go through the same renderer as runs made on the fly). Old plugins never look in dicts/.
   - `core/entry_layout.cpp`: lays the runs out at the panel's width into memory taken once with the lookup view (24 KB
     text, 1,024 spans, 384 rows, ~42 KB); 0 mallocs per layout (counted under qemu-arm, `tests/bench_entry.cpp`). Jitendex's
-    biggest entry: 178 rows, 409 spans, 7 KB. Known gap: closing punctuation right after furigana can run over the right
-    edge (6 spans in all of Jitendex). `Dictionary::entry(id, e, false)` skips the senses in the lookup path (still small
+    biggest entry: 178 rows, 409 spans, 7 KB. Closing punctuation that doesn't fit at a row's end takes the word before it
+    down with it (`breakAtLast`: back to the row's last break point, a text span split there if needed; owner's screenshot
+    2026-11-25, 「祝詞？」 ran over the edge; before the fix 6 spans in Jitendex did, now 0). `Dictionary::entry(id, e, false)` skips the senses in the lookup path (still small
     transient strings, as before).
   - Checks: `tests/test_display.cpp` (dict.bin vs .ktd from the same Jitendex 2026-11-23: same entries, forms, ranks, masks,
     search answers; every dict.bin sense found, in order, in 211,835 of 211,881 entries: the 46 others differ by the
@@ -487,6 +488,8 @@ works on the code.
     as chips described by the zip's tag bank (`read_tags`), plain-text definitions numbered as Yomitan lists them.
   - Stage 3 (pitch accent) will be built with **NHK 2016** (owner, 2026-11-25).
   - Unknown until the console: how long a switch takes (fences ~85 KB read from the SD card).
+  - The .ktd writes vowels with a macron plain (Shintō -> Shinto, `yomitan._clean`): the 3DS system font has no glyph
+    for them (drawn as "?"). dict.bin keeps them. Rare kanji missing from the font (a "?詞" form of 祝詞) still show "?".
   - **c11c624's plugin didn't load** ("update the Luma plugin loader", owner, 2026-11-25): devkitPro's pacman server
     failed in that run, install-ctrpf.sh built 3gxtool from GitLab's newest source, which writes plugin format
     `3GX$0003` (779053b, from pacman's 3gxtool: `3GX$0002`). The card was put back on 779053b. Fix: the source build

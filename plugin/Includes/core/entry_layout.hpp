@@ -78,7 +78,13 @@ private:
     bool open_ = false;
     int x_ = 0, rowStartX_ = 0, hangX_ = 0, rowFixedHeight_ = 0;
     uint32_t rowFirst_ = 0;
-    uint32_t prev_ = 0;  // the character before the next piece (0: a paragraph's start)
+    uint32_t prev_ = 0;
+    // the row's last place it could break (markBreak), for breakAtLast
+    uint32_t brkSpan_ = 0, brkCut_ = 0;
+    int brkX_ = 0;
+    bool brkValid_ = false;
+    void markBreak(uint32_t span, uint32_t cut);
+    void breakAtLast();  // the character before the next piece (0: a paragraph's start)
 
     uint32_t copy(const char *text, size_t len);  // into the pool: its offset (or ~0u when full)
     Span *newSpan();
