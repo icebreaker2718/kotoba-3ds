@@ -466,7 +466,11 @@ works on the code.
     entry checks; test_core / test_ui / test_wrap / test_ocr_core pass on the release dict.bin, a fresh one and the .ktd.
   - CI: the dictionary job writes both, tests the .ktd, and alpha-dev now carries `jitendex.ktd` (alpha-release waits for
     the dictionary job). Not decided: whether release / SD zips ship the .ktd, dict.bin or both (both = +57 MB on the card).
-  - Not yet on the console: drawing time with furigana and chips, glyph-cache churn from the new sizes (10/13/14 px).
+  - Console result (2026-11-25, 779053b, M&L, a short session: 8 reads, top and touchscreen; owner: "looks good so far"):
+    "dictionary: dicts/jitendex.ktd (Jitendex.org, version 3, 211881 entries, 226 tags)"; lookup screen opened in 61-110
+    ms (mean 90; the previous 1.2.0 session 92), draw avg 19-23 ms (21.6 before); free before a read 380 KB, flat (1.2.0:
+    400 KB, the ~20 KB difference is the layout's memory taken once); no errors in the log. A long session and saving
+    words on this build are still to be seen.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
