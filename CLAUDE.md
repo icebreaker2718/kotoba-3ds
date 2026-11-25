@@ -442,6 +442,31 @@ works on the code.
   (known.txt line, heap 3512 KB), 9 reads (top and touchscreen) with 404 KB free before each, Make Anki cards in the
   lent 512 KB block (7 words became cards), no crash dump. Moved to `test` and merged to `main` the same day at the
   owner's request: the release's files are replaced by this build.
+- On `alpha` (2026-11-25, owner's choices): **full dictionary entries, stage 1 of 5** (format option C: the PC styles the
+  entry, the console only wraps it). Next stages, in the owner's order: extra definition dictionaries (a button to switch
+  between them; whether the button also changes which dictionary is searched is not settled), pitch accent files,
+  frequency files, tag descriptions. Each dictionary is to be swappable on its own (the owner's requirement), so:
+  - `SD:/3ds/kotoba3ds/dicts/*.ktd`: one file per dictionary, **version 3** (build_dict.py `--dicts-out`; with `-o` too,
+    dict.bin and the .ktd come from one read of the sources). Same layout as dict.bin v2 (keys, fences, radicals) plus a
+    tag table and the dictionary's name in the header's reserved bytes; each entry is the v2 machine line + DISPLAY RUNS
+    (build_dict.py's docstring): paragraphs, styles, tag chips, a hanging indent, furigana. No headline or sense lines:
+    `Dictionary::entry` makes the headline from the forms and `sensesFromRuns` the plain senses (for mined.tsv) from the
+    runs. ①..⑳ are written as "1." (the 3DS font may lack them). Jitendex: 56.8 MB, the same as dict.bin.
+  - The plugin opens the first .ktd in dicts/ by name that opens (log "dictionary: dicts/..."), else dict.bin (v1-v3 all
+    read; dict.bin's sense lines go through the same renderer as runs made on the fly). Old plugins never look in dicts/.
+  - `core/entry_layout.cpp`: lays the runs out at the panel's width into memory taken once with the lookup view (24 KB
+    text, 1,024 spans, 384 rows, ~42 KB); 0 mallocs per layout (counted under qemu-arm, `tests/bench_entry.cpp`). Jitendex's
+    biggest entry: 178 rows, 409 spans, 7 KB. Known gap: closing punctuation right after furigana can run over the right
+    edge (6 spans in all of Jitendex). `Dictionary::entry(id, e, false)` skips the senses in the lookup path (still small
+    transient strings, as before).
+  - Checks: `tests/test_display.cpp` (dict.bin vs .ktd from the same Jitendex 2026-11-23: same entries, forms, ranks, masks,
+    search answers; every dict.bin sense found, in order, in 211,835 of 211,881 entries: the 46 others differ by the
+    rules field's part of speech or a sense dict.bin lost; .ktd also keeps the "explanation" / "language of origin" notes and
+    note-only senses dict.bin dropped; every entry laid out at 376 and 296 px), `tests/test_display_runs.py`, test_ui's
+    entry checks; test_core / test_ui / test_wrap / test_ocr_core pass on the release dict.bin, a fresh one and the .ktd.
+  - CI: the dictionary job writes both, tests the .ktd, and alpha-dev now carries `jitendex.ktd` (alpha-release waits for
+    the dictionary job). Not decided: whether release / SD zips ship the .ktd, dict.bin or both (both = +57 MB on the card).
+  - Not yet on the console: drawing time with furigana and chips, glyph-cache churn from the new sizes (10/13/14 px).
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

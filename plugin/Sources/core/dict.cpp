@@ -78,7 +78,12 @@ bool Dictionary::open(Reader *r, std::string &error) {
     if (size_ < 64 || !r->read(0, h, 64)) { error = "dict.bin is missing or too small"; reader_ = nullptr; return false; }
     if (memcmp(h, "KTB1", 4) != 0) { error = "dict.bin has the wrong format (rebuild it)"; reader_ = nullptr; return false; }
     version_ = le32(h + 4);
-    if (version_ != 1 && version_ != 2) { error = "dict.bin version mismatch (rebuild it)"; reader_ = nullptr; return false; }
+    if (version_ < 1 || version_ > 3) {
+        error = version_ > 3 ? "this dictionary file is newer than the plugin (update Kotoba3DS)"
+                             : "dict.bin version mismatch (rebuild it)";
+        reader_ = nullptr;
+        return false;
+    }
     keyRec_ = version_ >= 2 ? 12 : 8;
     entryCount_ = le32(h + 8);
     entryIdxOff_ = le32(h + 12);
@@ -127,6 +132,51 @@ bool Dictionary::open(Reader *r, std::string &error) {
         }
     } else {
         memoPool_.reserve(64 * 1024);  // grows as the search visits the tree: reserved once, so it never moves
+    }
+    std::string().swap(tagPool_);
+    std::vector<Tag>().swap(tags_);
+    title_.clear();
+    if (version_ >= 3) {  // the tag table, whole (its rows run from the first row's offset to the offset table)
+        const uint32_t tagOff = le32(h + 52), tagCount = le32(h + 56), titleOff = le32(h + 60);
+        bool ok = tagCount < 65025 && (uint64_t)tagOff + tagCount * 4ull <= titleOff && titleOff < size_;
+        std::vector<uint32_t> offs(ok ? tagCount : 0);
+        if (ok && tagCount) {
+            ok = r->read(tagOff, offs.data(), tagCount * 4);
+            for (uint32_t &o : offs) o = le32((const uint8_t *)&o);
+        }
+        const uint32_t first = tagCount ? offs[0] : tagOff;
+        ok = ok && first <= tagOff && tagOff - first < (1u << 20);
+        if (ok) {
+            tagPool_.resize(tagOff - first + 1);
+            ok = tagPool_.size() == 1 || r->read(first, &tagPool_[0], tagOff - first);
+            tagPool_.back() = '\0';
+        }
+        if (ok) {
+            tags_.resize(tagCount);
+            for (uint32_t i = 0; i < tagCount && ok; i++) {
+                if (offs[i] < first || offs[i] + 1 >= tagOff) { ok = false; break; }
+                const char *p = tagPool_.data() + (offs[i] - first), *end = tagPool_.data() + tagPool_.size() - 1;
+                Tag &t = tags_[i];
+                t.category = (uint8_t)*p++;
+                const char **field[3] = {&t.code, &t.label, &t.description};
+                for (const char **f : field) {
+                    if (p >= end) { ok = false; break; }
+                    *f = p;
+                    p += strlen(p) + 1;
+                }
+            }
+        }
+        char name[128];
+        uint32_t n = std::min<uint32_t>(sizeof(name) - 1, size_ - titleOff);
+        if (ok && r->read(titleOff, name, n)) {
+            name[n] = '\0';
+            title_ = name;
+        }
+        if (!ok) {
+            error = "the dictionary file is damaged (copy it again)";
+            reader_ = nullptr;
+            return false;
+        }
     }
     return true;
 }
@@ -327,7 +377,21 @@ static void splitInto(const std::string &s, const std::string &sep, std::vector<
     }
 }
 
-bool Dictionary::entry(uint32_t id, Entry &e) {
+// The entry's bytes (its blob or record, without the NUL after it) into buf.
+bool Dictionary::readRecord(uint32_t id, char *buf, uint32_t cap, uint32_t &len) {
+    len = 0;
+    if (!reader_ || id >= entryCount_) return false;
+    uint8_t rec[12];
+    if (!readAt(entryIdxOff_ + id * 8, rec, 12)) return false;
+    uint32_t start = le32(rec), end = le32(rec + 8);
+    if (end <= start || end - start > 64 * 1024 || end - start > cap) return false;
+    if (!readAt(start, buf, end - start)) return false;
+    len = end - start;
+    while (len > 0 && buf[len - 1] == '\0') len--;
+    return true;
+}
+
+bool Dictionary::entry(uint32_t id, Entry &e, bool withSenses) {
     if (!reader_ || id >= entryCount_) return false;
     uint8_t rec[12];
     if (!readAt(entryIdxOff_ + id * 8, rec, 12)) return false;
@@ -339,8 +403,14 @@ bool Dictionary::entry(uint32_t id, Entry &e) {
     if (z != std::string::npos) blob.resize(z);
 
     std::vector<std::string> lines, fields;
-    splitInto(blob, "\n", lines);
-    if (lines.size() < 2) return false;
+    if (version_ >= 3) {  // the machine line, then the display runs
+        size_t nl = blob.find('\n');
+        if (nl == std::string::npos) return false;
+        lines.push_back(blob.substr(0, nl));
+    } else {
+        splitInto(blob, "\n", lines);
+        if (lines.size() < 2) return false;
+    }
     splitInto(lines[0], "\t", fields);
     fields.resize(6);  // the 6th (frequency rank) is missing in dict.bin files built before it
     e = Entry();
@@ -351,9 +421,181 @@ bool Dictionary::entry(uint32_t id, Entry &e) {
     splitInto(fields[3], "\xEF\xBD\x9C", e.kanjiForms);  // U+FF5C
     splitInto(fields[4], "\xEF\xBD\x9C", e.kanaForms);
     e.freqRank = (uint32_t)strtoul(fields[5].c_str(), nullptr, 10);
-    e.headline = lines[1];
-    e.senses.assign(lines.begin() + 2, lines.end());
+    if (version_ >= 3) {
+        // no headline in the file: the forms, as dict.bin's headline shows them
+        std::string k, r;
+        for (size_t i = 0; i < e.kanjiForms.size() && i < 6; i++) k += (i ? "・" : "") + e.kanjiForms[i];
+        for (size_t i = 0; i < e.kanaForms.size() && i < 6; i++) r += (i ? "・" : "") + e.kanaForms[i];
+        e.headline = k.empty() ? r : k + "【" + r + "】";
+        if (withSenses) {
+            const size_t nl = lines[0].size() + 1;
+            sensesFromRuns(*this, blob.data() + nl, blob.size() - nl, e.senses);
+        }
+    } else {
+        e.headline = lines[1];
+        if (withSenses) e.senses.assign(lines.begin() + 2, lines.end());
+    }
     return true;
+}
+
+// Appends a run (text) to buf if it fits.
+static bool put(char *buf, uint32_t cap, uint32_t &len, const char *s, size_t n) {
+    if (len + n > cap) return false;
+    memcpy(buf + len, s, n);
+    len += (uint32_t)n;
+    return true;
+}
+static bool putByte(char *buf, uint32_t cap, uint32_t &len, uint8_t b) { return put(buf, cap, len, (const char *)&b, 1); }
+
+bool Dictionary::display(uint32_t id, char *buf, uint32_t cap, uint32_t &len) {
+    uint32_t n = 0;
+    len = 0;
+    if (!readRecord(id, buf, cap, n)) return false;
+    const char *nl = (const char *)memchr(buf, '\n', n);
+    if (!nl) return false;
+    if (version_ >= 3) {  // the runs after the machine line, moved to the front
+        const uint32_t from = (uint32_t)(nl + 1 - buf);
+        memmove(buf, buf + from, n - from);
+        len = n - from;
+        return true;
+    }
+    // dict.bin: its sense lines ("1. (v1,vt) to eat") as runs. They're moved to the back of buf first, and the runs
+    // written from the front (never more bytes than the lines they come from, +6 a line: they don't overtake).
+    const char *nl2 = (const char *)memchr(nl + 1, '\n', buf + n - (nl + 1));
+    if (!nl2) return true;  // no senses
+    const uint32_t from = (uint32_t)(nl2 + 1 - buf), lines = n - from;
+    uint32_t extra = 0;
+    for (uint32_t i = from; i < n; i++) extra += buf[i] == '\n' ? 8 : 0;
+    if (lines + extra + 8 > cap) return false;
+    char *src = buf + cap - lines;
+    memmove(src, buf + from, lines);
+    const char *p = src, *end = src + lines;
+    while (p < end) {
+        const char *eol = (const char *)memchr(p, '\n', end - p);
+        if (!eol) eol = end;
+        const char *t = p;
+        while (t < eol && *t >= '0' && *t <= '9') t++;
+        const bool numbered = t > p && t + 1 < eol && t[0] == '.' && t[1] == ' ';
+        const uint8_t head[3] = {RUN_PARA, numbered ? P_SENSE : P_PLAIN, 1};
+        put(buf, cap, len, (const char *)head, 3);
+        const char *text = p;
+        if (numbered) {
+            text = t + 2;
+            putByte(buf, cap, len, RUN_STYLE);
+            putByte(buf, cap, len, S_DIM);
+            put(buf, cap, len, p, text - p);
+            putByte(buf, cap, len, RUN_HANG);
+            if (text < eol && *text == '(') {
+                const char *close = (const char *)memchr(text, ')', eol - text);
+                if (close && close + 1 < eol && close[1] == ' ') {
+                    put(buf, cap, len, text, close + 2 - text);
+                    text = close + 2;
+                }
+            }
+        }
+        putByte(buf, cap, len, RUN_STYLE);
+        putByte(buf, cap, len, numbered ? S_TEXT : S_DIM);
+        for (const char *c = text; c < eol; c++) putByte(buf, cap, len, (uint8_t)*c < 0x20 ? ' ' : *c);
+        p = eol + 1;
+    }
+    return true;
+}
+
+size_t runEnd(const char *runs, size_t i, size_t n) {
+    switch ((uint8_t)runs[i]) {
+    case RUN_PARA: case RUN_CHIP: return std::min(n, i + 3);
+    case RUN_STYLE: return std::min(n, i + 2);
+    case RUN_RUBY:
+        while (i < n && (uint8_t)runs[i] != RUN_RUBY_END) i++;
+        return std::min(n, i + 1);
+    default:
+        if ((uint8_t)runs[i] < 0x20) return i + 1;
+        while (i < n && (uint8_t)runs[i] >= 0x20) i++;
+        return i;
+    }
+}
+
+void sensesFromRuns(const Dictionary &d, const char *runs, size_t n, std::vector<std::string> &senses) {
+    // As build_dict.py's entry_blob writes them: "N. (" + part of speech when it changed + the other tags + ") " +
+    // glosses, and notes after them as "; (note)". A group's tags apply to each of its senses.
+    senses.clear();
+    std::string groupPos, groupMisc, pos, misc, text, prevPos;
+    bool havePrev = false;
+    enum { kNone, kSense, kNote } part = kNone;
+    bool inSense = false, beforeHang = false;
+    uint8_t style = S_TEXT;
+    auto add = [](std::string &list, const char *code) { list += (list.empty() ? "" : ",") + std::string(code); };
+    auto finish = [&]() {
+        if (inSense && !text.empty()) {
+            std::string tags;
+            std::string p = groupPos;
+            if (!pos.empty()) p += (p.empty() ? "" : ",") + pos;
+            if (!havePrev || p != prevPos) tags = p;
+            prevPos = p;
+            havePrev = true;
+            std::string m = groupMisc;
+            if (!misc.empty()) m += (m.empty() ? "" : ",") + misc;
+            if (!m.empty()) tags += (tags.empty() ? "" : ",") + m;
+            senses.push_back(std::to_string(senses.size() + 1) + ". " + (tags.empty() ? "" : "(" + tags + ") ") + text);
+        }
+        inSense = false;
+        pos.clear();
+        misc.clear();
+        text.clear();
+    };
+    bool noteStarted = false;
+    for (size_t i = 0; i < n;) {
+        const uint8_t c = (uint8_t)runs[i];
+        if (c == RUN_PARA && i + 2 < n) {
+            const uint8_t kind = (uint8_t)runs[i + 1];
+            if (kind == P_GROUP || kind == P_SENSE || kind == P_PLAIN) finish();
+            if (kind == P_GROUP) {
+                groupPos.clear();
+                groupMisc.clear();
+            }
+            if (kind == P_SENSE) inSense = true;
+            part = kind == P_SENSE ? kSense : kind == P_NOTE && inSense ? kNote : kNone;
+            noteStarted = false;
+            beforeHang = false;  // a sense's number, up to the hang, isn't part of its text
+            for (size_t j = i + 3; part == kSense && j < n && (uint8_t)runs[j] != RUN_PARA; j = runEnd(runs, j, n))
+                if ((uint8_t)runs[j] == RUN_HANG) { beforeHang = true; break; }
+            style = S_TEXT;
+            if (kind == P_GROUP) part = kNone;
+            i += 3;
+            if (kind == P_GROUP) {  // its chips
+                for (; i < n && (uint8_t)runs[i] != RUN_PARA; i = runEnd(runs, i, n)) {
+                    if ((uint8_t)runs[i] != RUN_CHIP || i + 2 >= n) continue;
+                    const Tag *t = d.tag(((uint8_t)runs[i + 1] - 1u) * 255u + ((uint8_t)runs[i + 2] - 1u));
+                    if (t) add(t->category == TAG_POS ? groupPos : groupMisc, t->code);
+                }
+            }
+            continue;
+        }
+        const size_t next = runEnd(runs, i, n);
+        if (c == RUN_STYLE && i + 1 < n) {
+            style = (uint8_t)runs[i + 1];
+        } else if (c == RUN_CHIP && i + 2 < n && part == kSense) {
+            const Tag *t = d.tag(((uint8_t)runs[i + 1] - 1u) * 255u + ((uint8_t)runs[i + 2] - 1u));
+            if (t) add(t->category == TAG_POS ? pos : misc, t->code);
+        } else if (c == RUN_HANG) {
+            beforeHang = false;
+        } else if (c == RUN_RUBY || c >= 0x20) {
+            const char *t = runs + i + (c == RUN_RUBY ? 1 : 0);
+            size_t len = next - i - (c == RUN_RUBY ? 1 : 0);
+            if (c == RUN_RUBY) len = (const char *)memchr(t, RUN_RUBY_MID, len) ? (size_t)((const char *)memchr(t, RUN_RUBY_MID, len) - t) : 0;
+            if (part == kSense && !beforeHang) {
+                text.append(t, len);
+            } else if (part == kNote && (style & ~S_SMALL) != S_DIM) {  // a note's text, not its label
+                if (!noteStarted) text += text.empty() ? "(" : "; (";
+                else text.erase(text.size() - 1);  // reopen the bracket
+                text.append(t, len);
+                text += ")";
+                noteStarted = true;
+            }
+        }
+        i = next;
+    }
+    finish();
 }
 
 const std::vector<Radical> &Dictionary::radicals() {

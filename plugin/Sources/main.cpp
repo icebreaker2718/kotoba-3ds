@@ -52,6 +52,7 @@ public:
 // ---------------------------------------------------------------------------
 static const char *kRootDir = "/3ds/kotoba3ds";
 static const char *kDictPath = "/3ds/kotoba3ds/dict.bin";
+static const char *kDictsDir = "/3ds/kotoba3ds/dicts";  // one file per dictionary (.ktd, version 3); dict.bin without
 static const char *kLogPath = "/3ds/kotoba3ds/mined.tsv";
 static const char *kShotDir = "/3ds/kotoba3ds/shots";
 static const char *kSettingsPath = "/3ds/kotoba3ds/settings.txt";
@@ -191,13 +192,39 @@ static std::vector<std::string> *g_lastBlocksPtr = nullptr;  // the text of the 
 #define g_lastBlocks Leaky(g_lastBlocksPtr)
 static bool g_lastTextOnTop = false;  // how the last lookup was laid out
 
+static void LogOcr(const std::string &line);
+
+// The dictionary: the first .ktd file in dicts/ by name that opens (full entries); without one, dict.bin.
 static bool OpenDict() {
     if (g_dict.isOpen()) return true;
+    std::vector<std::string> files;
+    {
+        Directory dir(kDictsDir);
+        dir.ListFiles(files, ".ktd");
+    }
+    std::sort(files.begin(), files.end());
+    std::string firstError;
+    for (const std::string &f : files) {
+        const std::string path = std::string(kDictsDir) + "/" + f;
+        std::string error;
+        if (g_reader.open(path) && g_dict.open(&g_reader, error)) {
+            LogOcr(Utils::Format("dictionary: dicts/%s (%s, version %lu, %lu entries, %lu tags)", f.c_str(),
+                                 g_dict.title().c_str(), (unsigned long)g_dict.version(),
+                                 (unsigned long)g_dict.entryCount(), (unsigned long)g_dict.tagCount()));
+            return true;
+        }
+        g_reader.close();
+        if (firstError.empty()) firstError = "dicts/" + f + ": " + (error.empty() ? "can't be opened" : error);
+    }
     if (!g_reader.open(kDictPath)) {
-        g_dictError = std::string("The dictionary isn't on the SD card: ") + kDictPath +
-                      "\n\nDownload dict.bin from the Kotoba3DS release and copy it there.";
+        g_dictError = firstError.empty() ? std::string("The dictionary isn't on the SD card: ") + kDictPath +
+                                               "\n\nDownload dict.bin from the Kotoba3DS release and copy it there."
+                                         : firstError;
     } else if (!g_dict.open(&g_reader, g_dictError)) {
-        // g_dictError set by open()
+        if (!firstError.empty()) g_dictError = firstError;  // say what's wrong with the newer file
+    } else {
+        LogOcr(Utils::Format("dictionary: dict.bin (version %lu, %lu entries)%s", (unsigned long)g_dict.version(),
+                             (unsigned long)g_dict.entryCount(), firstError.empty() ? "" : (", " + firstError).c_str()));
     }
     return g_dict.isOpen();
 }
@@ -2283,7 +2310,8 @@ static void HowToUse() {
          "Y in a lookup marks the word known without saving it (grammar, words you know already); "
          "Y again takes it back."},
         {"Files",
-         "The dictionary: SD:/3ds/kotoba3ds/dict.bin. The OCR model: SD:/3ds/kotoba3ds/ocr/ "
+         "The dictionary: SD:/3ds/kotoba3ds/dicts/ (full entries; the first .ktd file by name), else "
+         "SD:/3ds/kotoba3ds/dict.bin. The OCR model: SD:/3ds/kotoba3ds/ocr/ "
          "(from Kotoba3DS-ocr-model.zip). Both come with the Kotoba3DS release."},
     };
     kt::MenuView m(Text());

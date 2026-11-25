@@ -191,6 +191,259 @@ def jitendex_senses(glossary):
     return senses
 
 
+# ---------------------------------------------------------------------------
+# display paragraphs (what the 3DS draws: build_dict.py encodes them, see its DISPLAY RUNS)
+# ---------------------------------------------------------------------------
+# paragraph kinds (the 3DS spaces and indents by kind; dict.cpp derives the plain senses from SENSE / GROUP)
+P_PLAIN, P_GROUP, P_SENSE, P_EX_JA, P_EX_EN, P_NOTE, P_XREF = 1, 2, 3, 4, 5, 6, 7
+# text styles (colour on the 3DS); S_SMALL is added for the smaller size
+S_TEXT, S_DIM, S_KEYWORD, S_LINK, S_EXAMPLE = 1, 2, 3, 4, 5
+S_SMALL = 0x40
+# tag (chip) categories
+TAG_POS, TAG_MISC, TAG_FIELD, TAG_DIALECT, TAG_OTHER = 1, 2, 3, 4, 5
+_TAG_KINDS = {"part-of-speech-info": TAG_POS, "misc-info": TAG_MISC, "field-info": TAG_FIELD,
+              "dialect-info": TAG_DIALECT}
+_CTRL = re.compile(r"[\x00-\x1f]+")
+# ①..⑳ (Jitendex's sense numbers) as 1. .. 20.: the 3DS's system font may not have them
+_CIRCLED = re.compile("[\u2460-\u2473]")
+
+
+def _clean(s):
+    return _CIRCLED.sub(lambda m: f"{ord(m.group(0)) - 0x245F}.", _CTRL.sub(" ", s))
+
+
+class Para:
+    """One paragraph: kind, indent level, items. Items: ("text", style, str), ("ruby", style, base, reading),
+    ("chip", (category, code, label, description)), ("hang",) = later rows start where this item is."""
+    __slots__ = ("kind", "indent", "items")
+
+    def __init__(self, kind, indent=0):
+        self.kind, self.indent, self.items = kind, indent, []
+
+    def text(self, style, s):
+        s = _clean(s)
+        if not s:
+            return
+        if self.items and self.items[-1][0] == "text" and self.items[-1][1] == style:
+            self.items[-1] = ("text", style, self.items[-1][2] + s)
+        else:
+            self.items.append(("text", style, s))
+
+    def plain(self):
+        return "".join(i[2] if i[0] == "text" else i[2] if i[0] == "ruby" else "" for i in self.items)
+
+    def __repr__(self):
+        return f"Para({self.kind},{self.indent},{self.items!r})"
+
+
+def _chip(node):
+    d = node.get("data") or {}
+    code = d.get("code") or text_of(node)
+    return (_TAG_KINDS.get(d.get("content"), TAG_OTHER), _clean(code), _clean(text_of(node) or code),
+            _clean(node.get("title") or ""))
+
+
+def _is_chip(node):
+    return isinstance(node, dict) and _data(node, "content") in _TAG_KINDS
+
+
+def _inline(node, p, style):
+    """Appends a node's text to paragraph p: ruby kept, example keywords and links styled, chips as chips."""
+    if node is None:
+        return
+    if isinstance(node, str):
+        p.text(style, node)
+        return
+    if isinstance(node, list):
+        for n in node:
+            _inline(n, p, style)
+        return
+    if not isinstance(node, dict):
+        return
+    tag = node.get("tag")
+    kind = _data(node, "content")
+    if tag in ("rt", "rp", "img") or kind in ("attribution", "attribution-footnote", "graphic"):
+        return
+    if _is_chip(node):
+        p.items.append(("chip", _chip(node)))
+        return
+    if tag == "br":
+        p.text(style, " ")
+        return
+    if tag == "ruby":
+        base = "".join(text_of(c) for c in _children(node) if not (isinstance(c, dict) and c.get("tag") in ("rt", "rp")))
+        reading = "".join(text_of(c, skip_rt=False) for c in _children(node)
+                          if isinstance(c, dict) and c.get("tag") == "rt")
+        if base and reading:
+            p.items.append(("ruby", style, _clean(base), _clean(reading)))
+        else:
+            p.text(style, base)
+        return
+    small = style & S_SMALL
+    if kind == "example-keyword":
+        style = S_KEYWORD | small
+    elif tag == "a" and not str(node.get("href", "")).startswith(("http://", "https://")):
+        style = S_LINK | small
+    elif isinstance(node.get("style"), dict) and node["style"].get("fontWeight") in ("bold", 700, "700"):
+        style = S_KEYWORD | small
+    for c in _children(node):
+        _inline(c, p, style)
+
+
+def _extra_box(box, out, indent):
+    """Jitendex's extra boxes under a sense: examples, notes, cross-references."""
+    kind = _data(box, "content")
+    if kind == "example-sentence":
+        a = find_all(box, lambda n: _data(n, "content") == "example-sentence-a")
+        b = find_all(box, lambda n: _data(n, "content") == "example-sentence-b")
+        if a:
+            p = Para(P_EX_JA, indent)
+            _inline(_children(a[0]), p, S_EXAMPLE)
+            out.append(p)
+        if b:
+            p = Para(P_EX_EN, indent)
+            en = find_all(b[0], lambda n: n.get("lang") == "en") or _children(b[0])
+            _inline(en, p, S_DIM | S_SMALL)
+            out.append(p)
+    elif kind in ("xref", "antonym"):
+        p = Para(P_XREF, indent)
+        label = find_all(box, lambda n: _data(n, "content") == "reference-label")
+        content = find_all(box, lambda n: _data(n, "content") in ("xref-content", "antonym-content"))
+        gloss = find_all(box, lambda n: _data(n, "content") in ("xref-glossary", "antonym-glossary"))
+        if label:
+            p.text(S_DIM | S_SMALL, text_of(label[0]).strip() + " ")
+        for c in (_children(content[0]) if content else []):
+            if not (isinstance(c, dict) and _data(c, "content") == "reference-label"):
+                _inline(c, p, S_LINK)
+        if gloss:
+            p.text(S_DIM | S_SMALL, " · " + text_of(gloss[0]).strip())
+        out.append(p)
+    elif kind in ("sense-note", "lang-source", "info-gloss") or kind:
+        if kind in ("graphic",):
+            return
+        label = find_all(box, lambda n: str(_data(n, "content") or "").endswith("-label"))
+        content = find_all(box, lambda n: str(_data(n, "content") or "").endswith("-content"))
+        p = Para(P_NOTE, indent)
+        if label:
+            p.text(S_DIM | S_SMALL, text_of(label[0]).strip() + ": ")
+        _inline(content[0] if content else box, p, S_TEXT | S_SMALL)
+        if p.items:
+            out.append(p)
+
+
+def _jitendex_sense(s, marker, out):
+    p = Para(P_SENSE, 0)
+    if marker:
+        p.text(S_DIM, marker + " ")
+        p.items.append(("hang",))
+    for c in _children(s):  # the sense's own tags (misc, field, dialect)
+        if _is_chip(c):
+            p.items.append(("chip", _chip(c)))
+    glosses = []
+    for gl in find_all(s, lambda n: _data(n, "content") == "glossary"):
+        lis = [c for c in _children(gl) if isinstance(c, dict) and c.get("tag") == "li"]
+        glosses += lis or [gl]
+    for i, g in enumerate(glosses):
+        if i:
+            p.text(S_TEXT, "; ")
+        _inline(_children(g) if isinstance(g, dict) else g, p, S_TEXT)
+    if p.items:
+        out.append(p)
+    for extra in find_all(s, lambda n: _data(n, "content") == "extra-info"):
+        for box in find_all(extra, lambda n: isinstance(n, dict) and (_data(n, "class") == "extra-box" or
+                                                                      _data(n, "content") == "graphic")):
+            _extra_box(box, out, 1)
+
+
+def jitendex_paragraphs(glossary):
+    out = []
+    items = _items(glossary)
+    for g in find_all(items, lambda n: _data(n, "content") == "sense-group"):
+        chips = [c for c in _children(g) if _is_chip(c)]
+        if chips:
+            p = Para(P_GROUP, 0)
+            for c in chips:
+                p.items.append(("chip", _chip(c)))
+            out.append(p)
+        for s in find_all(g, lambda n: _data(n, "content") == "sense"):
+            st = s.get("style") if isinstance(s.get("style"), dict) else {}
+            marker = str(st.get("listStyleType", "")).strip("\"'") if st else ""
+            _jitendex_sense(s, marker, out)
+    return out
+
+
+def generic_paragraphs(glossary, max_paras=200):
+    """Any dictionary's structured content: a paragraph per block element, list items numbered or bulleted
+    (nested lists indented), tables a row per paragraph, ruby, bold and links kept."""
+    out = []
+
+    def walk(node, cur, indent):
+        """cur: the open paragraph (or None). Returns the paragraph open after the node."""
+        if node is None:
+            return cur
+        if isinstance(node, (str, list)) or (isinstance(node, dict) and node.get("tag") not in _BLOCK):
+            if isinstance(node, list):
+                for n in node:
+                    cur = walk(n, cur, indent)
+                return cur
+            if cur is None:
+                cur = Para(P_PLAIN, indent)
+                out.append(cur)
+            if isinstance(node, str):
+                for k, part in enumerate(node.split("\n")):
+                    if k:
+                        cur = Para(P_PLAIN, indent)
+                        out.append(cur)
+                    cur.text(S_TEXT, part)
+            else:
+                _inline(node, cur, S_TEXT)
+            return cur
+        tag = node.get("tag")
+        if _data(node, "content") in ("attribution",):
+            return cur
+        if tag == "br":
+            return None
+        if tag in ("ol", "ul"):
+            n = 0
+            for li in _children(node):
+                if isinstance(li, dict) and li.get("tag") == "li":
+                    n += 1
+                    p = Para(P_PLAIN, indent)
+                    st = li.get("style") if isinstance(li.get("style"), dict) else {}
+                    mark = str(st.get("listStyleType", "")).strip("\"'") if st else ""
+                    if not mark or mark in ("decimal", "disc", "circle", "square", "none"):
+                        mark = f"{n}." if tag == "ol" else "•" if mark != "none" else ""
+                    if mark:
+                        p.text(S_DIM, mark + " ")
+                        p.items.append(("hang",))
+                    out.append(p)
+                    walk(_children(li), p, indent + 1)
+                else:
+                    walk(li, None, indent)
+            return None
+        if tag == "tr":
+            p = Para(P_PLAIN, indent)
+            out.append(p)
+            for k, cell in enumerate(_children(node)):
+                if k:
+                    p.text(S_TEXT, "  ")
+                _inline(cell, p, S_DIM if isinstance(cell, dict) and cell.get("tag") == "th" else S_TEXT)
+            return None
+        cur = None  # div, p, table, details ...: a paragraph of their own
+        for c in _children(node):
+            cur = walk(c, cur, indent)
+        return None
+
+    for item in _items(glossary):
+        walk(item, None, 0)
+    return [p for p in out if p.items and p.plain().strip() or any(i[0] == "chip" for i in p.items)][:max_paras]
+
+
+def display_paragraphs(glossary):
+    """-> [Para]: what the 3DS shows for one entry's glossary."""
+    return jitendex_paragraphs(glossary) if is_jitendex_like(glossary) else generic_paragraphs(glossary)
+
+
 _BLOCK = {"div", "li", "ol", "ul", "p", "tr", "table", "details", "summary", "br"}
 
 

@@ -84,6 +84,18 @@ public:
     virtual uint32_t size() = 0;
 };
 
+// Display runs of a version 3 file (build_dict.py, DISPLAY RUNS; kinds and styles as yomitan.py's P_* / S_*)
+enum : uint8_t { RUN_PARA = 1, RUN_STYLE = 2, RUN_CHIP = 3, RUN_HANG = 4, RUN_RUBY = 5, RUN_RUBY_MID = 6, RUN_RUBY_END = 7 };
+enum : uint8_t { P_PLAIN = 1, P_GROUP = 2, P_SENSE = 3, P_EX_JA = 4, P_EX_EN = 5, P_NOTE = 6, P_XREF = 7 };
+enum : uint8_t { S_TEXT = 1, S_DIM = 2, S_KEYWORD = 3, S_LINK = 4, S_EXAMPLE = 5, S_SMALL = 0x40 };
+enum : uint8_t { TAG_POS = 1, TAG_MISC = 2, TAG_FIELD = 3, TAG_DIALECT = 4, TAG_OTHER = 5 };
+
+// A tag a chip names (version 3 files): pointers into the dictionary's tag table (kept for the session).
+struct Tag {
+    uint8_t category = 0;
+    const char *code = "", *label = "", *description = "";
+};
+
 // Part-of-speech bits (must match build_dict.py)
 enum : uint32_t {
     POS_V1 = 1, POS_V5 = 2, POS_VK = 4, POS_VSI = 8, POS_VSN = 16,
@@ -136,7 +148,16 @@ public:
         prefix = prefixMemo_.size();
         mask = maskMemo_.size();
     }
-    bool entry(uint32_t entryId, Entry &out);
+    // withSenses: the plain sense lines too (for saving the word; from a version 3 file they're worked out from
+    // the display runs).
+    bool entry(uint32_t entryId, Entry &out, bool withSenses = true);
+    // The entry as display runs, written into buf (no memory taken): a version 3 file's own, or for older files
+    // made from the sense lines. False when it can't be read or doesn't fit (len is then 0).
+    bool display(uint32_t entryId, char *buf, uint32_t cap, uint32_t &len);
+    uint32_t version() const { return version_; }
+    const std::string &title() const { return title_; }  // the dictionary's name (version 3), else empty
+    uint32_t tagCount() const { return (uint32_t)tags_.size(); }
+    const Tag *tag(uint32_t id) const { return id < tags_.size() ? &tags_[id] : nullptr; }
 
     const std::vector<Radical> &radicals();
     // Kanji containing every radical in `radicalIdx`, most common first.
@@ -211,6 +232,16 @@ private:
     uint32_t radCount_ = 0, radOff_ = 0, kanjiCount_ = 0, kanjiOff_ = 0;
     std::vector<Radical> radicals_;
     bool radicalsLoaded_ = false;
+    // version 3: the tag table (read whole at open, ~10 KB) and the dictionary's name
+    std::string tagPool_, title_;
+    std::vector<Tag> tags_;
+    bool readRecord(uint32_t id, char *buf, uint32_t cap, uint32_t &len);
 };
+
+// Where the run starting at runs[i] ends (the next code or text): a code's operands are any byte, so runs are
+// read from the front, never searched for a code.
+size_t runEnd(const char *runs, size_t i, size_t n);
+// The plain sense lines ("1. (v1,vt) to eat") a version 3 entry's display runs come to, as older files hold them.
+void sensesFromRuns(const Dictionary &d, const char *runs, size_t len, std::vector<std::string> &senses);
 
 }  // namespace kt

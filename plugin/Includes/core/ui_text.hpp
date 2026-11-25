@@ -74,6 +74,7 @@ public:
     int width(const std::string &text, int size);
     // Draws text with its cell's top at y. Returns the x after the last character.
     int draw(Canvas &c, int x, int y, const std::string &text, int size, Rgb color);
+    int draw(Canvas &c, int x, int y, const char *text, size_t len, int size, Rgb color);  // no copy made
     int drawChar(Canvas &c, int x, int y, uint32_t cp, int size, Rgb color);
     // Splits text into lines no wider than maxWidth (at spaces in English, anywhere in Japanese).
     std::vector<std::string> wrap(const std::string &text, int size, int maxWidth);

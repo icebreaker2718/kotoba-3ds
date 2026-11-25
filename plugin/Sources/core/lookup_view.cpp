@@ -17,7 +17,10 @@ namespace kt {
 // ---------------------------------------------------------------------------
 static const Rgb kBg(15, 18, 22), kText(237, 237, 237), kDim(138, 144, 153), kWord(245, 197, 66),
     kWordBg(43, 49, 60), kReading(142, 197, 255), kConj(127, 178, 240), kSavedC(123, 216, 143),
-    kRule(58, 63, 71), kButton(34, 40, 48), kButtonEdge(70, 78, 90);
+    kRule(58, 63, 71), kButton(34, 40, 48), kButtonEdge(70, 78, 90),
+    // the entry's links (cross-references), example sentences and tag chips (by kind)
+    kLink(142, 197, 255), kExample(205, 210, 218), kChipPos(142, 197, 255), kChipMisc(232, 178, 112),
+    kChipField(123, 216, 143), kChipDialect(226, 150, 200), kChipOther(170, 176, 186);
 
 // touchscreen
 // kTextSize is the line height the font's 30-px cell is scaled to: 27 makes full-width characters
@@ -186,7 +189,7 @@ void LookupView::setText(const std::vector<std::string> &blocks) {
     hidden_ = false;
     selBlock_ = -1;
     so_ = SearchOutput();
-    entry_.clear();
+    layout_.clear(kTopMargin, entryW() - 2 * kTopMargin);
     cache_.clear();
     layout();
     // where words start is worked out later (stops(), from prefetch() while the player reads):
@@ -297,105 +300,72 @@ void LookupView::trimResults(SearchOutput &so) {
 }
 
 void LookupView::buildEntry() {
-    entry_.clear();
     topScroll_ = 0;
+    const int W = entryW() - 2 * kTopMargin;
+    layout_.clear(kTopMargin, W);
     const std::string &t = blocks_[selBlock_];
     size_t i = selByte_;
     utf8Next(t, i);
     selLen_ = i - selByte_;  // one character when nothing matches
+    auto small = [&](const std::string &text, EntryLayout::Color c) {
+        layout_.addWrapped(text.data(), text.size(), kSmall, kSmall + 5, c);
+    };
     if (so_.results.empty()) {
-        Line l;
-        l.size = kSenseSize;
-        l.height = kSenseLine;
-        l.spans.push_back({"Nothing in the dictionary starts at", kDim});
-        entry_.push_back(l);
-        l.spans = {{"「" + t.substr(selByte_, selLen_) + "」", kText}};
-        entry_.push_back(l);
+        const std::string none = "Nothing in the dictionary starts at「" + t.substr(selByte_, selLen_) + "」";
+        layout_.addWrapped(none.data(), none.size(), kSenseSize, kSenseLine, EntryLayout::C_DIM);
         return;
     }
     const Result &r = so_.results[resultIdx_];
     if (!r.prefixOnly && !r.surface.empty()) selLen_ = r.surface.size();
     Entry e;
-    if (!dict_.entry(r.entryId, e)) {
-        Line l;
-        l.spans.push_back({"Could not read this entry.", kDim});
-        entry_.push_back(l);
+    if (!dict_.entry(r.entryId, e, false)) {
+        small("Could not read this entry.", EntryLayout::C_DIM);
         return;
     }
-    const int maxW = entryW() - 2 * kTopMargin - 34;  // room for the 1/3 counter
+    const int maxW = W - 34;  // room for the 1/3 counter
     // headword (reading)
     std::string expr = expressionFor(e, r.matchedKey);
-    Line head;
-    head.size = kHeadSize;
-    head.height = kHeadSize + 8;
-    head.spans.push_back({expr, kWord});
     const bool showReading = !e.reading.empty() && e.reading != expr;
-    if (showReading) head.spans.push_back({" (" + e.reading + ")", kReading});
+    const std::string reading = showReading ? " (" + e.reading + ")" : "";
     // how common it is (JPDB rank, as Rubi shows it): "#1,234"
     std::string rank;
     if (e.freqRank) {
         std::string n = std::to_string(e.freqRank);
-        for (int i = (int)n.size() - 3; i > 0; i -= 3) n.insert((size_t)i, ",");
+        for (int k = (int)n.size() - 3; k > 0; k -= 3) n.insert((size_t)k, ",");
         rank = " #" + n;
     }
-    int headW = tr_.width(expr + (showReading ? " (" + e.reading + ")" : ""), kHeadSize) + tr_.width(rank, kSmall + 2);
+    int headW = tr_.width(expr + reading, kHeadSize) + tr_.width(rank, kSmall + 2);
     if (headW > maxW) {  // too long: reading (and rank) on a line of their own
-        head.spans.resize(1);
-        entry_.push_back(head);
+        layout_.beginRow(kHeadSize + 8, kHeadSize);
+        layout_.add(expr.data(), expr.size(), kHeadSize, EntryLayout::C_WORD);
+        layout_.endRow();
         if (showReading || !rank.empty()) {
-            Line rd;
-            rd.size = kSenseSize + 2;
-            rd.height = kSenseLine + 2;
-            if (showReading) rd.spans.push_back({e.reading, kReading});
-            if (!rank.empty()) rd.spans.push_back({showReading ? rank : rank.substr(1), kDim, kSmall + 2});
-            entry_.push_back(rd);
+            layout_.beginRow(kSenseLine + 2, kSenseSize + 2);
+            if (showReading) layout_.add(e.reading.data(), e.reading.size(), kSenseSize + 2, EntryLayout::C_READING);
+            const std::string rk = showReading ? rank : rank.empty() ? rank : rank.substr(1);
+            if (!rk.empty()) layout_.add(rk.data(), rk.size(), kSmall + 2, EntryLayout::C_DIM);
+            layout_.endRow();
         }
     } else {
-        if (!rank.empty()) head.spans.push_back({rank, kDim, kSmall + 2});
-        entry_.push_back(head);
+        layout_.beginRow(kHeadSize + 8, kHeadSize);
+        layout_.add(expr.data(), expr.size(), kHeadSize, EntryLayout::C_WORD);
+        if (showReading) layout_.add(reading.data(), reading.size(), kHeadSize, EntryLayout::C_READING);
+        if (!rank.empty()) layout_.add(rank.data(), rank.size(), kSmall + 2, EntryLayout::C_DIM);
+        layout_.endRow();
     }
-    auto small = [&](const std::string &text, Rgb c) {
-        for (const std::string &w : tr_.wrap(text, kSmall, entryW() - 2 * kTopMargin)) {
-            Line l;
-            l.size = kSmall;
-            l.height = kSmall + 5;
-            l.spans.push_back({w, c});
-            entry_.push_back(l);
-        }
-    };
-    if (r.prefixOnly) small("(a longer word starting here)", kDim);
+    if (r.prefixOnly) small("(a longer word starting here)", EntryLayout::C_DIM);
     if (!r.reasons.empty()) {
         std::string conj = r.reasons;
         for (size_t p; (p = conj.find(" > ")) != std::string::npos;) conj.replace(p, 3, " → ");
-        small("Conjugation: " + conj, kConj);
+        small("Conjugation: " + conj, EntryLayout::C_CONJ);
     }
     std::string others;
     for (const std::string &k : e.kanjiForms)
         if (k != expr && others.size() < 60) others += (others.empty() ? "" : "・") + k;
-    if (!others.empty()) small("Also written " + others, kDim);
-    // senses: "1. (v1,vt) to eat" with the number and the part of speech in grey
-    for (const std::string &sense : e.senses) {
-        std::vector<std::string> lines = tr_.wrap(sense, kSenseSize, entryW() - 2 * kTopMargin);
-        for (size_t k = 0; k < lines.size(); k++) {
-            Line l;
-            l.size = kSenseSize;
-            l.height = kSenseLine;
-            const std::string &w = lines[k];
-            size_t grey = 0;
-            if (k == 0) {
-                size_t d = 0;
-                while (d < w.size() && w[d] >= '0' && w[d] <= '9') d++;
-                if (d > 0 && w.compare(d, 2, ". ") == 0) grey = d + 2;
-                if (w.compare(grey, 1, "(") == 0) {
-                    size_t close = w.find(") ", grey);
-                    if (close != std::string::npos) grey = close + 2;
-                }
-            }
-            if (grey) l.spans.push_back({w.substr(0, grey), kDim});
-            l.spans.push_back({w.substr(grey), kText});
-            entry_.push_back(l);
-        }
-    }
+    if (!others.empty()) small("Also written " + others, EntryLayout::C_DIM);
+    // the dictionary's name, then its entry as the PC laid it out (dict.bin: the sense lines)
+    if (!dict_.title().empty()) small(dict_.title(), EntryLayout::C_DIM);
+    if (!layout_.addEntry(dict_, r.entryId) && layout_.truncated()) small("(the rest of this entry doesn't fit)", EntryLayout::C_DIM);
 }
 
 void LookupView::keepVisible() {
@@ -457,7 +427,7 @@ SearchOutput LookupView::lookup(int block, size_t byte) {
     trimResults(c.so);
     if (!c.so.results.empty()) {  // read its entry too, so its disk blocks are in the cache
         Entry e;
-        dict_.entry(c.so.results[0].entryId, e);
+        dict_.entry(c.so.results[0].entryId, e, false);
     }
     if (cache_.size() >= 64) cache_.erase(cache_.begin());
     cache_.push_back(c);
@@ -664,9 +634,9 @@ bool LookupView::page(int dir) {
 
 int LookupView::topLinesFit() const {  // from topScroll_
     int y = kTopMargin, n = 0;
-    for (size_t i = topScroll_; i < entry_.size(); i++, n++) {
-        if (y + entry_[i].height > entryEnd()) break;
-        y += entry_[i].height;
+    for (int i = topScroll_; i < layout_.rowCount(); i++, n++) {
+        if (y + layout_.row(i).height > entryEnd()) break;
+        y += layout_.row(i).height;
     }
     return n;
 }
@@ -674,9 +644,9 @@ int LookupView::topLinesFit() const {  // from topScroll_
 bool LookupView::scroll(int lines) {
     int before = topScroll_;
     // the furthest down that still fills the screen
-    int maxScroll = (int)entry_.size();
-    for (int h = 0; maxScroll > 0 && h + entry_[maxScroll - 1].height <= entryEnd() - kTopMargin;)
-        h += entry_[--maxScroll].height;
+    int maxScroll = layout_.rowCount();
+    for (int h = 0; maxScroll > 0 && h + layout_.row(maxScroll - 1).height <= entryEnd() - kTopMargin;)
+        h += layout_.row(--maxScroll).height;
     topScroll_ = std::max(0, std::min(topScroll_ + lines, maxScroll));
     return topScroll_ != before;
 }
@@ -791,7 +761,7 @@ void LookupView::drawButtons(Canvas &c) {
 
 int LookupView::entryBand() const {
     int h = kTopMargin;
-    for (size_t i = topScroll_; i < entry_.size() && h + entry_[i].height <= entryEnd(); i++) h += entry_[i].height;
+    for (int i = topScroll_; i < layout_.rowCount() && h + layout_.row(i).height <= entryEnd(); i++) h += layout_.row(i).height;
     return std::min(h + 6, textOnTop_ ? kButtonY - 4 : kTopH);
 }
 
@@ -804,16 +774,25 @@ void LookupView::drawEntryPanel(Canvas &c, Panel p, bool bandShaded) {
         if (!bandShaded) c.shade(0, 0, W, h, kBandShade);
         if (h < (textOnTop_ ? kBottomH : kTopH)) c.fill(0, h, W, 1, kRule);
     }
+    // what each role is drawn in (EntryLayout::Color order)
+    static const Rgb kColors[EntryLayout::C_COUNT] = {kText, kDim, kWord, kReading, kConj, kLink, kExample,
+                                                      kChipPos, kChipMisc, kChipField, kChipDialect, kChipOther};
     int y = kTopMargin;
-    for (size_t i = topScroll_; i < entry_.size(); i++) {
-        const Line &l = entry_[i];
-        if (y + l.height > end) break;
-        int x = kTopMargin;
-        for (const Span &s : l.spans) {
-            int size = s.size ? s.size : l.size;  // a smaller span sits on the line's baseline
-            x = tr_.draw(c, x, y + (l.height - l.size) / 2 + (l.size - size) * 4 / 5, s.text, size, s.color);
+    for (int i = topScroll_; i < layout_.rowCount(); i++) {
+        const EntryLayout::Row &row = layout_.row(i);
+        if (y + row.height > end) break;
+        for (int k = row.first; k < row.first + row.count; k++) {
+            const EntryLayout::Span &s = layout_.span(k);
+            const Rgb col = kColors[s.color < EntryLayout::C_COUNT ? s.color : 0];
+            if (s.kind == EntryLayout::K_CHIP) {  // the tag on a box of its colour, darkened
+                const int h = EntryLayout::kChip + 4;
+                c.fill(s.x, y + s.y, s.w, h, Rgb(col.r / 4 + 18, col.g / 4 + 20, col.b / 4 + 24));
+                tr_.draw(c, s.x + EntryLayout::kChipPad, y + s.y + 2, layout_.text(s), s.len, s.size, col);
+            } else {
+                tr_.draw(c, s.x, y + s.y, layout_.text(s), s.len, s.size, col);
+            }
         }
-        y += l.height;
+        y += row.height;
     }
     // which match of how many (L/R for the others)
     if (so_.results.size() > 1) {
@@ -824,7 +803,7 @@ void LookupView::drawEntryPanel(Canvas &c, Panel p, bool bandShaded) {
         tr_.draw(c, W - kTopMargin - w, kTopMargin + 4, t, kSmall, kDim);
     }
     if (topScroll_ > 0) tr_.draw(c, W - 18, end - 34, "▲", 12, kDim);
-    if (topScroll_ + topLinesFit() < (int)entry_.size()) tr_.draw(c, W - 18, end - 14, "▼", 12, kDim);
+    if (topScroll_ + topLinesFit() < layout_.rowCount()) tr_.draw(c, W - 18, end - 14, "▼", 12, kDim);
 }
 
 }  // namespace kt

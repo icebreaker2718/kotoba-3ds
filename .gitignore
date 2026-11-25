@@ -23,3 +23,6 @@ tests/test_lens
 tests/test_ui
 tests/test_memshare
 tests/test_memhooks_arm
+tests/test_display
+tests/bench_entry
+*.ktd

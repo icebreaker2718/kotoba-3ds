@@ -139,7 +139,11 @@ int TextRenderer::drawChar(Canvas &c, int x, int y, uint32_t cp, int size, Rgb c
 }
 
 int TextRenderer::draw(Canvas &c, int x, int y, const std::string &text, int size, Rgb color) {
-    for (size_t i = 0; i < text.size();) x = drawChar(c, x, y, utf8Next(text, i), size, color);
+    return draw(c, x, y, text.data(), text.size(), size, color);
+}
+
+int TextRenderer::draw(Canvas &c, int x, int y, const char *text, size_t len, int size, Rgb color) {
+    for (size_t i = 0; i < len;) x = drawChar(c, x, y, utf8Next(text, len, i), size, color);
     return x;
 }
 

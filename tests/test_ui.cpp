@@ -128,6 +128,31 @@ int main(int argc, char **argv) {
     std::string err;
     if (!dict.open(&dr, err)) { printf("dictionary: %s\n", err.c_str()); return 1; }
     LookupView v(dict, tr);
+    {   // the entry laid out from the dictionary's display runs (dicts/ files) or its sense lines (dict.bin)
+        LookupView e(dict, tr);
+        e.setText({"食べる"});
+        const EntryLayout &l = e.entryLayout();
+        bool chip = false, numbered = false, title = dict.title().empty(), furigana = false;
+        for (int r = 0; r < l.rowCount(); r++)
+            for (int k = l.row(r).first; k < l.row(r).first + l.row(r).count; k++) {
+                const EntryLayout::Span &sp = l.span(k);
+                const std::string t(l.text(sp), sp.len);
+                chip |= sp.kind == EntryLayout::K_CHIP;
+                furigana |= sp.kind == EntryLayout::K_RUBY;
+                numbered |= t.rfind("1. ", 0) == 0;
+                title |= t == dict.title();
+            }
+        check(l.rowCount() > 3 && numbered, "entry: rows laid out, the first sense numbered");
+        check(title, "entry: the dictionary's name shown (dicts/ files)");
+        if (dict.version() >= 3) check(chip && furigana, "entry: tag chips and furigana in a dicts/ file's entry");
+        RgbCanvas top(400, 240);
+        e.drawTop(top);
+        bool drawn = false;
+        for (int y = 60; y < 200 && !drawn; y++)
+            for (int x = 10; x < 300 && !drawn; x++) drawn = top.at(x, y).r > 200;
+        check(drawn, "entry: drawn below the headword");
+        check(!e.scroll(-1), "entry: can't scroll above the top");
+    }
     {   // frequency ranks (dict.bin built with --freq): shown, and homographs listed most common first
         SearchOutput so = scanAt(dict, "しょうか", 0);
         std::vector<uint32_t> ranks;

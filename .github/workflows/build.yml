@@ -74,17 +74,23 @@ jobs:
           FREQ=""
           if [ -s jpdb-freq.zip ]; then FREQ="--freq jpdb-freq.zip"
           else echo "::warning title=JPDB::frequency list download failed, building without ranks"; fi
+          # dict.bin (version 2, every plugin) and dicts/jitendex.ktd (version 3: full entries) from one read
           if [ -s jitendex-yomitan.zip ]; then
-            python tools/build_dict.py --yomitan jitendex-yomitan.zip $FREQ -o dict.bin
+            python tools/build_dict.py --yomitan jitendex-yomitan.zip $FREQ -o dict.bin --dicts-out dicts/jitendex.ktd
           else
             echo "::warning title=Jitendex::download failed, building from the bundled JMdict instead"
-            python tools/build_dict.py $FREQ -o dict.bin
+            python tools/build_dict.py $FREQ -o dict.bin --dicts-out dicts/jitendex.ktd
           fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: Kotoba3DS-dict
           path: dict.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kotoba3DS-dicts
+          path: dicts/jitendex.ktd
 
       - name: Install Japanese fonts (for the on-device OCR tests)
         run: sudo apt-get update -q && sudo apt-get install -y -q fonts-noto-cjk fonts-misaki
@@ -124,6 +130,13 @@ jobs:
 
       - name: Test the plugin core against it
         run: make -C tests run DICT=../dict.bin
+
+      - name: Test the dicts/ file (full entries) against dict.bin, and the plugin core on it
+        run: |
+          python tests/test_display_runs.py
+          make -C tests test_display
+          tests/test_display dict.bin dicts/jitendex.ktd
+          (cd tests && ./test_core ../dicts/jitendex.ktd > /dev/null && ./test_ui ../dicts/jitendex.ktd && ./test_wrap ../dicts/jitendex.ktd)
 
       - name: Test on-device OCR on rendered 3DS screens (VOCR6, and VOCR5 as the fallback)
         run: |
@@ -201,7 +214,8 @@ jobs:
   alpha-release:
     # The alpha branch's plugin as a development pre-release ("alpha-dev"), so the console build can be
     # fetched through the REST API and put on the owner's SD card (the owner's OK, 2026-10-28). Not for testers.
-    needs: [plugin]
+    # With it, the dicts/ dictionary file the alpha plugin reads (full entries), so it waits for the dictionary job.
+    needs: [plugin, dictionary]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/alpha'
     runs-on: ubuntu-latest
     permissions:
@@ -211,13 +225,17 @@ jobs:
         with:
           name: Kotoba3DS-plugin
           path: out
+      - uses: actions/download-artifact@v4
+        with:
+          name: Kotoba3DS-dicts
+          path: out
       - name: Publish the "alpha-dev" pre-release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete alpha-dev --yes --cleanup-tag 2>/dev/null || true
-          gh release create alpha-dev out/Kotoba3DS.3gx --target "$GITHUB_SHA" --prerelease --latest=false \
+          gh release create alpha-dev out/Kotoba3DS.3gx out/jitendex.ktd --target "$GITHUB_SHA" --prerelease --latest=false \
             --title "DEVELOPMENT ONLY - do not use (alpha, experimental)" \
             --notes "NOT FOR TESTERS OR PLAYERS. This is the developer's experimental alpha build (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)), published only so it can be copied onto the developer's own SD card. It may crash, run slowly (it benchmarks every reader on each read) or need files that aren't in any release. For trying new features use the \"Kotoba3DS test build\" pre-release; for normal use, the latest release."
 

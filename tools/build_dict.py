@@ -13,6 +13,9 @@ Radicals (for the "search by kanji components" screen):
 
 Output: dict.bin  ->  copy to SD:/3ds/kotoba3ds/dict.bin
 
+Dictionary files for the dicts/ folder (--dicts-out; plugin 1.3+): version 3, below, one file per dictionary.
+dict.bin (-o) stays version 2 for older plugins.
+
 File format (little endian), version 2 (the plugin also reads version 1: 8-byte key records, no fences):
   header (64 bytes)
     0  "KTB1"
@@ -34,6 +37,21 @@ File format (little endian), version 2 (the plugin also reads version 1: 8-byte 
   radical lists: u16 kanji ids, ascending (== most common first)
   key strings: NUL-terminated UTF-8
   entry blobs (UTF-8, see ENTRY BLOB below)
+
+Version 3 (a dictionary file in dicts/): as version 2, plus
+   52  u32 tagTableOff     tagCount x u32 offset of {u8 category, code\\0, label\\0, description\\0}
+   56  u32 tagCount
+   60  u32 titleOff        the dictionary's name, NUL-terminated UTF-8
+  and each entry blob is the machine line (line 0 below), '\\n', then DISPLAY RUNS (no headline or sense
+  lines: the plugin derives the plain senses for saved words from the runs), then a NUL.
+
+DISPLAY RUNS: what the 3DS draws for the entry, styled on the PC (yomitan.display_paragraphs); the 3DS only
+  wraps them to the panel's width. UTF-8 text, never a byte below 0x20, between these codes:
+    0x01 kind indent+1   a paragraph starts (kinds: yomitan.P_*; indent in levels)
+    0x02 style           the text after it is in this style (yomitan.S_*, + S_SMALL for the small size)
+    0x03 hi lo           a tag chip: tag id (hi - 1) * 255 + (lo - 1) in the tag table
+    0x04                 rows after the first start here (a hanging indent, after a sense's number)
+    0x05 base 0x06 reading 0x07   furigana over base, in the current style
 """
 import argparse
 import gzip
@@ -238,7 +256,7 @@ def pri_score(tags):
 
 
 class Entry:
-    __slots__ = ("idseq", "kanji", "kana", "senses", "freq")
+    __slots__ = ("idseq", "kanji", "kana", "senses", "freq", "paras")
 
     def __init__(self, idseq):
         self.idseq = idseq
@@ -246,6 +264,7 @@ class Entry:
         self.kanji = []   # (text, info_codes, pri_tags)
         self.kana = []    # (text, info_codes, pri_tags, nokanji)
         self.senses = []  # (pos_codes, misc_codes, glosses)
+        self.paras = None  # [yomitan.Para] to show (version 3 files); None: made from senses
 
 
 # ----------------------------------------------------------------------------
@@ -390,7 +409,7 @@ def _yomi_form_codes(tags):
     return [c for name, c in YOMI_FORM_TAGS.items() if name in t]
 
 
-def load_yomitan(path, freq=None):
+def load_yomitan(path, freq=None, keep_display=False):
     """Yomitan term dictionary (.zip) -> Entry objects. Sequenced dictionaries (Jitendex,
     JMdict-yomitan) are grouped into one entry per sequence; others into one entry per
     (expression, reading)."""
@@ -430,6 +449,8 @@ def load_yomitan(path, freq=None):
         main = max(content_rows, key=lambda r: len(json.dumps(r[5], ensure_ascii=False)))
         glossary, rules = main[5], main[3]
         rule_codes = rules.split()
+        if keep_display:
+            e.paras = yomitan.display_paragraphs(glossary)
         if yomitan.is_jitendex_like(glossary):
             e.senses = yomitan.jitendex_senses(glossary)
             if e.senses and rule_codes and not pos_mask(c for s in e.senses for c in s[0]):
@@ -551,6 +572,106 @@ def entry_blob(e: Entry) -> str:
 
 
 # ----------------------------------------------------------------------------
+# Version 3: display runs (see DISPLAY RUNS at the top)
+# ----------------------------------------------------------------------------
+class TagTable:
+    """The tags the chips name, each once: (category, code, label, description) -> id."""
+
+    def __init__(self):
+        self.ids, self.rows = {}, []
+
+    def id(self, tag):
+        if tag not in self.ids:
+            assert len(self.rows) < 255 * 255
+            self.ids[tag] = len(self.rows)
+            self.rows.append(tag)
+        return self.ids[tag]
+
+
+def paras_from_senses(e):
+    """Display paragraphs for entries without structured content (JMdict XML / jamdict): the senses as the
+    version 2 blob shows them, part of speech as chips over each run of senses that share it."""
+    import yomitan as y
+    out, prev = [], None
+    many = len(e.senses) > 1
+    for i, (p, m, g) in enumerate(e.senses[:MAX_SENSES], 1):
+        if p and p != prev:
+            gp = y.Para(y.P_GROUP)
+            gp.items = [("chip", (y.TAG_POS, c, c, "")) for c in p]
+            out.append(gp)
+        prev = p
+        sp = y.Para(y.P_SENSE)
+        if many:
+            sp.text(y.S_DIM, f"{i}. ")
+            sp.items.append(("hang",))
+        sp.items += [("chip", (y.TAG_MISC, c, c, "")) for c in m]
+        sp.text(y.S_TEXT, "; ".join(g))
+        out.append(sp)
+    return out
+
+
+def encode_runs(paras, tags):
+    out = bytearray()
+    for p in paras:
+        out += bytes([1, p.kind, min(p.indent, 250) + 1])
+        style = None
+        for it in p.items:
+            if it[0] == "chip":
+                t = tags.id(it[1])
+                out += bytes([3, t // 255 + 1, t % 255 + 1])
+                continue
+            if it[0] == "hang":
+                out.append(4)
+                continue
+            if it[1] != style:
+                style = it[1]
+                out += bytes([2, style])
+            if it[0] == "text":
+                out += it[2].encode()
+            else:  # ruby
+                out += b"\x05" + it[2].encode() + b"\x06" + it[3].encode() + b"\x07"
+    assert min(out, default=1) >= 1
+    return bytes(out)
+
+
+def entry_record(e: Entry, tags) -> bytes:
+    """Version 3: the machine line, then the display runs."""
+    machine = entry_blob(e).split("\n", 1)[0]
+    paras = e.paras if e.paras is not None else paras_from_senses(e)
+    return machine.encode() + b"\n" + encode_runs(paras, tags)
+
+
+def decode_runs(data, tags):
+    """For the tests: display runs -> [(kind, indent, text with chips as [label] and ruby as base(reading))]."""
+    out, i, n = [], 0, len(data)
+    while i < n:
+        c = data[i]
+        if c == 1:
+            out.append([data[i + 1], data[i + 2] - 1, ""])
+            i += 3
+        elif c == 2:
+            i += 2
+        elif c == 3:
+            t = (data[i + 1] - 1) * 255 + data[i + 2] - 1
+            out[-1][2] += f"[{tags[t][2]}]"
+            i += 3
+        elif c == 4:
+            i += 1
+        elif c == 5:
+            j = data.index(6, i)
+            k = data.index(7, j)
+            out[-1][2] += data[i + 1:j].decode() + "(" + data[j + 1:k].decode() + ")"
+            i = k + 1
+        else:
+            j = i
+            while j < n and data[j] >= 0x20:
+                j += 1
+            out[-1][2] += data[i:j].decode()
+            i = j
+    return [tuple(p) for p in out]
+
+
+# ----------------------------------------------------------------------------
 # Radicals
 # ----------------------------------------------------------------------------
 # radkfile uses ordinary kanji as stand-ins for some radical shapes; label them.
@@ -587,8 +708,10 @@ def load_radkfile(path):
 FENCE_STEP = 128  # keys per stretch between two fences (see build)
 
 
-def build(entries, rads, out_path, freq=None):
+def build(entries, rads, out_path, freq=None, version=2, title=""):
+    """Writes dict.bin (version 2) or a dicts/ file (version 3: display runs, tag table, title)."""
     entries = list(entries)
+    tags = TagTable()
     print(f"{len(entries)} entries", file=sys.stderr)
 
     def entry_rank(e):
@@ -666,7 +789,7 @@ def build(entries, rads, out_path, freq=None):
     for e in entries:
         entry_offs.append(len(blob))
         masks.append(pos_mask(c for s in e.senses for c in s[0]))
-        blob += entry_blob(e).encode() + b"\0"
+        blob += (entry_record(e, tags) if version >= 3 else entry_blob(e).encode()) + b"\0"
     end_off = len(blob)
     # entry index
     align()
@@ -689,13 +812,28 @@ def build(entries, rads, out_path, freq=None):
         assert len(k) < 65536
         blob += struct.pack("<H", len(k)) + k
 
-    header = struct.pack("<4s12I", b"KTB1", 2, len(entries), entry_idx_off, len(key_list), key_idx_off,
-                         len(rad_records), rad_off, len(kanji_order), kanji_off, FENCE_STEP, len(fences), fence_off)
+    extra = []
+    if version >= 3:  # the tags' table and the dictionary's name
+        align()
+        tag_rows = []
+        for cat, code, label, desc in tags.rows:
+            tag_rows.append(len(blob))
+            blob += bytes([cat]) + b"\0".join(x.encode() for x in (code, label, desc)) + b"\0"
+        align()
+        tag_off = len(blob)
+        blob += struct.pack(f"<{len(tag_rows)}I", *tag_rows)
+        title_off = len(blob)
+        blob += title.encode() + b"\0"
+        extra = [tag_off, len(tag_rows), title_off]
+    header = struct.pack(f"<4s{12 + len(extra)}I", b"KTB1", version, len(entries), entry_idx_off, len(key_list),
+                         key_idx_off, len(rad_records), rad_off, len(kanji_order), kanji_off, FENCE_STEP, len(fences),
+                         fence_off, *extra)
     blob[:len(header)] = header
     with open(out_path, "wb") as f:
         f.write(blob)
-    print(f"wrote {out_path}: {len(blob) / 1e6:.1f} MB, {len(rad_records)} radicals, "
-          f"{len(kanji_order)} kanji", file=sys.stderr)
+    print(f"wrote {out_path} (version {version}): {len(blob) / 1e6:.1f} MB, {len(rad_records)} radicals, "
+          f"{len(kanji_order)} kanji" + (f", {len(tags.rows)} tags" if version >= 3 else ""), file=sys.stderr)
+    return tags
 
 
 def find_installed(pkg, rel):
@@ -720,21 +858,33 @@ def main():
                     help="Yomitan dictionary zip, e.g. jitendex-yomitan.zip (repeat to combine several)")
     ap.add_argument("--freq", metavar="ZIP", help="Yomitan frequency dictionary zip (e.g. JPDB) for ranking")
     ap.add_argument("--radkfile", help="radkfile or radkfilex (.gz ok)")
-    ap.add_argument("-o", "--out", default="dict.bin")
+    ap.add_argument("-o", "--out", help="dict.bin to write (version 2, every plugin version); the default when "
+                    "--dicts-out isn't given")
+    ap.add_argument("--dicts-out", metavar="FILE",
+                    help="dictionary file for SD:/3ds/kotoba3ds/dicts/ to write (version 3: full entries, plugin 1.3+), "
+                         "e.g. dicts/jitendex.ktd; with -o both are written from one read of the sources")
     a = ap.parse_args()
+    if not a.out and not a.dicts_out:
+        a.out = "dict.bin"
 
     freq = None
     if a.freq:
         freq = load_frequency(a.freq)
         print(f"frequency list: {len(freq.by_pair)} word/reading pairs, {len(freq.by_term)} words",
               file=sys.stderr)
+    title = ""
     if a.yomitan:
+        import yomitan
+        title = re.sub(r"\s*\[[^\]]*\]\s*$", "", yomitan.read_index(a.yomitan[0]).get("title", "")) or \
+            os.path.splitext(os.path.basename(a.yomitan[0]))[0]
+
         def chained():
             for p in a.yomitan:
-                yield from load_yomitan(p, freq)
+                yield from load_yomitan(p, freq, keep_display=bool(a.dicts_out))
         entries = chained()
     elif a.jmdict:
         entries = load_jmdict_xml(a.jmdict)
+        title = "JMdict"
     else:
         db = a.jamdict_db or find_installed("jamdict_data", "jamdict.db") \
             or find_installed("jamdict_data", "jamdict.db.xz")
@@ -742,6 +892,7 @@ def main():
             sys.exit("No dictionary source. Pass --yomitan jitendex-yomitan.zip or --jmdict JMdict_e.gz, or run:\n"
                      "  pip install jamdict jamdict-data")
         entries = load_jamdict_db(db)
+        title = "JMdict"
 
     rk = a.radkfile or find_installed("jamdict", "data/radkfile.gz")
     if not rk:
@@ -749,7 +900,14 @@ def main():
         rads = []
     else:
         rads = load_radkfile(rk)
-    build(entries, rads, a.out, freq)
+    if a.out and a.dicts_out:
+        entries = list(entries)
+    if a.out:
+        build(entries, rads, a.out, freq)
+    if a.dicts_out:
+        if os.path.dirname(a.dicts_out):
+            os.makedirs(os.path.dirname(a.dicts_out), exist_ok=True)
+        build(entries, rads, a.dicts_out, freq, version=3, title=title)
 
 
 if __name__ == "__main__":

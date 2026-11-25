@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/dict.hpp"
+#include "core/entry_layout.hpp"
 #include "core/known_words.hpp"
 #include "core/search.hpp"
 #include "core/ui_text.hpp"
@@ -19,7 +20,7 @@ public:
     // Touchscreen 320x240, top screen 400x240.
     static constexpr int kBottomW = 320, kBottomH = 240, kTopW = 400, kTopH = 240;
 
-    LookupView(Dictionary &dict, TextRenderer &text) : dict_(dict), tr_(text) {}
+    LookupView(Dictionary &dict, TextRenderer &text) : dict_(dict), tr_(text), layout_(text) { layout_.reserve(); }
 
     // The text blocks that were read. A '\n' in a block is where the game broke the line: the text
     // starts a new row there too (and is shrunk, down to a point, so the game's lines fit), but
@@ -108,6 +109,9 @@ public:
 private:
     Dictionary &dict_;
     TextRenderer &tr_;
+public:
+    const EntryLayout &entryLayout() const { return layout_; }  // for the tests
+private:
     std::vector<std::string> blocks_;
     std::vector<std::vector<size_t>> breaks_;  // per block: byte offsets that start a game line
     std::vector<Cell> cells_;
@@ -122,11 +126,9 @@ private:
     size_t selByte_ = 0, selLen_ = 0;
     SearchOutput so_;
     size_t resultIdx_ = 0;
-    // the entry on the top screen
-    struct Span { std::string text; Rgb color; int size = 0; };  // size 0 = the line's
-    struct Line { std::vector<Span> spans; int size = 16, height = 21; };
-    std::vector<Line> entry_;
-    int topScroll_ = 0;
+    // the entry on the top screen: rows of spans in memory taken once (EntryLayout)
+    EntryLayout layout_;
+    int topScroll_ = 0;  // the first row shown
     bool hidden_ = false, textOnTop_ = false;
     // the layout's sizes, by where the text goes
     int textW() const;

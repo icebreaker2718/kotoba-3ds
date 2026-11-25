@@ -9,6 +9,7 @@ namespace kt {
 
 // Decode one UTF-8 code point starting at s[i]; advances i. Returns 0xFFFD on bad input.
 uint32_t utf8Next(const std::string &s, size_t &i);
+uint32_t utf8Next(const char *s, size_t size, size_t &i);  // the same in size bytes at s
 void utf8Append(std::string &out, uint32_t cp);
 std::vector<uint32_t> utf8Decode(const std::string &s);
 size_t utf8Length(const std::string &s);

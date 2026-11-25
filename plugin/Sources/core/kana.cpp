@@ -4,11 +4,13 @@
 
 namespace kt {
 
-uint32_t utf8Next(const std::string &s, size_t &i) {
+uint32_t utf8Next(const std::string &s, size_t &i) { return utf8Next(s.data(), s.size(), i); }
+
+uint32_t utf8Next(const char *s, size_t size, size_t &i) {
     unsigned char c = (unsigned char)s[i];
     if (c < 0x80) { i += 1; return c; }
     int n = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : -1;
-    if (n < 0 || i + n >= s.size()) { i += 1; return 0xFFFD; }  // stray/truncated sequence
+    if (n < 0 || i + n >= size) { i += 1; return 0xFFFD; }  // stray/truncated sequence
     uint32_t cp = c & (0x3F >> n);
     for (int k = 1; k <= n; k++) {
         unsigned char cc = (unsigned char)s[i + k];
