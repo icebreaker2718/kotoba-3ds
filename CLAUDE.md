@@ -522,6 +522,10 @@ works on the code.
     NHK 72%, Kanjium 76%, NHK + Kanjium 82%; where both have a word they agree fully 92%, share a pattern 99%. NHK lists
     some words as "聞く，聴く" (313 terms): splitting them would add ~60 common words (offered, not done). Tested with Kanjium (mifunetoshiro/kanjium accents.txt made into a pitch zip,
     not in the repo). CI builds `dicts/jpdb.ktm` from the JPDB zip it already downloads, runs test_meta, alpha-dev has it.
+  - Bug found on the console (owner, 2026-11-26, b3ad513): no pitch / frequency on any lookup until Select was pressed
+    once in the session (screenshots: 前 with the built-in "#73"). `v.setMeta(&g_meta)` had gone into NextDictionary
+    instead of RunLookupView (the edit matched the first `setDictionaryPlace` line). Fixed; test_meta now also gives the
+    files after the word is shown, as the plugin does. A Select switch took 8.2 s once more in that session (SD card).
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

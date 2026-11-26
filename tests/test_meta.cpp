@@ -171,6 +171,27 @@ int main(int argc, char **argv) {
         if (freq) check(all.find(freqTitle + " ") != std::string::npos && all.find(" #") == std::string::npos,
                         "食べる: the frequency line, no built-in #rank");
     }
+    // as the plugin does it: the lookup screen opens on the word first, then gets the files (RunLookupView). The
+    // entry must be laid out again with them (on the console it wasn't, until Select: 2026-11-26)
+    if (set.count()) {
+        BoxFont font;
+        TextRenderer tr(font);
+        LookupView v(d, tr);
+        v.setText({"食べる"});
+        auto shown = [&]() {
+            std::string all;
+            const EntryLayout &l = v.entryLayout();
+            for (int row = 0; row < l.rowCount() && row < 8; row++)
+                for (int k = l.row(row).first; k < l.row(row).first + l.row(row).count; k++)
+                    all += std::string(l.text(l.span(k)), l.span(k).len);
+            return all;
+        };
+        const std::string before = shown();
+        v.setMeta(&set);
+        const std::string after = shown();
+        check(after != before && after.find(set.file(0).title()) != std::string::npos,
+              "files given after the word was shown: the entry shows them at once");
+    }
     for (FileReader *r : readers) delete r;
     printf("%s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;

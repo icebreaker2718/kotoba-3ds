@@ -313,7 +313,6 @@ static void NextDictionary(kt::LookupView &v) {
                          g_dictNow >= 0 ? g_dictFiles[g_dictNow].c_str() : "?", g_dict.title().c_str(), (unsigned long)ms,
                          (unsigned long)(HeapFree() / 1024), failed.empty() ? "" : (", " + failed).c_str()));
     v.setDictionaryPlace(DictPlace(), DictCount());
-    v.setMeta(&g_meta);
     v.dictionaryChanged();
     if (!failed.empty()) v.setStatus("Couldn't open " + failed, kt::Rgb(232, 120, 112));
 }
@@ -1245,6 +1244,7 @@ static u64 g_viewOpenedAt = 0;  // when the read finished, for the log
 static void RunLookupView(kt::LookupView &v) {
     g_hide = 0;
     v.setDictionaryPlace(DictPlace(), DictCount());
+    v.setMeta(&g_meta);  // pitch accent and frequency files, from the first lookup on
     OSD::SwapBuffers();  // let CTRPF finish any pending redraw of its own first
     DrawLookup(v);
     FlushLog();  // the read's log lines, now that the lookup is on screen
