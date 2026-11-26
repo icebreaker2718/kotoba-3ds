@@ -514,7 +514,10 @@ works on the code.
     first when there are several pitch files); frequency "one line, all lists": "BCCWJ 199, 266 · JPDBv2 184, 13,390
     (kana)"; the built-in "#rank" only when there is no frequency file. EntryLayout spans gained `deco` (D_OVER, D_DROP).
   - NHK 2016 (the owner's pitch choice) isn't on GitHub and is NHK's data: not built or published by CI; build it from the
-    owner's copy and put it on the card. Tested with Kanjium (mifunetoshiro/kanjium accents.txt made into a pitch zip,
+    owner's copy and put it on the card. Done 2026-11-26 from the owner's `Pitch_NHK2016.zip` (title "NHK", kotu.io,
+    revision pitch_1.0.1.1): every bank's stored CRC is wrong but sizes and JSON are intact (yomitan._read ignores CRCs,
+    as Yomitan does); 73,100 rows -> 72,053 records (124 rows with an empty term dropped), `dicts/nhk2016.ktm` 2.0 MB;
+    every record found by test_meta. Tested with Kanjium (mifunetoshiro/kanjium accents.txt made into a pitch zip,
     not in the repo). CI builds `dicts/jpdb.ktm` from the JPDB zip it already downloads, runs test_meta, alpha-dev has it.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
