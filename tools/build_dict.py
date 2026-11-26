@@ -14,6 +14,7 @@ Radicals (for the "search by kanji components" screen):
 Output: dict.bin  ->  copy to SD:/3ds/kotoba3ds/dict.bin
 
 Dictionary files for the dicts/ folder (--dicts-out; plugin 1.3+): version 3, below, one file per dictionary.
+Pitch accent and frequency files for dicts/ (--meta ZIP --meta-out FILE.ktm): KTM1, see build_meta.
 dict.bin (-o) stays version 2 for older plugins.
 
 File format (little endian), version 2 (the plugin also reads version 1: 8-byte key records, no fences):
@@ -525,6 +526,125 @@ def load_frequency(path):
 
 
 # ----------------------------------------------------------------------------
+# Pitch accent / frequency files (.ktm) for dicts/
+# ----------------------------------------------------------------------------
+META_BLOCK = 4096
+META_PITCH, META_FREQ = 1, 2
+
+
+def _meta_text(t):
+    """JPDB's ㋕ (how often the word is written in kana) as words: the 3DS font may not have the symbol."""
+    return re.sub(r"\s*㋕", " (kana)", t)
+
+
+def meta_values(path):
+    """A Yomitan pitch or frequency dictionary -> (kind, title, {(expression, reading or ""): [values]}).
+    Pitch: the downstep positions (ints), in the dictionary's order. Frequency: what Yomitan shows (displayValue,
+    else value), as text."""
+    import yomitan
+    kind = yomitan.dictionary_kind(path)
+    if kind not in ("pitch", "freq"):
+        raise SystemExit(f"{path}: not a pitch accent or frequency dictionary ({kind})")
+    title = re.sub(r"\s*\[[^\]]*\]\s*$", "", yomitan.read_index(path).get("title", "")) or \
+        os.path.splitext(os.path.basename(path))[0]
+    title = re.sub(r"\s*㋕", "", title)
+    out = {}
+    for expr, mode, data in yomitan.iter_meta(path):
+        if mode != kind or not isinstance(expr, str) or not expr:
+            continue
+        reading = data.get("reading", "") if isinstance(data, dict) else ""
+        reading = reading if isinstance(reading, str) else ""
+        vals = out.setdefault((expr, reading), [])
+        if kind == "pitch":
+            for p in (data.get("pitches") or []) if isinstance(data, dict) else []:
+                pos = p.get("position") if isinstance(p, dict) else None
+                if isinstance(pos, int) and 0 <= pos < 64 and pos not in vals:
+                    vals.append(pos)
+        else:
+            v = data.get("frequency", data) if isinstance(data, dict) and "frequency" in data else data
+            if isinstance(v, dict):
+                v = v.get("displayValue", v.get("value"))
+            if isinstance(v, float) and v == int(v):
+                v = int(v)
+            if isinstance(v, (int, float, str)) and str(v).strip():
+                t = _meta_text(str(v).strip().replace("\t", " ").replace("\n", " "))
+                if t not in vals:
+                    vals.append(t)
+    return kind, title, {k: v for k, v in out.items() if v}
+
+
+META_GROUP = 64  # blocks per group: the plugin keeps one key per group in memory
+
+
+def build_meta(path, out_path):
+    """Writes a .ktm file (little endian):
+         0  "KTM1"
+         4  u32 version (1)
+         8  u32 kind (1 pitch accent, 2 frequency)
+        12  u32 records
+        16  u32 block size (4096)
+        20  u32 blocks
+        24  u32 offset of the blocks
+        28  u32 offset of the block keys: for each block, u16 length + its first record's key
+        32  u32 offset of the title (NUL-terminated UTF-8)
+        36  u32 blocks per group (64)
+        40  u32 groups
+        44  u32 offset of the groups: for each, u32 offset of its first block's key (from the block keys' offset),
+            then for each, u16 length + its first block's key
+        48  u32 the largest group's block keys in bytes (the plugin reads a group's in one go)
+        52-63 reserved
+      Blocks: records sorted by key (UTF-8 bytes), never across a block's end, the rest of a block NULs. A record:
+        key = expression TAB reading (reading empty: any reading), NUL, value, NUL. Value: pitch accent "2,0" (downstep
+        positions, Yomitan's, in the dictionary's order); frequency what Yomitan shows, several joined with ", ".
+      The plugin keeps the groups' keys in memory; a lookup reads its group's block keys, then one block."""
+    kind, title, values = meta_values(path)
+    recs = []
+    for (expr, reading), vals in values.items():
+        key = (expr + "\t" + reading).encode()
+        val = ",".join(str(v) for v in vals) if kind == "pitch" else ", ".join(vals)
+        rec = key + b"\0" + val.encode() + b"\0"
+        if len(rec) > META_BLOCK or len(key) > 240:  # longer keys are phrases nobody looks up
+            continue
+        recs.append((key, rec))
+    recs.sort()
+    blocks, keys, cur = [], [], bytearray()
+    for key, rec in recs:
+        if len(cur) + len(rec) > META_BLOCK:
+            blocks.append(bytes(cur) + b"\0" * (META_BLOCK - len(cur)))
+            cur = bytearray()
+        if not cur:
+            keys.append(key)
+        cur += rec
+    if cur:
+        blocks.append(bytes(cur) + b"\0" * (META_BLOCK - len(cur)))
+    data_off = 64
+    key_off = data_off + META_BLOCK * len(blocks)
+    key_blob, key_at = bytearray(), []
+    for k in keys:
+        key_at.append(len(key_blob))
+        key_blob += struct.pack("<H", len(k)) + k
+    group_firsts = list(range(0, len(keys), META_GROUP))
+    title_off = key_off + len(key_blob)
+    group_off = title_off + len(title.encode()) + 1
+    group_blob = struct.pack(f"<{len(group_firsts)}I", *[key_at[i] for i in group_firsts]) + \
+        b"".join(struct.pack("<H", len(keys[i])) + keys[i] for i in group_firsts)
+    seg_ends = [key_at[i] for i in group_firsts[1:]] + [len(key_blob)]
+    largest = max((e - key_at[i] for i, e in zip(group_firsts, seg_ends)), default=0)
+    header = struct.pack("<4s12I", b"KTM1", 1, META_PITCH if kind == "pitch" else META_FREQ, len(recs), META_BLOCK,
+                         len(blocks), data_off, key_off, title_off, META_GROUP, len(group_firsts), group_off, largest)
+    with open(out_path, "wb") as f:
+        f.write(header + b"\0" * (64 - len(header)))
+        for b in blocks:
+            f.write(b)
+        f.write(key_blob)
+        f.write(title.encode() + b"\0")
+        f.write(group_blob)
+    print(f"wrote {out_path}: {title}, {kind}, {len(recs)} records in {len(blocks)} blocks "
+          f"({os.path.getsize(out_path) / 1e6:.1f} MB; {len(group_blob) / 1024:.1f} KB kept in memory, largest group "
+          f"{largest} bytes)", file=sys.stderr)
+
+
+# ----------------------------------------------------------------------------
 # Entry blob
 # ----------------------------------------------------------------------------
 # Line 0 (machine fields, TAB separated):
@@ -867,7 +987,17 @@ def main():
     ap.add_argument("--dicts-out", metavar="FILE",
                     help="dictionary file for SD:/3ds/kotoba3ds/dicts/ to write (version 3: full entries, plugin 1.3+), "
                          "e.g. dicts/jitendex.ktd; with -o both are written from one read of the sources")
+    ap.add_argument("--meta", metavar="ZIP", help="a Yomitan pitch accent or frequency dictionary, for --meta-out")
+    ap.add_argument("--meta-out", metavar="FILE", help="its file for SD:/3ds/kotoba3ds/dicts/ (e.g. dicts/jpdb.ktm)")
     a = ap.parse_args()
+    if a.meta or a.meta_out:
+        if not (a.meta and a.meta_out):
+            ap.error("--meta and --meta-out go together")
+        if os.path.dirname(a.meta_out):
+            os.makedirs(os.path.dirname(a.meta_out), exist_ok=True)
+        build_meta(a.meta, a.meta_out)
+        if not a.out and not a.dicts_out:
+            return
     if not a.out and not a.dicts_out:
         a.out = "dict.bin"
 

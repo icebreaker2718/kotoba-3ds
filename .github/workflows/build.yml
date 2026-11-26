@@ -103,10 +103,17 @@ jobs:
           if [ -s jmnedict.zip ]; then python tools/build_dict.py --yomitan jmnedict.zip --dicts-out dicts/jmnedict.ktd
           else echo "::warning title=JMnedict::download failed, no second dictionary"; fi
 
+      - name: Build dicts/jpdb.ktm (frequency, shown under the word)
+        run: |
+          if [ -s jpdb-freq.zip ]; then python tools/build_dict.py --meta jpdb-freq.zip --meta-out dicts/jpdb.ktm
+          else echo "::warning title=JPDB::download failed, no frequency file"; fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: Kotoba3DS-dicts
-          path: dicts/*.ktd
+          path: |
+            dicts/*.ktd
+            dicts/*.ktm
 
       - name: Install Japanese fonts (for the on-device OCR tests)
         run: sudo apt-get update -q && sudo apt-get install -y -q fonts-noto-cjk fonts-misaki
@@ -153,6 +160,10 @@ jobs:
           make -C tests test_display
           tests/test_display dict.bin dicts/jitendex.ktd
           (cd tests && ./test_core ../dicts/jitendex.ktd > /dev/null && ./test_ui ../dicts/jitendex.ktd && ./test_wrap ../dicts/jitendex.ktd)
+          if [ -s dicts/jpdb.ktm ]; then
+            make -C tests test_meta
+            ASAN_OPTIONS=alloc_dealloc_mismatch=0 tests/test_meta dicts/jitendex.ktd dicts/jpdb.ktm
+          fi
           if [ -s dicts/jmnedict.ktd ]; then
             make -C tests test_switch
             ASAN_OPTIONS=alloc_dealloc_mismatch=0 tests/test_switch dicts/jitendex.ktd dicts/jmnedict.ktd
@@ -255,7 +266,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete alpha-dev --yes --cleanup-tag 2>/dev/null || true
-          gh release create alpha-dev out/Kotoba3DS.3gx out/*.ktd --target "$GITHUB_SHA" --prerelease --latest=false \
+          gh release create alpha-dev out/Kotoba3DS.3gx out/*.ktd out/*.ktm --target "$GITHUB_SHA" --prerelease --latest=false \
             --title "DEVELOPMENT ONLY - do not use (alpha, experimental)" \
             --notes "NOT FOR TESTERS OR PLAYERS. This is the developer's experimental alpha build (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)), published only so it can be copied onto the developer's own SD card. It may crash, run slowly (it benchmarks every reader on each read) or need files that aren't in any release. For trying new features use the \"Kotoba3DS test build\" pre-release; for normal use, the latest release."
 

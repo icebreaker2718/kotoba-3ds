@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "core/kana.hpp"
 
@@ -208,6 +209,60 @@ void LookupView::setText(const std::vector<std::string> &blocks) {
     if (!hasResult() && first >= 0) selectAt(cells_[first].block, cells_[first].byte);
 }
 
+// Under the word: each pitch accent file's patterns (the reading with a line over its high morae, a mark where it
+// drops, and Yomitan's number), then every frequency file's value on one line ("JPDBv2 1,234 · BCCWJ 2,050").
+void LookupView::addPitchAndFrequency(const Entry &e, const std::string &expr) {
+    if (!meta_ || !meta_->count()) return;
+    char val[160];
+    auto find = [&](int i) {
+        return meta_->find(i, expr, e.reading, val, sizeof(val)) ||
+               (expr != e.expression && meta_->find(i, e.expression, e.reading, val, sizeof(val)));
+    };
+    const std::string &reading = e.reading.empty() ? expr : e.reading;
+    const int pitchFiles = meta_->count(MetaFile::PITCH);
+    const int rowH = kSenseLine + 6;
+    for (int i = 0; i < meta_->count(); i++) {
+        if (meta_->file(i).kind() != MetaFile::PITCH || !find(i)) continue;
+        layout_.beginRow(rowH, kSenseSize);
+        if (pitchFiles > 1) {
+            const std::string t = meta_->file(i).title() + " ";
+            layout_.add(t.data(), t.size(), kSmall, EntryLayout::C_DIM);
+        }
+        int shown = 0;
+        for (const char *p = val; *p && shown < 6;) {
+            char *end = nullptr;
+            const long pos = strtol(p, &end, 10);
+            if (end == p) break;
+            p = *end == ',' ? end + 1 : end;
+            if (pos < 0 || pos > moraCount(reading)) continue;
+            PitchPiece pieces[16];
+            const int n = pitchPieces(reading, (int)pos, pieces, 16);
+            const std::string num = " [" + std::to_string(pos) + "]";
+            layout_.fitOrWrap(tr_.width(reading, kSenseSize + 1) + tr_.width(num, kSmall), rowH);
+            if (shown) layout_.add("   ", 3, kSmall, EntryLayout::C_DIM);
+            for (int k = 0; k < n; k++)
+                layout_.add(reading.data() + pieces[k].off, pieces[k].len, kSenseSize + 1, EntryLayout::C_READING,
+                            (uint8_t)((pieces[k].high ? EntryLayout::D_OVER : 0) | (pieces[k].drop ? EntryLayout::D_DROP : 0)));
+            layout_.add(num.data(), num.size(), kSmall, EntryLayout::C_DIM);
+            shown++;
+        }
+        layout_.endRow();
+    }
+    std::string freq;
+    for (int i = 0; i < meta_->count(); i++) {
+        if (meta_->file(i).kind() != MetaFile::FREQ || !find(i)) continue;
+        std::string v;  // "1234, 5678㋕" -> "1,234, 5,678㋕"
+        for (const char *p = val; *p;) {
+            const char *comma = strstr(p, ", ");
+            const std::string part(p, comma ? comma - p : strlen(p));
+            v += (v.empty() ? "" : ", ") + groupDigits(part);
+            p = comma ? comma + 2 : p + part.size();
+        }
+        freq += (freq.empty() ? "" : " \u00b7 ") + meta_->file(i).title() + " " + v;
+    }
+    if (!freq.empty()) layout_.addWrapped(freq.data(), freq.size(), kSmall, kSmall + 5, EntryLayout::C_DIM);
+}
+
 void LookupView::setDictionaryPlace(int index, int count) {
     if (index == dictIndex_ && count == dictCount_) return;
     dictIndex_ = index;
@@ -354,7 +409,7 @@ void LookupView::buildEntry() {
     const std::string reading = showReading ? " (" + e.reading + ")" : "";
     // how common it is (JPDB rank, as Rubi shows it): "#1,234"
     std::string rank;
-    if (e.freqRank) {
+    if (e.freqRank && !(meta_ && meta_->count(MetaFile::FREQ) > 0)) {  // frequency files: their own line
         std::string n = std::to_string(e.freqRank);
         for (int k = (int)n.size() - 3; k > 0; k -= 3) n.insert((size_t)k, ",");
         rank = " #" + n;
@@ -378,6 +433,7 @@ void LookupView::buildEntry() {
         if (!rank.empty()) layout_.add(rank.data(), rank.size(), kSmall + 2, EntryLayout::C_DIM);
         layout_.endRow();
     }
+    addPitchAndFrequency(e, expr);
     if (r.prefixOnly) small("(a longer word starting here)", EntryLayout::C_DIM);
     if (!r.reasons.empty()) {
         std::string conj = r.reasons;
@@ -818,7 +874,9 @@ void LookupView::drawEntryPanel(Canvas &c, Panel p, bool bandShaded) {
                 c.fill(s.x, y + s.y, s.w, h, Rgb(col.r / 4 + 18, col.g / 4 + 20, col.b / 4 + 24));
                 tr_.draw(c, s.x + EntryLayout::kChipPad, y + s.y + 2, layout_.text(s), s.len, s.size, col);
             } else {
-                tr_.draw(c, s.x, y + s.y, layout_.text(s), s.len, s.size, col);
+                const int end = tr_.draw(c, s.x, y + s.y, layout_.text(s), s.len, s.size, col);
+                if (s.deco & EntryLayout::D_OVER) c.fill(s.x, y + s.y + 1, end - s.x, 1, col);  // high pitch
+                if (s.deco & EntryLayout::D_DROP) c.fill(end - 1, y + s.y + 1, 1, s.size / 3, col);  // the downstep
             }
         }
         y += row.height;

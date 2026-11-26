@@ -15,6 +15,7 @@
 #include "core/local_ocr.hpp"
 #include "core/known_words.hpp"
 #include "core/lookup_view.hpp"
+#include "core/meta_dict.hpp"
 #include "core/textbox.hpp"
 #include "core/ui_text.hpp"
 
@@ -132,6 +133,23 @@ int main(int argc, char **argv) {
     const char *out = argv[argi - 1];
     TextRenderer tr(font);
     LookupView view(dict, tr);
+    // KT_META: pitch accent / frequency files (.ktm) to show under the word, separated by ':'
+    static MetaSet meta;
+    std::vector<FileReader *> metaFiles;
+    if (const char *m = getenv("KT_META")) {
+        std::string list = m, err;
+        for (size_t p = 0; p <= list.size();) {
+            size_t q = list.find(':', p);
+            if (q == std::string::npos) q = list.size();
+            if (q > p) {
+                FileReader *r = new FileReader(list.substr(p, q - p).c_str());
+                if (!meta.add(r, err)) fprintf(stderr, "%s: %s\n", list.substr(p, q - p).c_str(), err.c_str());
+                metaFiles.push_back(r);
+            }
+            p = q + 1;
+        }
+        view.setMeta(&meta);
+    }
     KnownWords known;
     if (const char *k = getenv("KNOWN")) {
         std::string list = k;

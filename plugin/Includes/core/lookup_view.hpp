@@ -9,6 +9,7 @@
 
 #include "core/dict.hpp"
 #include "core/entry_layout.hpp"
+#include "core/meta_dict.hpp"
 #include "core/known_words.hpp"
 #include "core/search.hpp"
 #include "core/ui_text.hpp"
@@ -79,6 +80,12 @@ public:
     void dictionaryChanged();
     // Shown after the dictionary's name: "2/3 · Select" when there are others to switch to (count > 1).
     void setDictionaryPlace(int index, int count);
+    // Pitch accent and frequency files shown under the word (nullptr: none).
+    void setMeta(MetaSet *m) {
+        if (m == meta_) return;
+        meta_ = m;
+        if (selBlock_ >= 0) buildEntry();
+    }
 
     // ---- drawing ----
     // How a screen's panel is shown: normally; see-through (the text panel without its
@@ -148,6 +155,8 @@ private:
     std::vector<Saved> saved_;
     std::string status_;
     int dictIndex_ = 0, dictCount_ = 1;
+    MetaSet *meta_ = nullptr;
+    void addPitchAndFrequency(const Entry &e, const std::string &expr);
     Rgb statusColor_;
 
     struct Cached { int block; size_t byte; SearchOutput so; };

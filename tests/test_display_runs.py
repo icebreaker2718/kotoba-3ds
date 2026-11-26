@@ -141,5 +141,51 @@ with tempfile.TemporaryDirectory() as tmp:
     dp = b.decode_runs(b.encode_runs(b.paras_from_senses(e), b.TagTable()), b.TagTable().rows or [(1, "prt", "prt", ""), (2, "uk", "uk", "")])
     check([k for k, _, _ in dp] == [y.P_GROUP, y.P_SENSE, y.P_SENSE], "JMdict senses as paragraphs")
 
+# --- pitch accent and frequency files (.ktm)
+with tempfile.TemporaryDirectory() as tmp:
+    def meta_zip(name, title, rows):
+        z = os.path.join(tmp, name)
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("index.json", json.dumps({"title": title, "format": 3, "revision": "1"}))
+            zf.writestr("term_meta_bank_1.json", json.dumps(rows, ensure_ascii=False))
+        return z
+
+    def ktm_records(path):
+        d = open(path, "rb").read()
+        h = struct.unpack("<4s12I", d[:52])
+        out = {}
+        for k in range(h[5]):
+            blk = d[h[6] + k * 4096:h[6] + (k + 1) * 4096]
+            p = 0
+            while p < 4096 and blk[p]:
+                key_end = blk.index(0, p)
+                val_end = blk.index(0, key_end + 1)
+                out[blk[p:key_end].decode()] = blk[key_end + 1:val_end].decode()
+                p = val_end + 1
+        return h, out
+
+    pz = meta_zip("p.zip", "Pitch Test [2026]", [
+        ["食べる", "pitch", {"reading": "たべる", "pitches": [{"position": 2}]}],
+        ["今日", "pitch", {"reading": "きょう", "pitches": [{"position": 1}, {"position": 0}, {"position": 1}]}]])
+    b.build_meta(pz, os.path.join(tmp, "p.ktm"))
+    h, recs = ktm_records(os.path.join(tmp, "p.ktm"))
+    check(h[0] == b"KTM1" and h[2] == b.META_PITCH and recs == {"食べる\tたべる": "2", "今日\tきょう": "1,0"},
+          f"pitch file: positions per (word, reading), duplicates once ({recs})")
+    fz = meta_zip("f.zip", "JPDBv2㋕", [
+        ["食べる", "freq", {"reading": "たべる", "frequency": {"value": 184, "displayValue": "184"}}],
+        ["食べる", "freq", {"reading": "たべる", "frequency": {"value": 13390, "displayValue": "13390㋕"}}],
+        ["たべる", "freq", 500],
+        ["見る", "freq", {"reading": "みる", "frequency": 77}]])
+    b.build_meta(fz, os.path.join(tmp, "f.ktm"))
+    h, recs = ktm_records(os.path.join(tmp, "f.ktm"))
+    title = open(os.path.join(tmp, "f.ktm"), "rb").read()[h[8]:].split(b"\0")[0].decode()
+    check(h[2] == b.META_FREQ and recs == {"食べる\tたべる": "184, 13390 (kana)", "たべる\t": "500", "見る\tみる": "77"},
+          f"frequency file: display values, ㋕ as (kana), a row without a reading for any reading ({recs})")
+    check(title == "JPDBv2", f"title without ㋕ ({title})")
+    many = meta_zip("m.zip", "Many", [[f"語{i:06d}", "freq", i + 1] for i in range(40000)])
+    b.build_meta(many, os.path.join(tmp, "m.ktm"))
+    h, recs = ktm_records(os.path.join(tmp, "m.ktm"))
+    check(len(recs) == 40000 and h[5] > 64 and h[10] == (h[5] + 63) // 64, f"many records: {h[5]} blocks in {h[10]} groups")
+
 print("FAILED" if fails else "all passed")
 sys.exit(1 if fails else 0)

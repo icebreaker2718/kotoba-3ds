@@ -18,12 +18,14 @@ public:
         C_TEXT, C_DIM, C_WORD, C_READING, C_CONJ, C_LINK, C_EXAMPLE,
         C_CHIP_POS, C_CHIP_MISC, C_CHIP_FIELD, C_CHIP_DIALECT, C_CHIP_OTHER, C_COUNT
     };
-    enum SpanKind : uint8_t { K_TEXT, K_CHIP, K_RUBY };  // a chip is drawn on a box; ruby: furigana (small, above)
+    enum SpanKind : uint8_t { K_TEXT, K_CHIP, K_RUBY };
+    enum Deco : uint8_t { D_OVER = 1, D_DROP = 2 };  // a chip is drawn on a box; ruby: furigana (small, above)
     struct Span {
         uint32_t off = 0;    // its text in the pool
         uint16_t len = 0;
         int16_t x = 0, y = 0;  // y: the text cell's top, from the row's top
         uint8_t size = 0, color = 0, kind = K_TEXT;
+        uint8_t deco = 0;    // D_OVER: a line over it (high pitch); D_DROP: a downstep mark at its end
         int16_t w = 0;       // chips: the box's width
     };
     struct Row {
@@ -48,7 +50,10 @@ public:
 
     // A row of spans side by side, no wrapping (the headword line); spans are added with add().
     void beginRow(int height, int size);
-    void add(const char *text, size_t len, int size, Color c);
+    void add(const char *text, size_t len, int size, Color c, uint8_t deco = 0);
+    // Starts a new row at the left edge when w more pixels don't fit on the row being built (a row from beginRow).
+    void fitOrWrap(int w, int height);
+    int x() const { return x_; }
     void endRow();
     // Text wrapped to the width, one row per line, in one size and colour.
     void addWrapped(const char *text, size_t len, int size, int rowHeight, Color c);

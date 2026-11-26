@@ -27,3 +27,4 @@ tests/test_display
 tests/bench_entry
 *.ktd
 tests/test_switch
+tests/test_meta

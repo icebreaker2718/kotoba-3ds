@@ -37,6 +37,10 @@ test_ui: test_ui.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
 test_display: test_display.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
 	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_display.cpp $(CORE) $(LDLIBS)
 
+# pitch accent / frequency files: ./test_meta jitendex.ktd kanjium.ktm jpdb.ktm
+test_meta: test_meta.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
+	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_meta.cpp $(CORE) $(LDLIBS)
+
 # switching dictionaries: ./test_switch jitendex.ktd jmnedict.ktd
 test_switch: test_switch.cpp libvocr.a $(CORE) $(wildcard ../plugin/Includes/core/*.hpp)
 	$(CXX) $(CXXFLAGS) -I../plugin/Includes -o $@ test_switch.cpp $(CORE) $(LDLIBS)
@@ -52,6 +56,6 @@ run: test_wrap test_core test_ocr_core test_ui test_memshare
 	./test_ui $(DICT)
 
 clean:
-	rm -f test_switch test_display test_memshare test_core test_net bmp_tool test_wrap test_ocr_core test_ui libvocr.a vocr_*.o
+	rm -f test_meta test_switch test_display test_memshare test_core test_net bmp_tool test_wrap test_ocr_core test_ui libvocr.a vocr_*.o
 
 .PHONY: run clean

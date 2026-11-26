@@ -170,7 +170,15 @@ void EntryLayout::beginRow(int height, int size) {
     rowFixedHeight_ = height;
 }
 
-void EntryLayout::add(const char *text, size_t len, int size, Color c) {
+void EntryLayout::fitOrWrap(int w, int height) {
+    if (open_ && x_ > rowStartX_ && x_ + w > left_ + width_) {
+        closeRow();
+        openRow(left_);
+        rowFixedHeight_ = height;
+    }
+}
+
+void EntryLayout::add(const char *text, size_t len, int size, Color c, uint8_t deco) {
     if (!open_) openRow(left_);
     const uint32_t off = copy(text, len);
     if (off == ~0u) return;
@@ -181,6 +189,7 @@ void EntryLayout::add(const char *text, size_t len, int size, Color c) {
     s->x = (int16_t)x_;
     s->size = (uint8_t)size;
     s->color = c;
+    s->deco = deco;
     for (size_t i = 0; i < len;) x_ += tr_.advance(next(text, len, i), size);
 }
 

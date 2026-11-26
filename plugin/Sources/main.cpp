@@ -194,6 +194,7 @@ static bool g_lastTextOnTop = false;  // how the last lookup was laid out
 
 static void LogOcr(const std::string &line);
 static u32 HeapFree();
+static void OpenMeta();
 
 // The dictionaries: the .ktd files in dicts/ (full entries), by name; the first that opens is the one reads and
 // lookups use, Select on the lookup screen opens the next for that lookup (one file open at a time: a second
@@ -228,6 +229,7 @@ static bool OpenDict() {
         std::string error;
         if (OpenDictFile(i, error)) {
             g_dictHome = i;
+            OpenMeta();
             LogOcr(Utils::Format("dictionary: dicts/%s (%s, version %lu, %lu entries, %lu tags; %lu file(s) in dicts/)",
                                  g_dictFiles[i].c_str(), g_dict.title().c_str(), (unsigned long)g_dict.version(),
                                  (unsigned long)g_dict.entryCount(), (unsigned long)g_dict.tagCount(),
@@ -248,6 +250,38 @@ static bool OpenDict() {
                              (unsigned long)g_dict.entryCount(), firstError.empty() ? "" : (", " + firstError).c_str()));
     }
     return g_dict.isOpen();
+}
+
+// Pitch accent and frequency files (.ktm in dicts/), shown under the word in every lookup: all opened with the
+// dictionary, each with its own file kept open, in file-name order.
+static kt::MetaSet *g_metaPtr = nullptr;
+#define g_meta Leaky(g_metaPtr)
+static bool g_metaOpened = false;
+
+static void OpenMeta() {
+    if (g_metaOpened) return;
+    g_metaOpened = true;
+    std::vector<std::string> files;
+    {
+        Directory dir(kDictsDir);
+        dir.ListFiles(files, ".ktm");
+    }
+    std::sort(files.begin(), files.end());
+    for (const std::string &f : files) {
+        const u64 t0 = osGetTime();
+        SdReader *r = new SdReader();
+        std::string error;
+        if (!r->open(std::string(kDictsDir) + "/" + f) || !g_meta.add(r, error)) {
+            LogOcr("meta: dicts/" + f + ": " + (error.empty() ? "can't be opened" : error));
+            delete r;
+            continue;
+        }
+        const kt::MetaFile &m = g_meta.file(g_meta.count() - 1);
+        LogOcr(Utils::Format("meta: dicts/%s (%s, %s, %lu records, %lu KB in memory) in %lu ms, heap free %lu KB",
+                             f.c_str(), m.title().c_str(), m.kind() == kt::MetaFile::PITCH ? "pitch accent" : "frequency",
+                             (unsigned long)m.records(), (unsigned long)(m.memoryBytes() / 1024),
+                             (unsigned long)(osGetTime() - t0), (unsigned long)(HeapFree() / 1024)));
+    }
 }
 
 // How many dictionaries Select goes through, and where the open one is among them.
@@ -279,6 +313,7 @@ static void NextDictionary(kt::LookupView &v) {
                          g_dictNow >= 0 ? g_dictFiles[g_dictNow].c_str() : "?", g_dict.title().c_str(), (unsigned long)ms,
                          (unsigned long)(HeapFree() / 1024), failed.empty() ? "" : (", " + failed).c_str()));
     v.setDictionaryPlace(DictPlace(), DictCount());
+    v.setMeta(&g_meta);
     v.dictionaryChanged();
     if (!failed.empty()) v.setStatus("Couldn't open " + failed, kt::Rgb(232, 120, 112));
 }
@@ -2380,7 +2415,7 @@ static void HowToUse() {
          "Y again takes it back."},
         {"Files",
          "The dictionaries: SD:/3ds/kotoba3ds/dicts/*.ktd (full entries; the first by name is used, Select "
-         "on a lookup goes through the others), else "
+         "on a lookup goes through the others) and *.ktm (pitch accent and frequency, shown under the word), else "
          "SD:/3ds/kotoba3ds/dict.bin. The OCR model: SD:/3ds/kotoba3ds/ocr/ "
          "(from Kotoba3DS-ocr-model.zip). Both come with the Kotoba3DS release."},
     };

@@ -495,6 +495,27 @@ works on the code.
     `3GX$0003` (779053b, from pacman's 3gxtool: `3GX$0002`). The card was put back on 779053b. Fix: the source build
     checks out the parent of the first commit that mentions 0003, and the plugin job fails unless the 3gx starts with
     `3GX$0002` ("plugin format:" in its log). Same lesson as CTRPF: check the toolchain lines before a build goes out.
+- On `alpha` (2026-11-26, owner's choices): **stages 3 and 4, pitch accent and frequency files**; stage 5 (tag
+  descriptions) dropped by the owner: tags stay chips with their label only.
+  - Console check first (2026-11-26, dbbfcde): 15 Select switches Jitendex <-> JMnedict at ~100 ms each (one took 7.4 s,
+    likely the SD card), 16 words saved, Make Anki cards twice, no errors; free before a read 380 KB, after the first
+    switch 340 KB, then flat (a one-time high-water mark, not a leak).
+  - `dicts/*.ktm` (KTM1, `build_dict.py --meta ZIP --meta-out FILE`; layout in `build_meta`): any Yomitan pitch or
+    frequency zip, records "expression TAB reading" (reading empty: any reading) -> value, sorted, in 4 KB blocks; one key
+    per 64 blocks in memory (BCCWJ 901k records: 8 KB; JPDB: 1.2 KB), a lookup reads the group's block keys then one
+    block. Values: pitch "2,0" (Yomitan positions), frequency what Yomitan shows (displayValue), several joined with ", ";
+    JPDB's ㋕ written " (kana)" (font). Keys over 240 bytes dropped (BCCWJ long-unit phrases).
+  - Plugin: `core/meta_dict.cpp` (`MetaFile`, `MetaSet`: up to 8 files, shared 4 KB block buffer + group buffer taken
+    once; 0 allocations per lookup, `tests/test_meta.cpp`: every record of BCCWJ / JPDB / Kanjium found through the index,
+    keys past each not found). main.cpp `OpenMeta()` with the dictionary: every .ktm in dicts/ by name, its own SdReader
+    kept open; log "meta: dicts/... (title, kind, N records, K KB in memory) in N ms".
+  - Shown under the headword (owner's choices): pitch "overline + number" (`pitchPieces`: morae, small kana join the one
+    before; high morae get a line over them, the drop a tick, then "[n]"; several patterns side by side; the file's name
+    first when there are several pitch files); frequency "one line, all lists": "BCCWJ 199, 266 · JPDBv2 184, 13,390
+    (kana)"; the built-in "#rank" only when there is no frequency file. EntryLayout spans gained `deco` (D_OVER, D_DROP).
+  - NHK 2016 (the owner's pitch choice) isn't on GitHub and is NHK's data: not built or published by CI; build it from the
+    owner's copy and put it on the card. Tested with Kanjium (mifunetoshiro/kanjium accents.txt made into a pitch zip,
+    not in the repo). CI builds `dicts/jpdb.ktm` from the JPDB zip it already downloads, runs test_meta, alpha-dev has it.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
