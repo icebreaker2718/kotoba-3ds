@@ -168,7 +168,7 @@ int main(int argc, char **argv) {
         std::string freqTitle;
         for (int i = 0; i < set.count(); i++)
             if (set.file(i).kind() == MetaFile::FREQ) freqTitle = set.file(i).title();
-        if (freq) check(all.find(freqTitle + " ") != std::string::npos && all.find(" #") == std::string::npos,
+        if (freq) check(all.find(freqTitle + ": ") != std::string::npos && all.find(" #") == std::string::npos,
                         "食べる: the frequency line, no built-in #rank");
     }
     // as the plugin does it: the lookup screen opens on the word first, then gets the files (RunLookupView). The

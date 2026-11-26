@@ -219,32 +219,67 @@ void LookupView::addPitchAndFrequency(const Entry &e, const std::string &expr) {
                (expr != e.expression && meta_->find(i, e.expression, e.reading, val, sizeof(val)));
     };
     const std::string &reading = e.reading.empty() ? expr : e.reading;
-    const int pitchFiles = meta_->count(MetaFile::PITCH);
-    const int rowH = kSenseLine + 6;
+    // Pitch accent on one line: each file's patterns (valid downstep positions, in its order, at most 6); files that
+    // give the same patterns share one group, their names joined: "Kanjium, NHK もり [0]   ·   NHK ..."
+    struct Group { std::string names; int pos[6]; int n = 0; };
+    Group groups[MetaSet::kMaxFiles];
+    int groupCount = 0, pitchFiles = 0;
+    const int morae = moraCount(reading);
     for (int i = 0; i < meta_->count(); i++) {
-        if (meta_->file(i).kind() != MetaFile::PITCH || !find(i)) continue;
-        layout_.beginRow(rowH, kSenseSize);
-        if (pitchFiles > 1) {
-            const std::string t = meta_->file(i).title() + " ";
-            layout_.add(t.data(), t.size(), kSmall, EntryLayout::C_DIM);
-        }
-        int shown = 0;
-        for (const char *p = val; *p && shown < 6;) {
+        if (meta_->file(i).kind() != MetaFile::PITCH) continue;
+        pitchFiles++;
+        if (!find(i)) continue;
+        Group g;
+        for (const char *p = val; *p && g.n < 6;) {
             char *end = nullptr;
             const long pos = strtol(p, &end, 10);
             if (end == p) break;
             p = *end == ',' ? end + 1 : end;
-            if (pos < 0 || pos > moraCount(reading)) continue;
-            PitchPiece pieces[16];
-            const int n = pitchPieces(reading, (int)pos, pieces, 16);
-            const std::string num = " [" + std::to_string(pos) + "]";
-            layout_.fitOrWrap(tr_.width(reading, kSenseSize + 1) + tr_.width(num, kSmall), rowH);
-            if (shown) layout_.add("   ", 3, kSmall, EntryLayout::C_DIM);
-            for (int k = 0; k < n; k++)
-                layout_.add(reading.data() + pieces[k].off, pieces[k].len, kSenseSize + 1, EntryLayout::C_READING,
-                            (uint8_t)((pieces[k].high ? EntryLayout::D_OVER : 0) | (pieces[k].drop ? EntryLayout::D_DROP : 0)));
-            layout_.add(num.data(), num.size(), kSmall, EntryLayout::C_DIM);
-            shown++;
+            bool dup = pos < 0 || pos > morae;
+            for (int k = 0; k < g.n && !dup; k++) dup = g.pos[k] == pos;
+            if (!dup) g.pos[g.n++] = (int)pos;
+        }
+        if (!g.n) continue;
+        int same = -1;  // a group with the same patterns (in any order)
+        for (int k = 0; k < groupCount && same < 0; k++) {
+            if (groups[k].n != g.n) continue;
+            bool all = true;
+            for (int a = 0; a < g.n && all; a++) {
+                bool has = false;
+                for (int b = 0; b < g.n; b++) has |= groups[k].pos[b] == g.pos[a];
+                all = has;
+            }
+            if (all) same = k;
+        }
+        if (same >= 0) {
+            groups[same].names += ", " + meta_->file(i).title();
+        } else {
+            g.names = meta_->file(i).title();
+            groups[groupCount++] = g;
+        }
+    }
+    if (groupCount) {
+        const int rowH = kSenseLine + 2;
+        const int pitchSize = kSenseSize + 1;
+        layout_.beginRow(rowH, kSenseSize);
+        for (int k = 0; k < groupCount; k++) {
+            const Group &g = groups[k];
+            const std::string label = pitchFiles > 1 ? g.names + " " : std::string();
+            for (int j = 0; j < g.n; j++) {
+                const std::string num = " [" + std::to_string(g.pos[j]) + "]";
+                const std::string gap = j ? "  " : k ? "   \u00b7   " : "";
+                int w = tr_.width(gap, kSmall) + tr_.width(reading, pitchSize) + tr_.width(num, kSmall);
+                if (j == 0) w += tr_.width(label, kSmall);  // a group's names stay with its first pattern
+                layout_.fitOrWrap(w, rowH);
+                if (!gap.empty() && !layout_.atRowStart()) layout_.add(gap.data(), gap.size(), kSmall, EntryLayout::C_DIM);
+                if (j == 0 && !label.empty()) layout_.add(label.data(), label.size(), kSmall, EntryLayout::C_DIM);
+                PitchPiece pieces[16];
+                const int n = pitchPieces(reading, g.pos[j], pieces, 16);
+                for (int q = 0; q < n; q++)
+                    layout_.add(reading.data() + pieces[q].off, pieces[q].len, pitchSize, EntryLayout::C_READING,
+                                (uint8_t)((pieces[q].high ? EntryLayout::D_OVER : 0) | (pieces[q].drop ? EntryLayout::D_DROP : 0)));
+                layout_.add(num.data(), num.size(), kSmall, EntryLayout::C_DIM);
+            }
         }
         layout_.endRow();
     }
@@ -258,9 +293,10 @@ void LookupView::addPitchAndFrequency(const Entry &e, const std::string &expr) {
             v += (v.empty() ? "" : ", ") + groupDigits(part);
             p = comma ? comma + 2 : p + part.size();
         }
-        freq += (freq.empty() ? "" : " \u00b7 ") + meta_->file(i).title() + " " + v;
+        freq += (freq.empty() ? "" : " \u00b7 ") + meta_->file(i).title() + ": " + v;
     }
-    if (!freq.empty()) layout_.addWrapped(freq.data(), freq.size(), kSmall, kSmall + 5, EntryLayout::C_DIM);
+    // a little smaller than the other small lines, close under the pitch line
+    if (!freq.empty()) layout_.addWrapped(freq.data(), freq.size(), kSmall - 2, kSmall + 2, EntryLayout::C_DIM);
 }
 
 void LookupView::setDictionaryPlace(int index, int count) {

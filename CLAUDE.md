@@ -526,6 +526,10 @@ works on the code.
     once in the session (screenshots: 前 with the built-in "#73"). `v.setMeta(&g_meta)` had gone into NextDictionary
     instead of RunLookupView (the edit matched the first `setDictionaryPlace` line). Fixed; test_meta now also gives the
     files after the word is shown, as the plugin does. A Select switch took 8.2 s once more in that session (SD card).
+- On `alpha` (2026-11-26, owner's choices): **pitch and frequency lines tidied**. All pitch files on one line; files
+  that give the same patterns (in any order) share one label, names joined in file order ("Kanjium, NHK たべる [2]"),
+  others follow after " · " (fitOrWrap between patterns, a file's names kept with its first). Frequency line 2 px smaller
+  (13) and closer under the pitch line, "Name: values" ("BCCWJ: 199, 266 · JPDBv2: 184, 13,390 (kana)").
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

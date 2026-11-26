@@ -54,6 +54,7 @@ public:
     // Starts a new row at the left edge when w more pixels don't fit on the row being built (a row from beginRow).
     void fitOrWrap(int w, int height);
     int x() const { return x_; }
+    bool atRowStart() const { return !open_ || x_ <= rowStartX_; }
     void endRow();
     // Text wrapped to the width, one row per line, in one size and colour.
     void addWrapped(const char *text, size_t len, int size, int rowHeight, Color c);
