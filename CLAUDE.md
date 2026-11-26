@@ -517,7 +517,10 @@ works on the code.
     owner's copy and put it on the card. Done 2026-11-26 from the owner's `Pitch_NHK2016.zip` (title "NHK", kotu.io,
     revision pitch_1.0.1.1): every bank's stored CRC is wrong but sizes and JSON are intact (yomitan._read ignores CRCs,
     as Yomitan does); 73,100 rows -> 72,053 records (124 rows with an empty term dropped), `dicts/nhk2016.ktm` 2.0 MB;
-    every record found by test_meta. Tested with Kanjium (mifunetoshiro/kanjium accents.txt made into a pitch zip,
+    every record found by test_meta. Owner's choice (2026-11-26): **show both** pitch files (Kanjium and NHK, each
+    labelled, name order), not Kanjium as a fallback. Measured over Jitendex's words in JPDB's top 20,000 (17,395):
+    NHK 72%, Kanjium 76%, NHK + Kanjium 82%; where both have a word they agree fully 92%, share a pattern 99%. NHK lists
+    some words as "聞く，聴く" (313 terms): splitting them would add ~60 common words (offered, not done). Tested with Kanjium (mifunetoshiro/kanjium accents.txt made into a pitch zip,
     not in the repo). CI builds `dicts/jpdb.ktm` from the JPDB zip it already downloads, runs test_meta, alpha-dev has it.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
