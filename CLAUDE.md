@@ -542,6 +542,32 @@ works on the code.
   the plugin Makefile's EXTRA_CXXFLAGS only on refs/heads/alpha, so test / main never compile it): once a second from
   the frame callback, "diag:" lines with the game's memory and threads / events / mutexes / semaphores / timers / shared
   memory / arbiters against their limits at each new high, and how often the patched memory answers were used.
+  Console result (acdf33f): still crashes; the game commits all of its memory at start ("game uses memory 126976 of
+  126976 KB"), nothing changed before the crash. But DiagWatch only sees allocations that worked: a failed one leaves
+  the counters as they were, so this doesn't rule out the game running out inside its own heap.
+- Luma's plugin loader, read 2026-11-27 (LumaTeam/Luma3DS c7790ee, sysmodules/rosalina/source/plugin): on a New 3DS the
+  block always comes from the APPLICATION region (memoryblock.c `if (isN3DS || MODE3)`; SYSTEM only on an Old 3DS), at
+  the top of the free app memory; APPMEMALLOC is lowered by the block only when it equals the region (lines 55-56: why
+  large-memory games show 121856 KB) and never put back, even when a later check refuses the plugin and frees the block
+  (CheckPluginCompatibility / Targets runs after the block is taken). Size from the 3gx header only (2 / 5 / 10 MiB). The
+  load-parameter strategies (SWAP / MODE3 / NONE) matter on an Old 3DS only. The "emulator only" compatibility check runs
+  before the block is taken (it shows an error, the game runs without the plugin). `svcControlMemoryUnsafe` (0xA3)
+  takes any region flag and isn't charged to the resource limit (unchecked: whether a game process may call it, and the
+  SYSTEM region's headroom). Loader command 0x101 can force an app's Old 3DS memory mode (pm launch.c then sets 64/80/96
+  MB), but only before launch and globally. Owner (2026-11-27): keep the plugin on for this game (it works up to that
+  spot), no per-title skip; no svc-failure logging (too invasive).
+- On `alpha` (2026-11-27, owner's choice of A and C): **two tests for the Bowser's Inside Story DX crash, alpha only,
+  remove before `test`**.
+  - A: test plugin `KT_STUB` (main.cpp: same PatchProcess, then an empty CTRPF menu: no dictionary, models, kept files,
+    threads, hotkeys or frame callback). build.yml builds it on alpha only (`BUILD=BuildStub TARGET=Kotoba3DS-stub`,
+    with KT_ALPHA_DIAG) and makes two 3gx from the one ELF: `Kotoba3DS-stub-5MiB.3gx` and `Kotoba3DS-stub-2MiB.3gx`
+    (plgInfo MemorySize changed), both on alpha-dev; the job logs the code block and the heap left at 2 / 5 MiB. Reading:
+    the 5 MiB stub crashes at the cutscene -> the memory block (or CTRPF itself); it passes -> something the full
+    plugin does. The 2 MiB stub gives the game 3 MiB more.
+  - C: `DumpCrashCode` (KT_ALPHA_DIAG, from PatchProcess): for 00040000001CA900, the game's code 0x0050409c - 2 KB ..
+    + 1 KB to `/3ds/kotoba3ds/code_00040000001CA900_0050409C.bin` and a "diag: game code ..." line (the words around the
+    address, code / rodata / data sizes). Disassemble it on the PC (arm-none-eabi-objdump -b binary -m arm
+    --adjust-vma=0x0050389C).
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

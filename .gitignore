@@ -1,4 +1,6 @@
 plugin/Build/
+plugin/BuildStub/
+plugin/stub-2MiB.plgInfo
 *.3gx
 *.elf
 dict.bin

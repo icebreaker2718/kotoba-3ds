@@ -2873,14 +2873,80 @@ void OnProcessExit(void) {
     }
 }
 
+#ifdef KT_ALPHA_DIAG
+// Alpha-only (never on test or main): the game's code around an address its error screen named, copied to the SD card
+// at boot so it can be disassembled on a PC. Bowser's Inside Story DX, ErrDisp 0xD8E007F7 (kernel: invalid handle) at
+// 0x0050409c, 2026-11-27. 2 KB before the address (the function it is in) and 1 KB after, from the game's code
+// (mapped at 0x00100000) into /3ds/kotoba3ds/code_<title>_<address>.bin.
+static void DumpCrashCode() {
+    struct Spot {
+        const char *title;
+        u32 addr;
+    };
+    static const Spot kSpots[] = {{"00040000001CA900", 0x0050409C}};
+    static u8 copy[0xC00];  // copied out of the game's code first: the SD write gets a plain data buffer
+    const std::string tid = TitleIdHex();
+    const u32 textStart = 0x00100000, textEnd = textStart + Process::GetTextSize();
+    for (const Spot &s : kSpots) {
+        if (tid != s.title) continue;
+        if (s.addr < textStart || s.addr >= textEnd) {
+            LogOcr(Utils::Format("diag: %08lX is outside the game's code (%08lX-%08lX): nothing written",
+                                 (unsigned long)s.addr, (unsigned long)textStart, (unsigned long)textEnd));
+            continue;
+        }
+        u32 from = s.addr - 0x800, to = s.addr + 0x400;
+        if (from < textStart) from = textStart;
+        if (to > textEnd) to = textEnd;
+        memcpy(copy, (const void *)from, to - from);
+        const std::string path = Utils::Format("%s/code_%s_%08lX.bin", kRootDir, s.title, (unsigned long)s.addr);
+        File f;
+        bool ok = File::Open(f, path, File::WRITE | File::CREATE | File::TRUNCATE) == File::SUCCESS &&
+                  f.Write(copy, to - from) == File::SUCCESS;
+        f.Close();
+        const u32 *at = (const u32 *)s.addr;
+        LogOcr(Utils::Format("diag: game code %08lX-%08lX (around %08lX: %08lX %08lX %08lX) %s %s; code %lu KB, "
+                             "rodata %lu KB, data %lu KB",
+                             (unsigned long)from, (unsigned long)to, (unsigned long)s.addr, (unsigned long)at[-1],
+                             (unsigned long)at[0], (unsigned long)at[1], ok ? "written to" : "COULD NOT be written to",
+                             path.c_str(), (unsigned long)(Process::GetTextSize() / 1024),
+                             (unsigned long)(Process::GetRoDataSize() / 1024),
+                             (unsigned long)(Process::GetRwDataSize() / 1024)));
+    }
+}
+#endif
+
 void PatchProcess(FwkSettings &settings) {
     LogBootMemory();
     GiveGameItsMemory();
+#ifdef KT_ALPHA_DIAG
+    DumpCrashCode();
+#endif
     settings.AllowActionReplay = false;
     settings.AllowSearchEngine = false;
 }
 
-
+#ifdef KT_STUB
+// Alpha-only test plugin (CI builds it on the alpha branch only, with KT_ALPHA_DIAG, as Kotoba3DS-stub-5MiB.3gx and
+// -2MiB.3gx): the same start as the real plugin (PatchProcess: boot lines, the memory fix, the code copy) and then
+// nothing but CTRPF's own idle loop: no dictionary, models, files kept open, threads, hotkeys or frame callback. For
+// telling the plugin's memory block apart from what the plugin does (Bowser's Inside Story DX, 2026-11-27).
+int main(void) {
+    LogOcr(Utils::Format("start: game %s, STUB test plugin (memory fix only, nothing else runs), plugin heap %lu KB, "
+                         "heap free %lu KB",
+                         TitleIdHex().c_str(), (unsigned long)(__ctru_heap_size / 1024),
+                         (unsigned long)(HeapFree() / 1024)));
+    PluginMenu *menu = new PluginMenu("Kotoba3DS stub", 1, 2, 0, "Test build: the memory fix and nothing else.");
+    menu->SynchronizeWithFrame(true);
+    {  // as the real plugin: CTRPF's own screenshot hotkey off
+        bool *enabled = nullptr;
+        u32 *hotkey = nullptr;
+        PluginMenu::ScreenshotSettings(&enabled, &hotkey);
+        if (enabled) *enabled = false;
+    }
+    menu->Run();
+    return 0;
+}
+#else
 int main(void) {
     PluginMenu *menu = new PluginMenu("Kotoba3DS", 1, 2, 0,  // the version: as in Kotoba3DS.plgInfo
                                       "In-game Japanese dictionary that reads the screen and saves words for Anki.");
@@ -2906,5 +2972,6 @@ int main(void) {
     // plugin heap may already be unusable. See the note at Leaky().
     return 0;
 }
+#endif  // KT_STUB
 
 }  // namespace CTRPluginFramework
