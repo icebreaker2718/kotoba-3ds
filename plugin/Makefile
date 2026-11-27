@@ -27,7 +27,7 @@ COMMON		:=	$(ARCH) -mword-relocations \
 # C = the OCR runtime (Sources/vocr): built for speed. C++ = the plugin: built for size.
 CFLAGS		:=	$(COMMON) -O2 -std=gnu99 -ffp-contract=off $(INCLUDE) -D__3DS__
 
-CXXFLAGS	:= $(COMMON) -Os $(INCLUDE) -D__3DS__ -fno-rtti -fno-exceptions -std=gnu++17
+CXXFLAGS	:= $(COMMON) -Os $(INCLUDE) -D__3DS__ -fno-rtti -fno-exceptions -std=gnu++17 $(EXTRA_CXXFLAGS)
 
 ASFLAGS		:=	$(ARCH)
 LDFLAGS		:= -T $(TOPDIR)/3gx.ld $(ARCH) -Os -Wl,--gc-sections,--strip-discarded,--strip-debug

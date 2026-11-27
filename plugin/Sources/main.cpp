@@ -2578,8 +2578,71 @@ static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's o
     return false;
 }
 
+#ifdef KT_ALPHA_DIAG
+// ---------------------------------------------------------------------------
+// Alpha-only diagnostic (built only on the alpha branch, CI's -DKT_ALPHA_DIAG; never on test or main): what the game
+// uses of its resource limit while it plays, for crashes in the game itself (ErrDisp, no dump). Once a second, from
+// the frame callback: the game's committed memory and its threads / events / mutexes / semaphores / timers / shared
+// memory / address arbiters against their limits (the plugin's share included: the plugin's own calls aren't
+// patched). A "diag:" line when one of them reaches a new high (memory by 1 MB+), at most one line every 2 s unless
+// something is within 1 MB / 1 of its limit; also when the patched memory answers have been used again.
+// ---------------------------------------------------------------------------
+static void DiagWatch() {
+    static Handle rl = 0;
+    static bool started = false, failed = false;
+    static s64 limits[10], highs[10];
+    static u64 next = 0, lastLine = 0;
+    static kt::memshare::Counts lastCounts;
+    static const char *const kNames[10] = {"priority", "memory", "threads", "events", "mutexes", "semaphores",
+                                           "timers", "shared memory", "arbiters", "cpu time"};
+    if (failed) return;
+    const u64 now = osGetTime();
+    if (now < next) return;
+    next = now + 1000;
+    ResourceLimitType types[10];
+    for (int i = 0; i < 10; i++) types[i] = (ResourceLimitType)i;
+    if (!started) {
+        started = true;
+        if (R_FAILED(svcGetResourceLimit(&rl, CUR_PROCESS_HANDLE)) ||
+            R_FAILED(svcGetResourceLimitLimitValues(limits, rl, types, 10))) {
+            failed = true;
+            LogOcr("diag: resource limit can't be read");
+            return;
+        }
+        for (int i = 0; i < 10; i++) highs[i] = -1;
+    }
+    s64 cur[10];
+    if (R_FAILED(svcGetResourceLimitCurrentValues(cur, rl, types, 10))) return;
+    bool higher = false, close = false;
+    for (int i = 1; i <= 8; i++) {
+        const s64 step = i == 1 ? 1024 * 1024 : 1;
+        if (highs[i] < 0 || cur[i] >= highs[i] + step) higher = true;
+        if (cur[i] > highs[i]) highs[i] = cur[i];
+        if (limits[i] > 0 && limits[i] - cur[i] <= (i == 1 ? 1024 * 1024 : 1)) close = true;
+    }
+    const kt::memshare::Counts c = g_memCounts;
+    const bool asked = c.systemInfo != lastCounts.systemInfo || c.processInfo != lastCounts.processInfo ||
+                       c.limitValues != lastCounts.limitValues || c.currentValues != lastCounts.currentValues;
+    if (!(higher && (close || now - lastLine >= 2000)) && !asked) return;
+    lastLine = now;
+    lastCounts = c;
+    std::string line = Utils::Format("diag: game uses memory %ld of %ld KB (free %ld KB)", (long)(cur[1] / 1024),
+                                     (long)(limits[1] / 1024), (long)((limits[1] - cur[1]) / 1024));
+    for (int i = 2; i <= 8; i++)
+        line += Utils::Format(", %s %ld/%ld", kNames[i], (long)cur[i], (long)limits[i]);
+    line += Utils::Format("; memory answers changed so far: system info %lu, process info %lu, limit %lu, in use %lu",
+                          (unsigned long)c.systemInfo, (unsigned long)c.processInfo, (unsigned long)c.limitValues,
+                          (unsigned long)c.currentValues);
+    if (close) line += " [NEAR A LIMIT]";
+    LogOcr(line);
+}
+#endif
+
 static void Watcher(void) {
     if (SleepRequested()) return;  // the console is going to sleep: not now
+#ifdef KT_ALPHA_DIAG
+    DiagWatch();
+#endif
     if (g_shotDeferred) {
         g_shotDeferred = false;
         StartScreenshotThread();
@@ -2763,10 +2826,12 @@ static void GiveGameItsMemory() {
     svcGetResourceLimitCurrentValues(&committed, rl, &t, 1);
     const u32 codeSize = Process::GetTextSize() + Process::GetRoDataSize() + Process::GetRwDataSize();
     std::string why;
-    // only for a game told it has at most 64 MB (the SDK's cap), whose commit already holds the
-    // plugin's block, with room left in the app region
+    // only for a game whose commit already holds the plugin's block, with room left in the app region
     const s64 want = (s64)appMemAlloc + plugin;
-    if (appMemAlloc == 0 || appMemAlloc > 0x4000000) why = "APPMEMALLOC above 64 MB";
+    // Games in the New 3DS's large memory mode (APPMEMALLOC above 64 MB, e.g. Bowser's Inside Story DX
+    // 00040000001CA900) come with the limit already at APPMEMALLOC + the share (Luma lowers APPMEMALLOC instead): no
+    // raise, only step 2. Before 2026-11-27 they were left as they were and counted the share twice.
+    if (appMemAlloc == 0) why = "no APPMEMALLOC";
     else if (limit < (s64)appMemAlloc) why = "unusual commit limit";
     else if (committed < (s64)(codeSize + plugin)) why = "the plugin isn't counted in the game's memory";
     else if (want > appRegion) why = "no room in the app region";

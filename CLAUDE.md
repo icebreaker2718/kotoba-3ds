@@ -530,6 +530,18 @@ works on the code.
   that give the same patterns (in any order) share one label, names joined in file order ("Kanjium, NHK たべる [2]"),
   others follow after " · " (fitOrWrap between patterns, a file's names kept with its first). Frequency line 2 px smaller
   (13) and closer under the pitch line, "Name: values" ("BCCWJ: 199, 266 · JPDBv2: 184, 13,390 (kana)").
+- On `alpha` (2026-11-27, owner's request): **the memory fix for games in the New 3DS's large memory mode**. Bowser's
+  Inside Story DX (00040000001CA900) crashed at the first giant battle's cutscene with the plugin loaded, menu and reads
+  untouched: ErrDisp generic, 0xD8E007F7 (kernel: invalid handle), game address 0x0050409c, no dump. Its boot line:
+  APPMEMALLOC 121856 KB, commit limit 126976 KB (= APPMEMALLOC + the plugin's 5120: Luma lowers APPMEMALLOC instead of
+  the limit in this mode), and "memory left as it is: APPMEMALLOC above 64 MB", so the game counted the plugin's share
+  twice (~10 MB short of normal, 5 MB of it only on paper). Same numbers for 0004000000194B00, 00040000001D1400,
+  0004001000020800. GiveGameItsMemory no longer refuses APPMEMALLOC above 64 MB: the limit is already high enough, so
+  step 2 (the patched memory answers) runs. The 5 MB the plugin really takes from a 124 MB game can't be given back.
+  **Alpha-only diagnostic** `DiagWatch` (main.cpp, `#ifdef KT_ALPHA_DIAG`; build.yml passes `-DKT_ALPHA_DIAG` through
+  the plugin Makefile's EXTRA_CXXFLAGS only on refs/heads/alpha, so test / main never compile it): once a second from
+  the frame callback, "diag:" lines with the game's memory and threads / events / mutexes / semaphores / timers / shared
+  memory / arbiters against their limits at each new high, and how often the patched memory answers were used.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.

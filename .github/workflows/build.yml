@@ -20,7 +20,11 @@ jobs:
       - name: Build plugin
         run: |
           export PATH="$DEVKITPRO/tools/bin:$PATH"
-          if ! make -C plugin > build.log 2>&1; then
+          # alpha-only diagnostics (DiagWatch in main.cpp): compiled in on the alpha branch only, never on test / main
+          extra=""
+          if [ "$GITHUB_REF" = "refs/heads/alpha" ]; then extra="-DKT_ALPHA_DIAG"; fi
+          echo "extra C++ flags: ${extra:-none}"
+          if ! make -C plugin EXTRA_CXXFLAGS="$extra" > build.log 2>&1; then
             cat build.log
             echo "::error title=plugin build::$(grep -m5 -E 'error|Error' build.log | tr '\n' ' ' | tail -c 1500)"
             exit 1
