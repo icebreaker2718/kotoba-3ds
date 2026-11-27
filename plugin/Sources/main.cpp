@@ -2578,6 +2578,10 @@ static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's o
     return false;
 }
 
+// the memory fix's plan and counts (GiveGameItsMemory, below; DiagWatch reads the counts)
+static kt::memshare::Plan g_memPlan;
+static kt::memshare::Counts g_memCounts;
+
 #ifdef KT_ALPHA_DIAG
 // ---------------------------------------------------------------------------
 // Alpha-only diagnostic (built only on the alpha branch, CI's -DKT_ALPHA_DIAG; never on test or main): what the game
@@ -2708,8 +2712,7 @@ static void LogBootMemory() {
 // ---------------------------------------------------------------------------
 static s64 g_commitLimitBefore = -1;  // to put back when the game exits
 
-static kt::memshare::Plan g_memPlan;
-static kt::memshare::Counts g_memCounts;
+// g_memPlan, g_memCounts: above DiagWatch
 
 extern "C" {
 void KotobaHookGetSystemInfo(void);
