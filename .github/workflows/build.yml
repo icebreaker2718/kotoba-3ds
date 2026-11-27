@@ -20,11 +20,7 @@ jobs:
       - name: Build plugin
         run: |
           export PATH="$DEVKITPRO/tools/bin:$PATH"
-          # alpha-only diagnostics (DiagWatch in main.cpp): compiled in on the alpha branch only, never on test / main
-          extra=""
-          if [ "$GITHUB_REF" = "refs/heads/alpha" ]; then extra="-DKT_ALPHA_DIAG"; fi
-          echo "extra C++ flags: ${extra:-none}"
-          if ! make -C plugin EXTRA_CXXFLAGS="$extra" > build.log 2>&1; then
+          if ! make -C plugin > build.log 2>&1; then
             cat build.log
             echo "::error title=plugin build::$(grep -m5 -E 'error|Error' build.log | tr '\n' ' ' | tail -c 1500)"
             exit 1
@@ -37,37 +33,6 @@ jobs:
           if [ "$magic" != '3GX$0002' ]; then
             echo "::error title=plugin format::Kotoba3DS.3gx is $magic, not 3GX\$0002: 3gxtool changed (see install-ctrpf.sh)"
             exit 1
-          fi
-
-      - name: Build the alpha-only test plugin (stub, 5 MiB and 2 MiB)
-        if: github.ref == 'refs/heads/alpha'
-        run: |
-          export PATH="$DEVKITPRO/tools/bin:$DEVKITPRO/devkitARM/bin:$PATH"
-          # main.cpp with KT_STUB: the real plugin's start (boot lines, memory fix, code copy), then CTRPF idle only.
-          # One ELF, two 3gx headers: the plugin memory block is the only difference (Bowser's Inside Story DX test).
-          if ! make -C plugin BUILD=BuildStub TARGET=Kotoba3DS-stub EXTRA_CXXFLAGS="-DKT_ALPHA_DIAG -DKT_STUB" > stub.log 2>&1; then
-            cat stub.log
-            echo "::error title=stub build::$(grep -m5 -E 'error|Error' stub.log | tr '\n' ' ' | tail -c 1500)"
-            exit 1
-          fi
-          cat stub.log
-          mv plugin/Kotoba3DS-stub.3gx plugin/Kotoba3DS-stub-5MiB.3gx
-          sed -e 's/^MemorySize:.*/MemorySize: 2MiB/' -e 's/^Title:.*/Title: Kotoba3DS stub/' \
-            plugin/Kotoba3DS.plgInfo > plugin/stub-2MiB.plgInfo
-          grep -q '^MemorySize: 2MiB' plugin/stub-2MiB.plgInfo
-          3gxtool -s plugin/Kotoba3DS-stub.elf plugin/stub-2MiB.plgInfo plugin/Kotoba3DS-stub-2MiB.3gx
-          for f in plugin/Kotoba3DS-stub-5MiB.3gx plugin/Kotoba3DS-stub-2MiB.3gx; do
-            magic=$(head -c 8 "$f")
-            echo "plugin format: $magic, $(stat -c %s "$f") bytes ($f)"
-            if [ "$magic" != '3GX$0002' ]; then echo "::error title=stub format::$f is $magic"; exit 1; fi
-          done
-          # what Luma maps for the code (text + data + bss, page-rounded + a page): the rest of the block is the heap
-          arm-none-eabi-size plugin/Kotoba3DS-stub.elf
-          exe=$(arm-none-eabi-size plugin/Kotoba3DS-stub.elf | awk 'NR==2 {print $4}')
-          exe=$(( (exe + 0x2000) & ~0xFFF ))
-          echo "stub code block ~$((exe / 1024)) KB: heap ~$(( (2097152 - exe) / 1024 )) KB at 2 MiB, ~$(( (5242880 - exe) / 1024 )) KB at 5 MiB"
-          if [ $exe -gt $((2097152 - 262144)) ]; then
-            echo "::error title=stub 2MiB::code block $exe bytes leaves under 256 KB of heap in 2 MiB"; exit 1
           fi
 
       - name: Symbolize crash addresses
@@ -91,10 +56,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Kotoba3DS-plugin
-          # the stubs exist on alpha only (the files land at the artifact's root either way)
-          path: |
-            plugin/Kotoba3DS.3gx
-            plugin/Kotoba3DS-stub-*.3gx
+          path: plugin/Kotoba3DS.3gx
 
   dictionary:
     runs-on: ubuntu-latest
@@ -304,7 +266,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release delete alpha-dev --yes --cleanup-tag 2>/dev/null || true
-          gh release create alpha-dev out/Kotoba3DS*.3gx out/*.ktd out/*.ktm --target "$GITHUB_SHA" --prerelease --latest=false \
+          gh release create alpha-dev out/Kotoba3DS.3gx out/*.ktd out/*.ktm --target "$GITHUB_SHA" --prerelease --latest=false \
             --title "DEVELOPMENT ONLY - do not use (alpha, experimental)" \
             --notes "NOT FOR TESTERS OR PLAYERS. This is the developer's experimental alpha build (${GITHUB_SHA::7}, $(date -u +%Y-%m-%d)), published only so it can be copied onto the developer's own SD card. It may crash, run slowly (it benchmarks every reader on each read) or need files that aren't in any release. For trying new features use the \"Kotoba3DS test build\" pre-release; for normal use, the latest release."
 

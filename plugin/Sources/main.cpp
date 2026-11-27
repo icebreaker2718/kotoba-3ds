@@ -2578,75 +2578,8 @@ static bool OnMenuOpening() {  // CTRPF's menu key (Select) opens the plugin's o
     return false;
 }
 
-// the memory fix's plan and counts (GiveGameItsMemory, below; DiagWatch reads the counts)
-static kt::memshare::Plan g_memPlan;
-static kt::memshare::Counts g_memCounts;
-
-#ifdef KT_ALPHA_DIAG
-// ---------------------------------------------------------------------------
-// Alpha-only diagnostic (built only on the alpha branch, CI's -DKT_ALPHA_DIAG; never on test or main): what the game
-// uses of its resource limit while it plays, for crashes in the game itself (ErrDisp, no dump). Once a second, from
-// the frame callback: the game's committed memory and its threads / events / mutexes / semaphores / timers / shared
-// memory / address arbiters against their limits (the plugin's share included: the plugin's own calls aren't
-// patched). A "diag:" line when one of them reaches a new high (memory by 1 MB+), at most one line every 2 s unless
-// something is within 1 MB / 1 of its limit; also when the patched memory answers have been used again.
-// ---------------------------------------------------------------------------
-static void DiagWatch() {
-    static Handle rl = 0;
-    static bool started = false, failed = false;
-    static s64 limits[10], highs[10];
-    static u64 next = 0, lastLine = 0;
-    static kt::memshare::Counts lastCounts;
-    static const char *const kNames[10] = {"priority", "memory", "threads", "events", "mutexes", "semaphores",
-                                           "timers", "shared memory", "arbiters", "cpu time"};
-    if (failed) return;
-    const u64 now = osGetTime();
-    if (now < next) return;
-    next = now + 1000;
-    ResourceLimitType types[10];
-    for (int i = 0; i < 10; i++) types[i] = (ResourceLimitType)i;
-    if (!started) {
-        started = true;
-        if (R_FAILED(svcGetResourceLimit(&rl, CUR_PROCESS_HANDLE)) ||
-            R_FAILED(svcGetResourceLimitLimitValues(limits, rl, types, 10))) {
-            failed = true;
-            LogOcr("diag: resource limit can't be read");
-            return;
-        }
-        for (int i = 0; i < 10; i++) highs[i] = -1;
-    }
-    s64 cur[10];
-    if (R_FAILED(svcGetResourceLimitCurrentValues(cur, rl, types, 10))) return;
-    bool higher = false, close = false;
-    for (int i = 1; i <= 8; i++) {
-        const s64 step = i == 1 ? 1024 * 1024 : 1;
-        if (highs[i] < 0 || cur[i] >= highs[i] + step) higher = true;
-        if (cur[i] > highs[i]) highs[i] = cur[i];
-        if (limits[i] > 0 && limits[i] - cur[i] <= (i == 1 ? 1024 * 1024 : 1)) close = true;
-    }
-    const kt::memshare::Counts c = g_memCounts;
-    const bool asked = c.systemInfo != lastCounts.systemInfo || c.processInfo != lastCounts.processInfo ||
-                       c.limitValues != lastCounts.limitValues || c.currentValues != lastCounts.currentValues;
-    if (!(higher && (close || now - lastLine >= 2000)) && !asked) return;
-    lastLine = now;
-    lastCounts = c;
-    std::string line = Utils::Format("diag: game uses memory %ld of %ld KB (free %ld KB)", (long)(cur[1] / 1024),
-                                     (long)(limits[1] / 1024), (long)((limits[1] - cur[1]) / 1024));
-    for (int i = 2; i <= 8; i++)
-        line += Utils::Format(", %s %ld/%ld", kNames[i], (long)cur[i], (long)limits[i]);
-    line += Utils::Format("; memory answers changed so far: system info %lu, process info %lu, limit %lu, in use %lu",
-                          (unsigned long)c.systemInfo, (unsigned long)c.processInfo, (unsigned long)c.limitValues,
-                          (unsigned long)c.currentValues);
-    if (close) line += " [NEAR A LIMIT]";
-    LogOcr(line);
-}
-#endif
-
 static void Watcher(void) {
     if (SleepRequested()) return;  // the console is going to sleep: not now
-#ifdef KT_ALPHA_DIAG
-    DiagWatch();
-#endif
     if (g_shotDeferred) {
         g_shotDeferred = false;
         StartScreenshotThread();
@@ -2712,7 +2645,8 @@ static void LogBootMemory() {
 // ---------------------------------------------------------------------------
 static s64 g_commitLimitBefore = -1;  // to put back when the game exits
 
-// g_memPlan, g_memCounts: above DiagWatch
+static kt::memshare::Plan g_memPlan;
+static kt::memshare::Counts g_memCounts;
 
 extern "C" {
 void KotobaHookGetSystemInfo(void);
@@ -2829,12 +2763,10 @@ static void GiveGameItsMemory() {
     svcGetResourceLimitCurrentValues(&committed, rl, &t, 1);
     const u32 codeSize = Process::GetTextSize() + Process::GetRoDataSize() + Process::GetRwDataSize();
     std::string why;
-    // only for a game whose commit already holds the plugin's block, with room left in the app region
+    // only for a game told it has at most 64 MB (the SDK's cap), whose commit already holds the
+    // plugin's block, with room left in the app region
     const s64 want = (s64)appMemAlloc + plugin;
-    // Games in the New 3DS's large memory mode (APPMEMALLOC above 64 MB, e.g. Bowser's Inside Story DX
-    // 00040000001CA900) come with the limit already at APPMEMALLOC + the share (Luma lowers APPMEMALLOC instead): no
-    // raise, only step 2. Before 2026-11-27 they were left as they were and counted the share twice.
-    if (appMemAlloc == 0) why = "no APPMEMALLOC";
+    if (appMemAlloc == 0 || appMemAlloc > 0x4000000) why = "APPMEMALLOC above 64 MB";
     else if (limit < (s64)appMemAlloc) why = "unusual commit limit";
     else if (committed < (s64)(codeSize + plugin)) why = "the plugin isn't counted in the game's memory";
     else if (want > appRegion) why = "no room in the app region";
@@ -2873,80 +2805,14 @@ void OnProcessExit(void) {
     }
 }
 
-#ifdef KT_ALPHA_DIAG
-// Alpha-only (never on test or main): the game's code around an address its error screen named, copied to the SD card
-// at boot so it can be disassembled on a PC. Bowser's Inside Story DX, ErrDisp 0xD8E007F7 (kernel: invalid handle) at
-// 0x0050409c, 2026-11-27. 2 KB before the address (the function it is in) and 1 KB after, from the game's code
-// (mapped at 0x00100000) into /3ds/kotoba3ds/code_<title>_<address>.bin.
-static void DumpCrashCode() {
-    struct Spot {
-        const char *title;
-        u32 addr;
-    };
-    static const Spot kSpots[] = {{"00040000001CA900", 0x0050409C}};
-    static u8 copy[0xC00];  // copied out of the game's code first: the SD write gets a plain data buffer
-    const std::string tid = TitleIdHex();
-    const u32 textStart = 0x00100000, textEnd = textStart + Process::GetTextSize();
-    for (const Spot &s : kSpots) {
-        if (tid != s.title) continue;
-        if (s.addr < textStart || s.addr >= textEnd) {
-            LogOcr(Utils::Format("diag: %08lX is outside the game's code (%08lX-%08lX): nothing written",
-                                 (unsigned long)s.addr, (unsigned long)textStart, (unsigned long)textEnd));
-            continue;
-        }
-        u32 from = s.addr - 0x800, to = s.addr + 0x400;
-        if (from < textStart) from = textStart;
-        if (to > textEnd) to = textEnd;
-        memcpy(copy, (const void *)from, to - from);
-        const std::string path = Utils::Format("%s/code_%s_%08lX.bin", kRootDir, s.title, (unsigned long)s.addr);
-        File f;
-        bool ok = File::Open(f, path, File::WRITE | File::CREATE | File::TRUNCATE) == File::SUCCESS &&
-                  f.Write(copy, to - from) == File::SUCCESS;
-        f.Close();
-        const u32 *at = (const u32 *)s.addr;
-        LogOcr(Utils::Format("diag: game code %08lX-%08lX (around %08lX: %08lX %08lX %08lX) %s %s; code %lu KB, "
-                             "rodata %lu KB, data %lu KB",
-                             (unsigned long)from, (unsigned long)to, (unsigned long)s.addr, (unsigned long)at[-1],
-                             (unsigned long)at[0], (unsigned long)at[1], ok ? "written to" : "COULD NOT be written to",
-                             path.c_str(), (unsigned long)(Process::GetTextSize() / 1024),
-                             (unsigned long)(Process::GetRoDataSize() / 1024),
-                             (unsigned long)(Process::GetRwDataSize() / 1024)));
-    }
-}
-#endif
-
 void PatchProcess(FwkSettings &settings) {
     LogBootMemory();
     GiveGameItsMemory();
-#ifdef KT_ALPHA_DIAG
-    DumpCrashCode();
-#endif
     settings.AllowActionReplay = false;
     settings.AllowSearchEngine = false;
 }
 
-#ifdef KT_STUB
-// Alpha-only test plugin (CI builds it on the alpha branch only, with KT_ALPHA_DIAG, as Kotoba3DS-stub-5MiB.3gx and
-// -2MiB.3gx): the same start as the real plugin (PatchProcess: boot lines, the memory fix, the code copy) and then
-// nothing but CTRPF's own idle loop: no dictionary, models, files kept open, threads, hotkeys or frame callback. For
-// telling the plugin's memory block apart from what the plugin does (Bowser's Inside Story DX, 2026-11-27).
-int main(void) {
-    LogOcr(Utils::Format("start: game %s, STUB test plugin (memory fix only, nothing else runs), plugin heap %lu KB, "
-                         "heap free %lu KB",
-                         TitleIdHex().c_str(), (unsigned long)(__ctru_heap_size / 1024),
-                         (unsigned long)(HeapFree() / 1024)));
-    PluginMenu *menu = new PluginMenu("Kotoba3DS stub", 1, 2, 0, "Test build: the memory fix and nothing else.");
-    menu->SynchronizeWithFrame(true);
-    {  // as the real plugin: CTRPF's own screenshot hotkey off
-        bool *enabled = nullptr;
-        u32 *hotkey = nullptr;
-        PluginMenu::ScreenshotSettings(&enabled, &hotkey);
-        if (enabled) *enabled = false;
-    }
-    menu->Run();
-    return 0;
-}
-#else
+
 int main(void) {
     PluginMenu *menu = new PluginMenu("Kotoba3DS", 1, 2, 0,  // the version: as in Kotoba3DS.plgInfo
                                       "In-game Japanese dictionary that reads the screen and saves words for Anki.");
@@ -2972,6 +2838,5 @@ int main(void) {
     // plugin heap may already be unusable. See the note at Leaky().
     return 0;
 }
-#endif  // KT_STUB
 
 }  // namespace CTRPluginFramework

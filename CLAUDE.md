@@ -568,6 +568,19 @@ works on the code.
     + 1 KB to `/3ds/kotoba3ds/code_00040000001CA900_0050409C.bin` and a "diag: game code ..." line (the words around the
     address, code / rodata / data sizes). Disassemble it on the PC (arm-none-eabi-objdump -b binary -m arm
     --adjust-vma=0x0050389C).
+  - Console results (2026-11-27): the 5 MiB stub crashes at the same cutscene, and so does the 2 MiB stub (the game
+    3 MiB richer). So it isn't anything Kotoba3DS does while running; whether a smaller block would ever be enough, or
+    CTRPF / any plugin at all is the cause, is open. C wrote nothing: "0050409C is outside the game's code
+    (00100000-00389000)": the address is in code loaded later (most likely a CRO module mapped above the exe), so the
+    copy has to wait until something is mapped there (offered: the full plugin's once-a-second check queries
+    0x0050409c and copies it the first time it's mapped, with the module's range; not built yet, owner wants it later).
+- **Parked on branch `alpha-bisdx-crash` (575bcaf; owner, 2026-11-27: "revert my SD card to the alpha branch that was
+  finished yesterday ... remove all the diagnostics")**: the large-memory-mode change to GiveGameItsMemory (9b79a78 /
+  acdf33f), DiagWatch, the stub builds and DumpCrashCode. `alpha`'s code is back to a47d417 (the 2026-11-26 features,
+  no diagnostics); only this file keeps the notes. Pick the work up from that branch. CI publishes alpha-dev from
+  `alpha` only. The owner's card: default.3gx = the reverted alpha; `/luma/plugins/00040000001CA900/` (stub folder,
+  couldn't be deleted from the session) holds a copy of the same alpha build, and `/luma/plugins/stubs/` the two stubs
+  (Luma never looks there): the owner may delete both folders.
 - Known issue (owner, 2026-11-01; not new): game audio is sometimes silent after a lookup closes, for a few seconds or
   until the game gets input. Likely the game's sound engine after CTRPF's pause froze all its threads (the DSP plays out
   its queued buffers meanwhile); the screenshot write right after resume (75-400 ms of SD writes) is a smaller suspect.
